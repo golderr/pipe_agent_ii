@@ -1,0 +1,42 @@
+market: los_angeles
+display_name: "Los Angeles"
+bounds:
+  jurisdictions:
+    - city_of_los_angeles
+
+sources:
+  - name: ladbs_permits
+    collector: socrata
+    endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
+    schedule: weekly
+    role: "update+discovery"
+
+  - name: ladbs_new_housing
+    collector: socrata
+    endpoint: "https://data.lacity.org/resource/cpkv-aajs.json"
+    schedule: weekly
+    role: "discovery"
+
+  - name: ladbs_cofo
+    collector: socrata
+    endpoint: "https://data.lacity.org/resource/3f9m-afei.json"
+    schedule: weekly
+    role: "update"
+
+  - name: lahd_affordable
+    collector: socrata
+    endpoint: "https://data.lacity.org/resource/mymu-zi3s.json"
+    schedule: monthly
+    role: "discovery+update"
+
+  - name: la_case_reports
+    collector: pdf_parser
+    endpoint: "https://planning.lacity.gov/dcpapi/general/biweeklycase/doc/{id}"
+    schedule: biweekly
+    role: "discovery"
+
+  - name: zimas_pdis
+    collector: scraper
+    endpoint: "https://planning.lacity.gov/pdiscaseinfo/Search/casenumber/{case_number}"
+    mode: enrichment_only
+    role: "enrichment"

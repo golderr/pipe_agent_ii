@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from urllib.parse import urlparse
+
+from pydantic import Field, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def normalize_database_url(database_url: str) -> str:
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    app_env: str = "development"
+    log_level: str = "INFO"
+    sql_echo: bool = False
+
+    supabase_url: str | None = None
+    supabase_project_ref: str | None = None
+    database_url: str | None = None
+    supabase_anon_key: str | None = None
+    supabase_service_role_key: str | None = None
+    socrata_app_token: str | None = None
+
+    data_dir: Path = Field(default_factory=lambda: Path("data"))
+    seed_dir: Path = Field(default_factory=lambda: Path("data/seed"))
+    output_dir: Path = Field(default_factory=lambda: Path("data/output"))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def project_ref(self) -> str | None:
+        if self.supabase_project_ref:
+            return self.supabase_project_ref
+        if not self.supabase_url:
+            return None
+        parsed = urlparse(self.supabase_url)
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return None
+        return hostname.split(".")[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def has_database_url(self) -> bool:
+        return bool(self.database_url)
+
+    def require_database_url(self) -> str:
+        if not self.database_url:
+            raise RuntimeError(
+                "DATABASE_URL is not configured. Paste the direct Postgres connection string "
+                "from Supabase into .env."
+            )
+        return normalize_database_url(self.database_url)
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

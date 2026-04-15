@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tcg-pipeline"
+version = "0.1.0"
+description = "Automated real estate development pipeline tracker."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.16,<2.0",
+  "geoalchemy2>=0.17,<1.0",
+  "httpx>=0.28,<1.0",
+  "openpyxl>=3.1,<4.0",
+  "pdfplumber>=0.11,<1.0",
+  "psycopg[binary]>=3.2,<4.0",
+  "pydantic>=2.11,<3.0",
+  "pydantic-settings>=2.10,<3.0",
+  "PyYAML>=6.0,<7.0",
+  "rapidfuzz>=3.13,<4.0",
+  "sqlalchemy>=2.0.41,<3.0",
+  "tenacity>=9.1,<10.0",
+  "typer>=0.16,<1.0",
+  "usaddress>=0.5.16,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9.0",
+  "pytest-httpx>=0.35,<1.0",
+  "respx>=0.22,<1.0",
+  "ruff>=0.11,<1.0",
+]
+
+[project.scripts]
+tcg-pipeline = "tcg_pipeline.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tcg_pipeline"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

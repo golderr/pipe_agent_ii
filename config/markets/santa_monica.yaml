@@ -1,0 +1,24 @@
+market: santa_monica
+display_name: "Santa Monica"
+bounds:
+  jurisdictions:
+    - city_of_santa_monica
+
+sources:
+  - name: sm_dev_tracking
+    collector: pdf_parser
+    endpoint: "https://www.santamonica.gov/media/Document%20Library/Topic%20Explainers/Planning%20Resources/{MM}.{YYYY}%20({MON})%20Development%20Tracking%20Projects%20List.pdf"
+    schedule: monthly
+    role: "discovery+update"
+
+  - name: sm_ministerial
+    collector: pdf_parser
+    endpoint: "https://www.santamonica.gov/media/Document%20Library/Topic%20Explainers/Santa%20Monica%27s%20Housing%20Progress/Status%20of%20Ministerial%20Housing%20Applications_{M.DD.YY}.pdf"
+    schedule: monthly
+    role: "update"
+
+  - name: sm_active_permits
+    collector: socrata
+    endpoint: "https://data.smgov.net/resource/kpzy-s8rg.json"
+    schedule: weekly
+    role: "update"
