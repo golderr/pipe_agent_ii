@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -9,6 +10,7 @@ from tcg_pipeline.db.seed import (
     ingest_pipedream_workbooks,
     persist_pipedream_import_results,
 )
+from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
 from tcg_pipeline.settings import get_settings
 from tcg_pipeline.utils.logging import configure_logging
@@ -76,11 +78,14 @@ def seed_pipedream(
     workbook_paths: list[Path],
     market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
     source_name: str = typer.Option("pipedream", help="Source name stored on source records."),
-    allowed_city: list[str] = typer.Option(
-        None,
-        help="Optional city filter; may be provided multiple times.",
+    allowed_city: Annotated[
+        list[str] | None,
+        typer.Option(help="Optional city filter; may be provided multiple times."),
+    ] = None,
+    dry_run: bool = typer.Option(
+        False,
+        help="Preview import results without writing to the database.",
     ),
-    dry_run: bool = typer.Option(False, help="Preview import results without writing to the database."),
 ) -> None:
     """Ingest one or more Pipedream workbooks and optionally persist them."""
     import_results = ingest_pipedream_workbooks(
@@ -106,6 +111,30 @@ def seed_pipedream(
     typer.echo(f"Unresolved relationships: {persist_result.unresolved_relationship_count}")
 
 
+@app.command()
+def preview_costar(
+    workbook_paths: list[Path],
+    market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
+    source_name: str = typer.Option("costar", help="Source name stored on source records."),
+    allowed_city: Annotated[
+        list[str] | None,
+        typer.Option(help="Optional city filter; may be provided multiple times."),
+    ] = None,
+) -> None:
+    """Preview one or more CoStar workbooks without writing to the database."""
+    resolved_workbook_paths = _expand_workbook_inputs(workbook_paths, suffix=".xlsx")
+    if not resolved_workbook_paths:
+        raise typer.BadParameter("No .xlsx CoStar workbooks found in the provided paths.")
+
+    ingester = CoStarIngester(
+        market=market,
+        source_name=source_name,
+        allowed_cities=allowed_city or None,
+    )
+    result = ingester.ingest_workbooks(resolved_workbook_paths)
+    _echo_costar_import_summary(result)
+
+
 def _echo_pipedream_import_summary(import_results: list[PipedreamImportResult]) -> None:
     total_imported = sum(result.imported_count for result in import_results)
     total_dismissed = sum(result.dismissed_count for result in import_results)
@@ -129,3 +158,30 @@ def _echo_pipedream_import_summary(import_results: list[PipedreamImportResult]) 
 
     for issue_type, count in sorted(aggregated_issue_counts.items()):
         typer.echo(f"  {issue_type}: {count}")
+
+
+def _echo_costar_import_summary(result: CoStarImportResult) -> None:
+    typer.echo(f"Workbooks: {len(result.source_paths)}")
+    typer.echo(f"Imported projects: {result.imported_count}")
+    typer.echo(f"Duplicate property ids: {result.duplicate_count}")
+    typer.echo(f"Skipped property ids: {len(result.skipped_property_ids)}")
+    typer.echo(f"Missing PropertyID rows: {result.missing_property_id_rows}")
+    typer.echo(f"Issues: {result.issue_count}")
+    for issue_type, count in sorted(result.issue_counts.items()):
+        typer.echo(f"  {issue_type}: {count}")
+
+
+def _expand_workbook_inputs(paths: list[Path], *, suffix: str) -> list[Path]:
+    expanded_paths: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            expanded_paths.extend(
+                sorted(
+                    child
+                    for child in path.glob(f"*{suffix}")
+                    if child.is_file()
+                )
+            )
+            continue
+        expanded_paths.append(path)
+    return expanded_paths

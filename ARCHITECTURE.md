@@ -2,8 +2,8 @@
 
 > **Living document.** This file is the single source of truth for the project. Claude Code / Codex should read this at the start of every session, update it when the plan changes, and mark build steps complete as code is committed. Use commits as checkpoints to review the plan and evaluate if anything changed and should be recorded in this file.
 
-**Last updated:** 2026-04-15T17:45
-**Status:** Build in progress — foundation scaffolded, initial schema applied, Pipedream ingester implemented, and the Pipedream seed/persistence path is in place ahead of CoStar work.
+**Last updated:** 2026-04-15T17:59
+**Status:** Build in progress — foundation scaffolded, initial schema applied, Pipedream import/persistence is in place, and the CoStar ingester is implemented with header-based multi-file parsing and diagnostics.
 - ✅ Pipedream field mapping (81 fields)
 - ✅ CoStar field mapping (287 columns, MF + non-MF)
 - ✅ Master schema finalized
@@ -262,7 +262,7 @@ When seeding, Pipedream is ingested first, CoStar second. For each CoStar record
 2. Fall back to address matching if no APN match
 3. If matched: merge CoStar fields into existing Pipedream record, filling gaps only (never overwrite Pipedream data)
 4. If no match: create new record from CoStar data alone
-5. Fields CoStar uniquely contributes on merge: `ProjectIdentifier(type=apn)`, `ProjectIdentifier(type=costar_property_id)`, `zoning`, `owner`, `true_owner`, `acres`, `parking_spaces`, `style`, `total_sf`, `date_construction_start`, `costar_submarket`, `building_class`
+5. Fields CoStar uniquely contributes on merge: `ProjectIdentifier(type=apn)`, `ProjectIdentifier(type=costar_property_id)`, `zoning`, `owner`, `true_owner`, `acres`, `parking_spaces`, `style`, `total_sf`, `date_construction_start`, `costar_submarket`
 
 **Deduplication across CoStar files:**
 Multiple CoStar exports may contain the same project. Deduplicate on `PropertyID` (CoStar's internal ID) — if the same PropertyID appears in two files, take the first occurrence and skip the duplicate.
@@ -438,7 +438,7 @@ Only fields relevant to pipeline tracking are listed. CoStar has 287 columns tot
 | CoStar Header | Description | MF Pop. | Non-MF Pop. | Maps to DB field |
 |--------------|-------------|---------|-------------|-----------------|
 | Property Type | "Multifamily" for MF; "Office", "Retail", "Hospitality", etc. for non-MF | 100% | 100% | `property_type` |
-| Secondary Type | "Apartments" for MF; "Hotel", "Storefront", "Loft/Creative Space", etc. | ~99% | varies | `secondary_type` |
+| Secondary Type | "Apartments" for MF; "Hotel", "Storefront", "Loft/Creative Space", etc. | ~99% | varies | raw payload only (also used to derive `product_type`) |
 | Number Of Units | Total residential unit count | 100% | 3% (student housing only) | `total_units` |
 | RBA | Rentable Building Area (SF) | 78% | 100% | `total_sf` |
 | Number Of Stories | Stories | 74% | 96% | `stories` |
@@ -447,7 +447,7 @@ Only fields relevant to pipeline tracking are listed. CoStar has 287 columns tot
 | Number Of Parking Spaces | Parking | sparse | sparse | `parking_spaces` |
 | Zoning | Zoning designation | 52% | varies | `zoning` |
 | Rooms | Hotel rooms | N/A | 37% (hospitality) | `hotel_keys` |
-| Building Class | A/B/C rating | N/A | ~80% | `building_class` |
+| Building Class | A/B/C rating | N/A | ~80% | raw payload only (not yet promoted to canonical schema) |
 
 **Bed mix (MF only):**
 | CoStar Header | Maps to DB field |
@@ -1754,7 +1754,7 @@ On each incoming record:
 | 1.4 | Set up project structure (Python, deps, config) + create new Supabase project | `done` | Supabase project created (`pipe-agent-ii`). Repo scaffold, `.env`, package config, SQLAlchemy models, local `.venv`, and Alembic environment are in place. Initial Alembic migration applied successfully to Supabase using the session pooler connection. `postgis` and `pg_trgm` enabled. |
 | 1.5 | Build address normalization module | `done` | Implemented in `src/tcg_pipeline/matching/normalizer.py` with `usaddress` parsing, unit stripping, suffix/directional normalization, numbered-street normalization, address-range parsing, and initial LA city alias handling. Covered by targeted pytest cases. |
 | 1.6 | Build Pipedream ingester (seeder) | `done` | `src/tcg_pipeline/ingesters/pipedream.py` parses `DataStorage`, maps rows into ORM-ready project bundles, unrolls status history, stages project relationships, captures dismissed delete-flag rows, records diagnostics for invalid source values, and supports CLI preview via `tcg-pipeline preview-pipedream`. |
-| 1.7 | Build CoStar ingester (seeder) | `not_started` | |
+| 1.7 | Build CoStar ingester (seeder) | `done` | `src/tcg_pipeline/ingesters/costar.py` ingests `.xlsx` exports by header name, deduplicates across files on `PropertyID`, normalizes CoStar city/ZIP/date formats, captures diagnostics for invalid source values, and supports directory-based CLI preview via `tcg-pipeline preview-costar`. |
 | 1.8 | Seed LA market with CoStar + Pipedream data | `not_started` | First real data in the system |
 
 ### Phase 2: First Public Source + Matching
@@ -1843,6 +1843,7 @@ On each incoming record:
 | 2026-04-15 | CoStar seeder accepts a folder of export files, not one stitched file | CoStar caps exports at 500 rows. Each file is read independently with its own header mapping. Dedup across files on PropertyID. |
 | 2026-04-15 | CoStar "Abandoned" projects imported as Inactive, not actively tracked | 39% of CoStar export is Abandoned. Useful as history but shouldn't generate review queue noise. |
 | 2026-04-15 | CoStar bed mix percentages are 0-100 scale; Pipedream uses 0-1 | Normalize to 0-1 on import. Store as 0.0-1.0 in database. |
+| 2026-04-15 | CoStar `Secondary Type` and `Building Class` stay in source payload for now | They are useful source details, but the current canonical `Project` schema only needs `property_type` plus derived `product_type`. Keep the raw source values on `ProjectSourceRecord` until a concrete downstream use justifies schema expansion. |
 | 2026-04-15 | Source workflow analysis complete — all 6 Compound sources verified | All fields Compound claimed are confirmed extractable. Detailed access methods, endpoints, and workflows documented in Section 4b. |
 | 2026-04-15 | ZIMAS is enrichment-only, not discovery | No programmatic address→case lookup exists. Case numbers must come from other sources (LA Case Reports, LADBS, Pipedream URLs). PDIS pages are scrapeable once case number is known. |
 | 2026-04-15 | LA Case Reports is the primary LA discovery source | Biweekly PDFs via API at planning.lacity.gov/dcpapi/general/biweeklycase/doc/{id}. Must be PDF-parsed; no structured API. ~81/421 cases are housing-relevant per biweekly period. |

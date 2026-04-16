@@ -4,7 +4,7 @@ Automated real estate development pipeline tracker for seeding, collecting, matc
 
 ## Current Status
 
-This repository is scaffolded through Step `1.6` plus the pre-`1.7` seed/persistence hardening:
+This repository is scaffolded through Step `1.7`:
 
 - Python project structure
 - typed settings/config loading
@@ -14,6 +14,7 @@ This repository is scaffolded through Step `1.6` plus the pre-`1.7` seed/persist
 - initial Supabase schema applied with PostGIS and `pg_trgm`
 - address normalization module with targeted tests
 - Pipedream workbook ingester with diagnostics, persistence helpers, and CLI preview/seed commands
+- CoStar workbook ingester with header-name mapping, cross-file `PropertyID` dedupe, and CLI preview support
 
 ## Local Setup
 
@@ -49,4 +50,5 @@ tcg-pipeline doctor
 pytest tests/test_normalizer.py -q
 tcg-pipeline preview-pipedream .\data\seed\your_file.xlsm --market los_angeles
 tcg-pipeline seed-pipedream .\data\seed\file1.xlsm .\data\seed\file2.xlsm --market los_angeles --dry-run
+tcg-pipeline preview-costar .\data\seed\costar\ --market los_angeles
 ```
