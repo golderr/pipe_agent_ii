@@ -19,6 +19,8 @@ This repository is scaffolded through Step `1.8` seed persistence:
 - market YAML loading for configured sources
 - generic Socrata collector plus first LADBS adapter (`hbkd-qubn`)
 - first-pass public source matching/review persistence (`SourceRun`, `ProjectSourceRecord`, `ReviewItem`)
+- working LADBS Socrata completeness and recall-audit docs under `docs/source_specs/` and `docs/audits/`
+- first LADBS recall-audit results showing `Bldg-New` is a useful narrow slice, but not sufficient as the full LADBS lifecycle strategy
 
 ## Local Setup
 
