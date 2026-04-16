@@ -323,6 +323,7 @@ def collect_source(
             raw_records=raw_records,
             collection_mode=request.mode.value,
             incremental_since=request.updated_since,
+            create_new_candidates=source_config.create_new_candidates,
         )
         session.commit()
 

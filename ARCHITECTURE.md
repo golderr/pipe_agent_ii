@@ -92,6 +92,12 @@ Runs once when standing up a new market. Two jobs:
   soql_filter: "permit_type='Bldg-New'"
 ```
 
+Sources that are useful for tracked-project updates or ambiguous-match surfacing, but too noisy for standalone discovery, can also declare:
+```yaml
+create_new_candidates: false
+```
+That suppresses unmatched `new_candidate` review items for the source while still allowing matched updates and `possible_match` review items.
+
 **Example market config — Los Angeles (verified endpoints):**
 ```yaml
 market: los_angeles
@@ -111,6 +117,17 @@ sources:
     schedule: weekly
     soql_filter: "permit_type='Bldg-New'"
     role: update + discovery
+
+  - name: ladbs_permit_activity
+    collector: socrata
+    adapter: ladbs_permit_activity
+    endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
+    schedule: weekly
+    soql_filter: "permit_type != 'Bldg-New'"
+    create_new_candidates: false
+    role: update (supplemental permit activity for tracked projects / possible matches)
 
   - name: ladbs_new_housing
     collector: socrata
@@ -1872,7 +1889,7 @@ On each incoming record:
 |------|------|--------|-------|
 | 3.0 | Configure LADBS new housing sibling source (`cpkv-aajs`) | `done` | `src/tcg_pipeline/source_adapters/ladbs.py` now maps `cpkv-aajs` rows into `RawRecord`s with permit/APN identifiers, unit detail, and `location_1` coordinates. Live preview verified on 2026-04-16. Attribution-only recall rerun is documented in `docs/audits/ladbs_recall_audit_hbkd_cpkv_2026-04-16.md`. |
 | 3.0a | Configure LADBS CofO sibling source (`3f9m-afei`) | `done` | `src/tcg_pipeline/source_adapters/ladbs.py` now maps `3f9m-afei` rows into `RawRecord`s with CofO completion evidence, permit/APN identifiers, and coordinates where available. Live preview verified on 2026-04-16. |
-| 3.0b | Model broader `hbkd-qubn` permit activity separately from the narrow `Bldg-New` slice | `not_started` | The `hbkd + cpkv` audit supplement shows broader-only UC recall is dominated by general permit activity (`Electrical`, `Plumbing`, `Bldg-Demolition`, `Bldg-Alter/Repair`, etc.), not hidden `Bldg-New` rows. Add a separate activity source or equivalent chaining logic before the next full LADBS family rerun. |
+| 3.0b | Model broader `hbkd-qubn` permit activity separately from the narrow `Bldg-New` slice | `done` | `config/markets/los_angeles.yaml` now declares `ladbs_permit_activity`, a second `hbkd-qubn` source filtered to non-`Bldg-New` permits and mapped through a dedicated adapter with no direct status evidence. The collect path now honors `create_new_candidates: false` for update/enrichment-style sources so unmatched activity rows do not flood the review queue, while `possible_match` items still surface. Live `preview-source` and `collect-source --dry-run` verification passed on 2026-04-16. |
 | 3.1 | Build PDF parsing utilities + source-specific adapters | `not_started` | Shared PDF helpers are reusable, but each source still gets its own parser logic. Start with `pdfplumber`; use `tabula-py` only where it clearly performs better. |
 | 3.2 | Configure LA Case Reports source | `not_started` | Biweekly PDF API: planning.lacity.gov/dcpapi/general/biweeklycase/doc/{id}. Filter for housing-relevant request types. |
 | 3.3 | Build ZIMAS/PDIS scraper (enrichment mode) | `not_started` | Accepts case number → scrapes PDIS page → returns structured fields. NOT for bulk discovery. |
@@ -1956,6 +1973,7 @@ On each incoming record:
 | 2026-04-16 | First completeness pass uses current-row source metadata plus row hash; full source-row version history is deferred | The immediate goal is reliable incremental cursors, change detection, and reconciliation support. Persisting source-system row id, source timestamps, and a row hash captures most of the value with lower schema and workflow complexity than a full version table. If researchers later need historical replay of source-row contents, add explicit versioning as a follow-up. |
 | 2026-04-16 | Run a source-attribution audit on `hbkd-qubn + cpkv-aajs` before adding CofO evidence | Measuring `cpkv-aajs` on its own keeps recall attribution clean. The supplement audit showed `cpkv-aajs` is valuable primarily for APN/coordinate enrichment and modest APN-based recovery, not as the main standalone LADBS recall fix. |
 | 2026-04-16 | Treat broader `hbkd-qubn` recovery as permit activity, not as equivalent `Bldg-New` evidence | On the current `Under Construction` snapshot, broader-only `hbkd-qubn` matches are dominated by `Electrical`, `Plumbing`, `Bldg-Demolition`, `Bldg-Alter/Repair`, and related permit activity. Keep `ladbs_permits` narrow and model broader `hbkd` coverage separately instead of widening the existing source and reusing the same status evidence semantics. |
+| 2026-04-16 | Allow source-level suppression of unmatched new-candidate review items for noisy update/enrichment feeds | Some sources are valuable for updating tracked projects or surfacing ambiguous matches but are too noisy to treat as standalone new-project discovery. `create_new_candidates: false` preserves matched updates and `possible_match` review items while preventing review-queue spam from unmatched records. |
 | 2026-04-16 | Only final CofO issuance with a real `cofo_issue_date` emits direct `Complete` evidence | `3f9m-afei` rows should only emit `certificate_of_occupancy_issued` when `latest_status` is final `CofO Issued` and a real issue date is present. Corrected/reactivated/superseded rows, plus any future partial/temporary CofO statuses, remain source detail until their semantics are explicitly modeled. |
 | 2026-04-16 | Defer manual triage of the 75-project `Under Construction` not-found bucket until after `cpkv-aajs` and `3f9m-afei` are implemented | The first LADBS recall audit already proved the current `Bldg-New` filter is too narrow. Detailed triage of the remaining misses will be cheaper and more informative once sibling LADBS adapters are live and the audit is rerun with better bundle coverage. |
 | 2026-04-15 | Use explicit seed-scope filters on city-scoped imports | Seed workbooks can contain out-of-scope rows. Current LA Pipedream and CoStar runs should use `--allowed-city "Los Angeles"` so the City of LA dataset is not contaminated during seed. |

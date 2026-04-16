@@ -7,6 +7,7 @@ def test_load_market_config_reads_ladbs_source_metadata() -> None:
     config = load_market_config("los_angeles")
 
     source = config.get_source("ladbs_permits")
+    activity_source = config.get_source("ladbs_permit_activity")
     housing_source = config.get_source("ladbs_new_housing")
     cofo_source = config.get_source("ladbs_cofo")
 
@@ -17,6 +18,12 @@ def test_load_market_config_reads_ladbs_source_metadata() -> None:
     assert source.coverage_scope == "city"
     assert source.matching_keys == ["permit_number", "canonical_address"]
     assert source.effective_where == "permit_type='Bldg-New'"
+    assert activity_source.adapter_name == "ladbs_permit_activity"
+    assert activity_source.jurisdiction == "city_of_los_angeles"
+    assert activity_source.coverage_scope == "city"
+    assert activity_source.matching_keys == ["permit_number", "canonical_address"]
+    assert activity_source.effective_where == "permit_type != 'Bldg-New'"
+    assert activity_source.create_new_candidates is False
     assert housing_source.adapter_name == "ladbs_new_housing"
     assert housing_source.jurisdiction == "city_of_los_angeles"
     assert housing_source.coverage_scope == "city"

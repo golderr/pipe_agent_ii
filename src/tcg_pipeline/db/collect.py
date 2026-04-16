@@ -67,6 +67,7 @@ def persist_collected_records(
     raw_records: list[RawRecord],
     collection_mode: str = "full",
     incremental_since: datetime | None = None,
+    create_new_candidates: bool = True,
 ) -> CollectPersistResult:
     run_started_at = datetime.now(UTC)
     source_min_updated_at, source_max_updated_at = _source_updated_at_bounds(raw_records)
@@ -100,6 +101,7 @@ def persist_collected_records(
                 raw_record=raw_record,
                 match_result=match_result,
                 result=result,
+                create_new_candidates=create_new_candidates,
             )
             continue
 
@@ -265,6 +267,7 @@ def _create_unmatched_review_item(
     raw_record: RawRecord,
     match_result: MatchResult,
     result: CollectPersistResult,
+    create_new_candidates: bool,
 ) -> None:
     status_suggestion = _build_status_suggestion_for_unmatched_record(raw_record)
     if match_result.candidate_project_ids:
@@ -272,6 +275,8 @@ def _create_unmatched_review_item(
         priority = Priority.MEDIUM
         result.possible_match_review_items += 1
     else:
+        if not create_new_candidates:
+            return
         item_type = ReviewItemType.NEW_CANDIDATE
         priority = _priority_for_candidate(raw_record)
         result.new_candidate_review_items += 1

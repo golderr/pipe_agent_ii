@@ -3,6 +3,7 @@ from __future__ import annotations
 from tcg_pipeline.source_adapters.ladbs import (
     make_ladbs_cofo_adapter,
     make_ladbs_new_housing_adapter,
+    make_ladbs_permit_activity_adapter,
     make_ladbs_permits_adapter,
 )
 
@@ -133,6 +134,45 @@ def test_ladbs_new_housing_adapter_drops_malformed_apn() -> None:
     assert raw_record is not None
     assert raw_record.identifiers == {"permit_number": ["21010-30000-06142"]}
     assert "apn" not in raw_record.mapped_fields
+
+
+def test_ladbs_permit_activity_adapter_keeps_permit_detail_without_status_evidence() -> None:
+    adapter = make_ladbs_permit_activity_adapter(
+        market="los_angeles",
+        source_name="ladbs_permit_activity",
+    )
+
+    raw_record = adapter(
+        {
+            "pcis_permit": "23016-90000-16465",
+            "permit_type": "Bldg-Alter/Repair",
+            "permit_sub_type": "1 or 2 Family Dwelling",
+            "initiating_office": "INTERNET",
+            "issue_date": "2023-05-19T00:00:00.000",
+            "address_start": "8317",
+            "street_name": "DENISE",
+            "street_suffix": "LANE",
+            "zip_code": "91304",
+            "work_description": "Replace 1 window(s). Same size, location, number, type.",
+            "valuation": "501",
+            "contractors_business_name": "HOME DEPOT THE",
+            "applicant_first_name": "CA",
+            "applicant_last_name": "PERMITS",
+            "zone": "RE11-1",
+            "council_district": "12",
+        }
+    )
+
+    assert raw_record is not None
+    assert raw_record.source_record_id == "23016-90000-16465"
+    assert raw_record.canonical_address == "8317 DENISE LANE LOS ANGELES CA 91304"
+    assert raw_record.identifiers == {"permit_number": ["23016-90000-16465"]}
+    assert "status_evidence_type" not in raw_record.mapped_fields
+    assert "status_evidence_date" not in raw_record.mapped_fields
+    assert raw_record.mapped_fields["permit_issue_date"] == "2023-05-19"
+    assert raw_record.mapped_fields["permit_type"] == "Bldg-Alter/Repair"
+    assert raw_record.mapped_fields["permit_sub_type"] == "1 or 2 Family Dwelling"
+    assert raw_record.mapped_fields["council_district"] == "12"
 
 
 def test_ladbs_cofo_adapter_maps_completion_evidence() -> None:

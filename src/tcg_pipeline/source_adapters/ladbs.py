@@ -49,6 +49,31 @@ def make_ladbs_permits_adapter(*, market: str, source_name: str) -> RawRecordAda
     return adapter
 
 
+def make_ladbs_permit_activity_adapter(*, market: str, source_name: str) -> RawRecordAdapter:
+    def adapter(row: Mapping[str, Any]) -> RawRecord | None:
+        permit_number = clean_identifier_text(row.get("pcis_permit"))
+        if permit_number is None:
+            return None
+
+        normalized = _normalize_ladbs_address(row, market=market)
+        mapped_fields = {
+            "council_district": clean_text(row.get("council_district")),
+            **_build_common_ladbs_fields(row, normalized=normalized),
+        }
+
+        return RawRecord(
+            source_name=source_name,
+            source_record_id=permit_number,
+            raw_payload=dict(row),
+            canonical_address=normalized.canonical_address,
+            project_name=None,
+            identifiers=_build_ladbs_identifiers(permit_number=permit_number),
+            mapped_fields={key: value for key, value in mapped_fields.items() if value is not None},
+        )
+
+    return adapter
+
+
 def make_ladbs_new_housing_adapter(*, market: str, source_name: str) -> RawRecordAdapter:
     def adapter(row: Mapping[str, Any]) -> RawRecord | None:
         permit_number = clean_identifier_text(row.get("pcis_permit"))

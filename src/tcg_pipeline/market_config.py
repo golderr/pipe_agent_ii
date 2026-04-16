@@ -37,6 +37,7 @@ class SourceConfig(BaseModel):
     max_records: int | None = None
     timeout_seconds: float = 30.0
     incremental_overlap_hours: int = 24
+    create_new_candidates: bool = True
     mode: str | None = None
     trigger: str | None = None
 

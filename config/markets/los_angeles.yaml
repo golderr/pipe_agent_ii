@@ -19,6 +19,21 @@ sources:
     soql_filter: "permit_type='Bldg-New'"
     role: "update+discovery"
 
+  - name: ladbs_permit_activity
+    collector: socrata
+    adapter: ladbs_permit_activity
+    endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
+    matching_keys:
+      - permit_number
+      - canonical_address
+    schedule: weekly
+    incremental_overlap_hours: 24
+    soql_filter: "permit_type != 'Bldg-New'"
+    create_new_candidates: false
+    role: "update"
+
   - name: ladbs_new_housing
     collector: socrata
     adapter: ladbs_new_housing

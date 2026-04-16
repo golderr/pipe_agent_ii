@@ -302,6 +302,110 @@ def test_persist_collected_records_creates_new_candidate_review_item(
     }
 
 
+def test_persist_collected_records_can_suppress_new_candidate_review_items(
+    postgres_session: Session,
+) -> None:
+    raw_record = RawRecord(
+        source_name="ladbs_permit_activity",
+        source_record_id="23016-90000-16465",
+        raw_payload={"pcis_permit": "23016-90000-16465"},
+        canonical_address="8317 DENISE LANE LOS ANGELES CA 91304",
+        identifiers={"permit_number": ["23016-90000-16465"]},
+        mapped_fields={
+            "permit_issue_date": "2023-05-19",
+            "permit_type": "Bldg-Alter/Repair",
+            "total_units": 1,
+        },
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permit_activity",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.records_pulled == 1
+    assert result.matched_existing_projects == 0
+    assert result.new_candidate_review_items == 0
+    assert result.possible_match_review_items == 0
+
+    source_run = postgres_session.execute(
+        select(SourceRun).where(SourceRun.id == result.source_run_id)
+    ).scalar_one()
+    assert source_run.new_candidates == 0
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(ReviewItem.source_run_id == result.source_run_id)
+    ).scalar_one_or_none()
+    assert review_item is None
+
+
+def test_persist_collected_records_keeps_possible_match_review_items_when_new_candidates_suppressed(
+    postgres_session: Session,
+) -> None:
+    canonical_address = "8317 DENISE LANE LOS ANGELES CA 91304"
+    postgres_session.add_all(
+        [
+            Project(
+                canonical_address=canonical_address,
+                raw_addresses=["8317 Denise Lane"],
+                market="los_angeles",
+                city="Los Angeles",
+                state="CA",
+                county="Los Angeles",
+            ),
+            Project(
+                canonical_address=canonical_address,
+                raw_addresses=["8317 Denise Lane"],
+                market="los_angeles",
+                city="Los Angeles",
+                state="CA",
+                county="Los Angeles",
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permit_activity",
+        source_record_id="23016-90000-16465",
+        raw_payload={"pcis_permit": "23016-90000-16465"},
+        canonical_address=canonical_address,
+        mapped_fields={
+            "permit_issue_date": "2023-05-19",
+            "permit_type": "Bldg-Alter/Repair",
+        },
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permit_activity",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.records_pulled == 1
+    assert result.matched_existing_projects == 0
+    assert result.new_candidate_review_items == 0
+    assert result.possible_match_review_items == 1
+
+    source_run = postgres_session.execute(
+        select(SourceRun).where(SourceRun.id == result.source_run_id)
+    ).scalar_one()
+    assert source_run.new_candidates == 0
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(ReviewItem.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert review_item.item_type == ReviewItemType.POSSIBLE_MATCH
+    assert review_item.payload["status_suggestion"] is None
+
+
 def test_resolve_incremental_cursor_uses_max_source_updated_at(
     postgres_session: Session,
 ) -> None:
