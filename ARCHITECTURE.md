@@ -2,7 +2,7 @@
 
 > **Living document.** This file is the single source of truth for the project. Claude Code / Codex should read this at the start of every session, update it when the plan changes, and mark build steps complete as code is committed. Use commits as checkpoints to review the plan and evaluate if anything changed and should be recorded in this file.
 
-**Last updated:** 2026-04-15T16:55
+**Last updated:** 2026-04-15T16:58
 **Status:** Build in progress — foundation scaffolded, initial Supabase schema applied.
 - ✅ Pipedream field mapping (81 fields)
 - ✅ CoStar field mapping (287 columns, MF + non-MF)
@@ -1752,7 +1752,7 @@ On each incoming record:
 | 1.2 | Analyze Pipedream report fields and format | **`done`** | Hollywood/Los Feliz file analyzed. 81 fields mapped. Full spec in Sections 3a-3b. Remaining 2 files to be analyzed at seed time (same format expected). |
 | 1.3 | Finalize master database schema | **`done`** | Schema in 3e incorporates both Pipedream and CoStar fields. Ready to implement as SQLAlchemy models. |
 | 1.4 | Set up project structure (Python, deps, config) + create new Supabase project | `done` | Supabase project created (`pipe-agent-ii`). Repo scaffold, `.env`, package config, SQLAlchemy models, local `.venv`, and Alembic environment are in place. Initial Alembic migration applied successfully to Supabase using the session pooler connection. `postgis` and `pg_trgm` enabled. |
-| 1.5 | Build address normalization module | `not_started` | Critical shared component. Both seed ingesters depend on it. |
+| 1.5 | Build address normalization module | `done` | Implemented in `src/tcg_pipeline/matching/normalizer.py` with `usaddress` parsing, unit stripping, suffix/directional normalization, numbered-street normalization, address-range parsing, and initial LA city alias handling. Covered by targeted pytest cases. |
 | 1.6 | Build Pipedream ingester (seeder) | `not_started` | Build the higher-priority truth source first. |
 | 1.7 | Build CoStar ingester (seeder) | `not_started` | |
 | 1.8 | Seed LA market with CoStar + Pipedream data | `not_started` | First real data in the system |
@@ -1871,6 +1871,7 @@ On each incoming record:
 | 2026-04-15 | Persist review queue state in the database before building the researcher surface | Accept/reject/override/defer is core system state, not UI-only metadata. |
 | 2026-04-15 | Add a PostGIS `location` column and keep `lat`/`lng` as convenience fields | Spatial matching should use native geography/geometry types from day one. |
 | 2026-04-15 | Build address normalization before the seed ingesters | Both Pipedream and CoStar ingestion depend on canonical addresses for deduplication and future matching. |
+| 2026-04-15 | Address normalization canonical form uses uppercase full-word directionals/suffixes and strips units for building-level matching | Implemented with `usaddress` plus custom normalization rules. Numbered streets normalize to ordinal numeric form (`SEVENTH` → `7TH`), and LA market city aliases such as `DTLA` and `Hollywood` normalize to `Los Angeles` when `market='los_angeles'`. |
 | 2026-04-15 | Prefer `httpx` + `psycopg` + `typer`; keep `sodapy` and `supabase-py` optional | This keeps the runtime lean and closer to the underlying protocols while preserving future flexibility. |
 | 2026-04-15 | Start PDF extraction with `pdfplumber`, use `tabula-py` only as a fallback | Avoid a Java dependency unless a specific source materially benefits from lattice extraction. |
 | 2026-04-15 | Initial schema applied to Supabase via Alembic using session pooler connection | Local network does not support IPv6, so the Supabase session pooler URL is the reliable development path. Extensions `postgis` and `pg_trgm` are enabled in the target database. |

@@ -4,15 +4,15 @@ Automated real estate development pipeline tracker for seeding, collecting, matc
 
 ## Current Status
 
-This repository is scaffolded through Step `1.4`:
+This repository is scaffolded through Step `1.5`:
 
 - Python project structure
 - typed settings/config loading
 - SQLAlchemy models for the revised core schema
 - Alembic environment scaffolding
 - initial market config files
-
-The first live database action is still pending the Supabase Postgres connection string.
+- initial Supabase schema applied with PostGIS and `pg_trgm`
+- address normalization module with targeted tests
 
 ## Local Setup
 
@@ -32,19 +32,18 @@ pip install -e .[dev]
 tcg-pipeline doctor
 ```
 
-## Next DB Steps
+## Database Commands
 
-Once `DATABASE_URL` is set:
+With `DATABASE_URL` set:
 
 ```powershell
 alembic revision --autogenerate -m "initial schema"
 alembic upgrade head
 ```
 
-## Credentials Still Needed
+To verify the local environment:
 
-For Step `1.4`, the only required live credential is:
-
-- `DATABASE_URL` from Supabase `Project Settings -> Database -> Connection string`
-
-The project URL alone is useful for config, but not enough to connect or run migrations.
+```powershell
+tcg-pipeline doctor
+pytest tests/test_normalizer.py -q
+```
