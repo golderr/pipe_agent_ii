@@ -285,10 +285,15 @@ def normalize_state(state: str | None) -> str | None:
     return STATE_ABBREVIATIONS.get(normalized, normalized)
 
 
-def normalize_postal_code(postal_code: str | None) -> str | None:
-    if not postal_code:
+def normalize_postal_code(postal_code: object | None) -> str | None:
+    if postal_code is None or postal_code == "":
         return None
-    match = ZIP_RE.search(postal_code)
+
+    text = str(postal_code).strip()
+    if not text:
+        return None
+
+    match = ZIP_RE.search(text)
     return match.group("zip") if match else None
 
 

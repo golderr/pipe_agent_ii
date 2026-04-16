@@ -88,6 +88,8 @@ def test_state_and_zip_normalization() -> None:
     assert normalize_state("California") == "CA"
     assert normalize_state("ca") == "CA"
     assert normalize_postal_code("90057-3106") == "90057"
+    assert normalize_postal_code(90057) == "90057"
+    assert normalize_postal_code(90057.0) == "90057"
 
 
 def test_parse_address_range_helper() -> None:
