@@ -248,6 +248,7 @@ def persist_costar_import_results(
     source_record_map = _load_source_record_map(session, source_record_keys=source_record_keys)
     identifier_cache: dict[uuid.UUID, set[tuple[IdentifierType, str]]] = {}
     status_history_cache: dict[uuid.UUID, set[tuple[Any, ...]]] = {}
+    project_cache: dict[uuid.UUID, Project] = {}
     persist_result = CoStarPersistResult()
 
     for project_record in project_records:
@@ -278,6 +279,7 @@ def persist_costar_import_results(
                 session,
                 project_record=project_record,
                 persist_result=persist_result,
+                project_cache=project_cache,
                 costar_property_map=costar_property_map,
                 apn_map=apn_map,
                 address_map=address_map,
@@ -287,7 +289,11 @@ def persist_costar_import_results(
             )
             continue
 
-        existing_project = session.get(Project, matched_project_id)
+        existing_project = _load_costar_project(
+            session,
+            project_id=matched_project_id,
+            project_cache=project_cache,
+        )
         if existing_project is None:
             logger.warning(
                 "Matched CoStar property %s to missing project id %s; skipping",
@@ -533,6 +539,7 @@ def _persist_new_costar_project(
     *,
     project_record: CoStarProjectRecord,
     persist_result: CoStarPersistResult,
+    project_cache: dict[uuid.UUID, Project],
     costar_property_map: dict[str, uuid.UUID],
     apn_map: dict[str, set[uuid.UUID]],
     address_map: dict[tuple[str, str], set[uuid.UUID]],
@@ -551,6 +558,7 @@ def _persist_new_costar_project(
     _register_project_maps(
         project_record=project_record,
         project_id=project_id,
+        project_cache=project_cache,
         costar_property_map=costar_property_map,
         apn_map=apn_map,
         address_map=address_map,
@@ -582,6 +590,7 @@ def _merge_costar_project(
     _merge_identifiers(
         session,
         project_id=existing_project.id,
+        property_id=project_record.property_id,
         identifiers=project_record.identifiers,
         persist_result=persist_result,
         identifier_cache=identifier_cache,
@@ -754,6 +763,7 @@ def _merge_identifiers(
     session: Session,
     *,
     project_id: uuid.UUID,
+    property_id: str,
     identifiers: Sequence[ProjectIdentifier],
     persist_result: CoStarPersistResult,
     identifier_cache: dict[uuid.UUID, set[tuple[IdentifierType, str]]],
@@ -771,6 +781,35 @@ def _merge_identifiers(
         if identifier_key in existing_keys:
             persist_result.skipped_existing_identifiers += 1
             continue
+        if identifier.identifier_type == IdentifierType.COSTAR_PROPERTY_ID:
+            owner_project_id = costar_property_map.get(identifier.value)
+            if owner_project_id is not None and owner_project_id != project_id:
+                logger.warning(
+                    "Skipping conflicting CoStar property id %s for property %s: already attached to %s, not %s",
+                    identifier.value,
+                    property_id,
+                    owner_project_id,
+                    project_id,
+                )
+                persist_result.skipped_existing_identifiers += 1
+                continue
+        if identifier.identifier_type == IdentifierType.APN:
+            owner_project_ids = apn_map.get(identifier.value, set())
+            conflicting_owner_ids = {
+                owner_project_id
+                for owner_project_id in owner_project_ids
+                if owner_project_id != project_id
+            }
+            if conflicting_owner_ids:
+                logger.warning(
+                    "Skipping conflicting APN %s for CoStar property %s: already attached to %s, not %s",
+                    identifier.value,
+                    property_id,
+                    sorted(conflicting_owner_ids),
+                    project_id,
+                )
+                persist_result.skipped_existing_identifiers += 1
+                continue
 
         session.add(
             ProjectIdentifier(
@@ -932,6 +971,7 @@ def _register_project_maps(
     *,
     project_record: CoStarProjectRecord,
     project_id: uuid.UUID,
+    project_cache: dict[uuid.UUID, Project],
     costar_property_map: dict[str, uuid.UUID],
     apn_map: dict[str, set[uuid.UUID]],
     address_map: dict[tuple[str, str], set[uuid.UUID]],
@@ -939,6 +979,7 @@ def _register_project_maps(
     identifier_cache: dict[uuid.UUID, set[tuple[IdentifierType, str]]],
     status_history_cache: dict[uuid.UUID, set[tuple[Any, ...]]],
 ) -> None:
+    project_cache[project_id] = project_record.project
     address_key = (
         project_record.project.market,
         project_record.project.canonical_address,
@@ -960,6 +1001,22 @@ def _register_project_maps(
         (status.status, status.status_date, status.source, status.notes)
         for status in project_record.status_history
     }
+
+
+def _load_costar_project(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    project_cache: dict[uuid.UUID, Project],
+) -> Project | None:
+    cached_project = project_cache.get(project_id)
+    if cached_project is not None:
+        return cached_project
+
+    project = session.get(Project, project_id)
+    if project is not None:
+        project_cache[project_id] = project
+    return project
 
 
 def _increment_costar_match_counter(

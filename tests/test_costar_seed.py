@@ -37,13 +37,13 @@ def test_persist_costar_import_result_merges_into_existing_project_by_apn(
                 "ProjectID": "200.00001",
                 "Name": "Westlake Homes",
                 "Developer": "TCG Research",
-                "Address": "602 S Westlake Ave",
+                "Address": "9902 S Example Ave",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
                 "Zip": "90057",
                 "CurrStatus": "Pending",
-                "APN": 5143001001,
+                "APN": 9991001001,
             }
         ],
     )
@@ -70,13 +70,13 @@ def test_persist_costar_import_result_merges_into_existing_project_by_apn(
         rows=[
             {
                 "PropertyID": "CST-9001",
-                "Property Address": "602 S Westlake Ave",
+                "Property Address": "9902 S Example Ave",
                 "Property Name": "Westlake Tower",
                 "City": "Los Angeles CBD",
                 "State": "CA",
                 "Zip": "90057-3106",
                 "County Name": "Los Angeles",
-                "Parcel Number 1(Min)": "5143001001",
+                "Parcel Number 1(Min)": "9991001001",
                 "Constr Status": "Under Construction",
                 "Construction Begin": "December 2026",
                 "Submarket Name": "Koreatown",
@@ -104,7 +104,7 @@ def test_persist_costar_import_result_merges_into_existing_project_by_apn(
 
     project = postgres_session.execute(
         select(Project).where(
-            Project.canonical_address == "602 SOUTH WESTLAKE AVENUE LOS ANGELES CA 90057"
+            Project.canonical_address == "9902 SOUTH EXAMPLE AVENUE LOS ANGELES CA 90057"
         )
     ).scalar_one()
     assert project.developer == "TCG Research"
@@ -139,7 +139,7 @@ def test_persist_costar_import_result_falls_back_to_address_match(
         [
             {
                 "ProjectID": "201.00001",
-                "Address": "1718 N Las Palmas Ave",
+                "Address": "8801 N Example Pl",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
@@ -163,7 +163,7 @@ def test_persist_costar_import_result_falls_back_to_address_match(
         rows=[
             {
                 "PropertyID": "CST-9002",
-                "Property Address": "1718 N Las Palmas Ave",
+                "Property Address": "8801 N Example Pl",
                 "City": "Los Angeles",
                 "State": "CA",
                 "Zip": "90028",
@@ -205,13 +205,13 @@ def test_persist_costar_import_result_is_idempotent_for_existing_property_id(
         rows=[
             {
                 "PropertyID": "CST-9003",
-                "Property Address": "549 S Harvard Blvd",
+                "Property Address": "8701 S Example Blvd",
                 "City": "Los Angeles",
                 "State": "CA",
                 "Zip": "90020",
                 "County Name": "Los Angeles",
                 "Constr Status": "Proposed",
-                "Parcel Number 1(Min)": "5078001020",
+                "Parcel Number 1(Min)": "9991001020",
             }
         ],
     )
@@ -230,6 +230,66 @@ def test_persist_costar_import_result_is_idempotent_for_existing_property_id(
     assert second_persist_result.skipped_existing_status_history_entries == 1
 
 
+def test_persist_costar_import_result_matches_pending_project_created_earlier_in_run(
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    costar_path = _build_costar_workbook(
+        tmp_path / "costar_pending_match.xlsx",
+        headers=[
+            "PropertyID",
+            "Property Address",
+            "City",
+            "State",
+            "Zip",
+            "County Name",
+            "Constr Status",
+            "Parcel Number 1(Min)",
+            "Owner Name",
+        ],
+        rows=[
+            {
+                "PropertyID": "CST-9101",
+                "Property Address": "8500 W Example Ave",
+                "City": "Los Angeles",
+                "State": "CA",
+                "Zip": "90036",
+                "County Name": "Los Angeles",
+                "Constr Status": "Proposed",
+                "Parcel Number 1(Min)": "9991002001",
+            },
+            {
+                "PropertyID": "CST-9102",
+                "Property Address": "8500 W Example Ave",
+                "City": "Los Angeles",
+                "State": "CA",
+                "Zip": "90036",
+                "County Name": "Los Angeles",
+                "Constr Status": "Final Planning",
+                "Parcel Number 1(Min)": "9991002001",
+                "Owner Name": "Pending Match Owner",
+            },
+        ],
+    )
+
+    import_result = ingest_costar_workbooks([costar_path], market="los_angeles")
+    persist_result = persist_costar_import_result(postgres_session, import_result)
+
+    assert persist_result.inserted_projects == 1
+    assert persist_result.matched_existing_projects == 1
+    assert persist_result.matched_by_apn == 1
+    assert persist_result.inserted_identifiers == 3
+    assert persist_result.skipped_existing_identifiers == 1
+    assert persist_result.inserted_source_records == 2
+
+    project = postgres_session.execute(
+        select(Project).where(
+            Project.canonical_address == "8500 WEST EXAMPLE AVENUE LOS ANGELES CA 90036"
+        )
+    ).scalar_one()
+    assert project.owner == "Pending Match Owner"
+
+
 def test_seed_costar_command_reports_merge_counts(
     monkeypatch: pytest.MonkeyPatch,
     postgres_session: Session,
@@ -240,7 +300,7 @@ def test_seed_costar_command_reports_merge_counts(
         [
             {
                 "ProjectID": "202.00001",
-                "Address": "407-413 E 5th St",
+                "Address": "8601-8603 E Example St",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
@@ -264,7 +324,7 @@ def test_seed_costar_command_reports_merge_counts(
         rows=[
             {
                 "PropertyID": "CST-9004",
-                "Property Address": "407-413 E 5th St",
+                "Property Address": "8601-8603 E Example St",
                 "City": "Downtown Los Angeles",
                 "State": "CA",
                 "Zip": "90013",

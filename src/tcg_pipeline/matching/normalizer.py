@@ -225,9 +225,9 @@ def normalize_address(
     post_directional = _normalize_directional(_join_label(grouped, "StreetNamePostDirectional"))
     unit = _normalize_unit(grouped)
 
-    normalized_city = normalize_city(_join_label(grouped, "PlaceName") or city, market=market)
-    normalized_state = normalize_state(_join_label(grouped, "StateName") or state)
-    normalized_zip = normalize_postal_code(_join_label(grouped, "ZipCode") or postal_code)
+    normalized_city = normalize_city(city or _join_label(grouped, "PlaceName"), market=market)
+    normalized_state = normalize_state(state or _join_label(grouped, "StateName"))
+    normalized_zip = normalize_postal_code(postal_code or _join_label(grouped, "ZipCode"))
 
     range_start, range_end = parse_address_range(address_number)
     street_line = _build_street_line(

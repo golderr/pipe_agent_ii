@@ -92,6 +92,19 @@ def test_state_and_zip_normalization() -> None:
     assert normalize_postal_code(90057.0) == "90057"
 
 
+def test_explicit_city_state_zip_override_bad_parse_components() -> None:
+    normalized = normalize_address(
+        "8008 Third Street Investments, LLC",
+        city="Los Angeles",
+        state="CA",
+        postal_code=90048,
+    )
+
+    assert normalized.city == "LOS ANGELES"
+    assert normalized.state == "CA"
+    assert normalized.postal_code == "90048"
+
+
 def test_parse_address_range_helper() -> None:
     assert parse_address_range("1435-1441") == (1435, 1441)
     assert parse_address_range("1437") == (1437, 1437)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -215,6 +216,44 @@ AGE_RESTRICTION_MAP = {
     AgeRestriction.STUDENT.value: AgeRestriction.STUDENT,
     AgeRestriction.UNKNOWN.value: AgeRestriction.UNKNOWN,
 }
+ADDRESS_LIKE_RE = re.compile(r"^\d+[\w\s.#/-]*$")
+ADDRESS_HINT_TOKENS = (
+    "ST",
+    "STREET",
+    "AVE",
+    "AVENUE",
+    "BLVD",
+    "BOULEVARD",
+    "RD",
+    "ROAD",
+    "DR",
+    "DRIVE",
+    "LN",
+    "LANE",
+    "CT",
+    "COURT",
+    "PL",
+    "PLACE",
+    "WAY",
+    "PKWY",
+    "PARKWAY",
+    "TER",
+    "TERRACE",
+)
+ENTITY_NAME_TOKENS = (
+    " LLC",
+    " LP",
+    " INC",
+    " CORP",
+    " CORPORATION",
+    " HOLDINGS",
+    " INVESTMENTS",
+    " PARTNERS",
+    " GROUP",
+    " FUND",
+    " COMPANY",
+    " CO.",
+)
 
 
 @dataclass(slots=True)
@@ -443,8 +482,9 @@ def _build_project_record(
     imported_at: datetime,
     result: PipedreamImportResult,
 ) -> PipedreamProjectRecord:
+    address_value = _select_address_value(payload)
     normalized_address = normalize_address(
-        _clean_text(payload.get("Address")) or "",
+        address_value or "",
         city=_clean_text(payload.get("City")),
         state=_clean_text(payload.get("State")),
         postal_code=_clean_text(payload.get("Zip")),
@@ -452,7 +492,7 @@ def _build_project_record(
     )
     project = Project(
         canonical_address=normalized_address.canonical_address or normalized_address.raw_address,
-        raw_addresses=_dedupe_strings([_clean_text(payload.get("Address"))]),
+        raw_addresses=_dedupe_strings([address_value, _clean_text(payload.get("Address"))]),
         lat=_parse_float(payload.get("Lat")),
         lng=_parse_float(payload.get("Long")),
         location=_build_location(payload.get("Lat"), payload.get("Long")),
@@ -738,8 +778,9 @@ def _build_dismissed_record(
     source_name: str,
     market: str,
 ) -> DismissedRecord:
+    address_value = _select_address_value(payload)
     normalized_address = normalize_address(
-        _clean_text(payload.get("Address")) or "",
+        address_value or "",
         city=_clean_text(payload.get("City")),
         state=_clean_text(payload.get("State")),
         postal_code=_clean_text(payload.get("Zip")),
@@ -757,6 +798,27 @@ def _build_dismissed_record(
         dismissed_by=PIPEDREAM_CREATED_BY,
         notes="; ".join(part for part in notes_parts if part),
     )
+
+
+def _select_address_value(payload: dict[str, Any]) -> str | None:
+    address = _clean_text(payload.get("Address"))
+    name = _clean_text(payload.get("Name"))
+    if address and name and _looks_like_entity_name(address) and _looks_like_street_address(name):
+        return name
+    return address or name
+
+
+def _looks_like_entity_name(value: str) -> bool:
+    normalized = f" {_clean_text(value) or ''}".upper()
+    return any(token in normalized for token in ENTITY_NAME_TOKENS)
+
+
+def _looks_like_street_address(value: str) -> bool:
+    normalized = (_clean_text(value) or "").upper()
+    if not normalized or not ADDRESS_LIKE_RE.match(normalized):
+        return False
+    tokens = normalized.replace(".", " ").split()
+    return any(token in ADDRESS_HINT_TOKENS for token in tokens)
 
 
 def _parse_pipeline_status(

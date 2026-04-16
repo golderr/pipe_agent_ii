@@ -186,6 +186,38 @@ def test_ingest_workbook_can_filter_to_allowed_city(tmp_path: Path) -> None:
     assert result.skipped_project_ids == ["88.00001"]
 
 
+def test_ingest_workbook_uses_name_as_address_when_address_is_entity_name(
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_address_fallback.xlsx",
+        [
+            {
+                "ProjectID": "24.00085",
+                "Name": "8000 W 3rd St",
+                "Developer": "Jon Bosse",
+                "Address": "8008 Third Street Investments, LLC",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "Zip": 90048,
+                "CurrStatus": "Inactive",
+            }
+        ],
+    )
+
+    result = PipedreamIngester(market="los_angeles").ingest_workbook(workbook_path)
+
+    assert result.imported_count == 1
+    project = result.project_records[0].project
+    assert project.canonical_address == "8000 WEST 3RD STREET LOS ANGELES CA 90048"
+    assert project.state == "CA"
+    assert project.raw_addresses == [
+        "8000 W 3rd St",
+        "8008 Third Street Investments, LLC",
+    ]
+
+
 def test_preview_pipedream_command_reports_counts(tmp_path: Path) -> None:
     workbook_path = _build_pipedream_workbook(
         tmp_path / "pipedream_cli.xlsx",
