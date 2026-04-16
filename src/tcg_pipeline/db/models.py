@@ -339,6 +339,14 @@ class Project(Base, TimestampMixin):
 
     status_history: Mapped[list["StatusHistory"]] = relationship(back_populates="project")
     identifiers: Mapped[list["ProjectIdentifier"]] = relationship(back_populates="project")
+    outgoing_relationships: Mapped[list["ProjectRelationship"]] = relationship(
+        back_populates="project",
+        foreign_keys="ProjectRelationship.project_id",
+    )
+    incoming_relationships: Mapped[list["ProjectRelationship"]] = relationship(
+        back_populates="related_project",
+        foreign_keys="ProjectRelationship.related_project_id",
+    )
     source_records: Mapped[list["ProjectSourceRecord"]] = relationship(back_populates="project")
     review_items: Mapped[list["ReviewItem"]] = relationship(back_populates="project")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="project")
@@ -346,6 +354,9 @@ class Project(Base, TimestampMixin):
 
 class StatusHistory(Base):
     __tablename__ = "status_history"
+    __table_args__ = (
+        Index("ix_status_history_project_id_status_date", "project_id", "status_date"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -371,6 +382,7 @@ class ProjectIdentifier(Base):
     __table_args__ = (
         UniqueConstraint("identifier_type", "value"),
         Index("ix_project_identifiers_project_id", "project_id"),
+        Index("ix_project_identifiers_value", "value"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -394,6 +406,7 @@ class ProjectRelationship(Base):
     __tablename__ = "project_relationships"
     __table_args__ = (
         UniqueConstraint("project_id", "related_project_id", "relationship_type"),
+        Index("ix_project_relationships_related_project_id", "related_project_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -413,11 +426,21 @@ class ProjectRelationship(Base):
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    project: Mapped[Project] = relationship(
+        back_populates="outgoing_relationships",
+        foreign_keys=[project_id],
+    )
+    related_project: Mapped[Project] = relationship(
+        back_populates="incoming_relationships",
+        foreign_keys=[related_project_id],
+    )
+
 
 class ProjectSourceRecord(Base):
     __tablename__ = "project_source_records"
     __table_args__ = (
         UniqueConstraint("source_name", "source_record_id"),
+        Index("ix_project_source_records_project_id", "project_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -531,6 +554,9 @@ class ReviewDecision(Base):
 
 class ChangeLog(Base):
     __tablename__ = "change_log"
+    __table_args__ = (
+        Index("ix_change_log_project_id_timestamp", "project_id", "timestamp"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(

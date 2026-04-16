@@ -6,12 +6,12 @@ from dataclasses import dataclass
 
 import usaddress
 
-UNIT_LABELS = {
+UNIT_LABELS = (
     "OccupancyType",
     "OccupancyIdentifier",
     "SubaddressType",
     "SubaddressIdentifier",
-}
+)
 
 STATE_ABBREVIATIONS = {
     "ALABAMA": "AL",
@@ -157,6 +157,8 @@ LOS_ANGELES_CITY_ALIASES = {
 ADDRESS_RANGE_RE = re.compile(r"^(?P<start>\d+)\s*-\s*(?P<end>\d+)$")
 ZIP_RE = re.compile(r"(?P<zip>\d{5})")
 ORDINAL_TOKEN_RE = re.compile(r"^(\d+)(ST|ND|RD|TH)$")
+LEADING_ADDRESS_NUMBER_RE = re.compile(r"^(?P<number>\d+(?:\s*-\s*\d+)?)\b")
+UNIT_SEGMENT_RE = re.compile(r"^(APT|APARTMENT|UNIT|STE|SUITE|#|RM|ROOM|FL|FLOOR)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +198,7 @@ def normalize_address(
     market: str | None = None,
 ) -> NormalizedAddress:
     cleaned = _clean_input(raw_address)
-    parsed = usaddress.parse(cleaned)
+    parsed, parser_name = _parse_address(cleaned)
 
     grouped: dict[str, list[str]] = {}
     for token, label in parsed:
@@ -204,6 +206,17 @@ def normalize_address(
         if not normalized_token:
             continue
         grouped.setdefault(label, []).append(normalized_token)
+
+    if not grouped:
+        return _fallback_normalize_address(
+            raw_address=raw_address,
+            cleaned=cleaned,
+            city=city,
+            state=state,
+            postal_code=postal_code,
+            market=market,
+            parser=parser_name,
+        )
 
     address_number = _join_label(grouped, "AddressNumber")
     pre_directional = _normalize_directional(_join_label(grouped, "StreetNamePreDirectional"))
@@ -248,7 +261,7 @@ def normalize_address(
         city=normalized_city,
         state=normalized_state,
         postal_code=normalized_zip,
-        parser="usaddress",
+        parser=parser_name,
     )
 
 
@@ -294,6 +307,59 @@ def parse_address_range(address_number: str | None) -> tuple[int | None, int | N
         value = int(digits)
         return value, value
     return None, None
+
+
+def _parse_address(cleaned: str) -> tuple[list[tuple[str, str]], str]:
+    try:
+        return usaddress.parse(cleaned), "usaddress"
+    except Exception:
+        return [], "fallback"
+
+
+def _fallback_normalize_address(
+    *,
+    raw_address: str,
+    cleaned: str,
+    city: str | None,
+    state: str | None,
+    postal_code: str | None,
+    market: str | None,
+    parser: str,
+) -> NormalizedAddress:
+    segments = [segment.strip() for segment in cleaned.split(",") if segment.strip()]
+    street_segment = segments[0] if segments else cleaned
+    tail_segment = segments[-1] if segments else cleaned
+
+    street_line = _normalize_loose_street_line(street_segment)
+    address_number = _extract_leading_address_number(street_line)
+    range_start, range_end = parse_address_range(address_number)
+
+    inferred_city = segments[-2] if city is None and len(segments) >= 3 else None
+    inferred_state = _extract_state_token(tail_segment)
+    inferred_unit = _extract_unit_segment(segments[1:]) if len(segments) > 1 else None
+
+    normalized_city = normalize_city(city or inferred_city, market=market)
+    normalized_state = normalize_state(state or inferred_state)
+    normalized_zip = normalize_postal_code(postal_code or tail_segment)
+    canonical_address = _join_parts([street_line, normalized_city, normalized_state, normalized_zip])
+
+    return NormalizedAddress(
+        raw_address=raw_address,
+        canonical_street_line=street_line,
+        canonical_address=canonical_address,
+        house_number=address_number,
+        house_number_start=range_start,
+        house_number_end=range_end,
+        street_predirectional=None,
+        street_name=None,
+        street_suffix=None,
+        street_postdirectional=None,
+        unit=inferred_unit,
+        city=normalized_city,
+        state=normalized_state,
+        postal_code=normalized_zip,
+        parser=parser,
+    )
 
 
 def _normalize_unit(grouped: dict[str, list[str]]) -> str | None:
@@ -360,6 +426,29 @@ def _join_label(grouped: dict[str, list[str]], label: str) -> str | None:
     return _join_parts(grouped.get(label, []))
 
 
+def _normalize_loose_street_line(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    tokens = _clean_phrase(value).split()
+    if not tokens:
+        return None
+
+    normalized_tokens: list[str] = []
+    has_leading_number = _looks_like_address_number(tokens[0])
+
+    for index, token in enumerate(tokens):
+        if _is_loose_directional_token(index, has_leading_number, token):
+            normalized_tokens.append(DIRECTIONAL_MAP[token])
+            continue
+        if index == len(tokens) - 1 and token in STREET_SUFFIX_MAP:
+            normalized_tokens.append(STREET_SUFFIX_MAP[token])
+            continue
+        normalized_tokens.append(_normalize_street_name_token(token))
+
+    return _join_parts(normalized_tokens)
+
+
 def _join_parts(parts: list[str | None]) -> str | None:
     values = [part.strip() for part in parts if part and part.strip()]
     return " ".join(values) if values else None
@@ -382,3 +471,41 @@ def _clean_token(value: str) -> str:
     cleaned = value.upper().strip()
     cleaned = cleaned.translate(str.maketrans("", "", string.punctuation.replace("-", "")))
     return cleaned
+
+
+def _extract_leading_address_number(street_line: str | None) -> str | None:
+    if not street_line:
+        return None
+    match = LEADING_ADDRESS_NUMBER_RE.match(street_line)
+    return match.group("number") if match else None
+
+
+def _extract_state_token(value: str) -> str | None:
+    tokens = _clean_phrase(value).split()
+    for token in tokens:
+        if len(token) == 2 and token.isalpha():
+            return token
+
+    for state_name, abbreviation in STATE_ABBREVIATIONS.items():
+        if state_name in _clean_phrase(value):
+            return abbreviation
+    return None
+
+
+def _extract_unit_segment(segments: list[str]) -> str | None:
+    for segment in segments:
+        if UNIT_SEGMENT_RE.match(segment):
+            return _clean_phrase(segment)
+    return None
+
+
+def _looks_like_address_number(token: str) -> bool:
+    return bool(ADDRESS_RANGE_RE.match(token) or token.isdigit())
+
+
+def _is_loose_directional_token(index: int, has_leading_number: bool, token: str) -> bool:
+    if token not in DIRECTIONAL_MAP:
+        return False
+    if has_leading_number:
+        return index == 1
+    return index == 0

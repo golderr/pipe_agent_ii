@@ -1,3 +1,5 @@
+import pytest
+
 from tcg_pipeline.matching.normalizer import (
     normalize_address,
     normalize_city,
@@ -39,6 +41,27 @@ def test_preserve_directional_street_name_component() -> None:
     assert normalized.canonical_address == "1718 NORTH LAS PALMAS AVENUE LOS ANGELES CA"
 
 
+@pytest.mark.parametrize(
+    ("raw_address", "expected_street_line"),
+    [
+        ("602 S Westlake Ave", "602 SOUTH WESTLAKE AVENUE"),
+        ("549 S Harvard Blvd", "549 SOUTH HARVARD BOULEVARD"),
+        ("407-413 E 5th St", "407-413 EAST 5TH STREET"),
+        ("W 3rd St", "WEST 3RD STREET"),
+        ("S La Brea Ave", "SOUTH LA BREA AVENUE"),
+    ],
+)
+def test_known_los_angeles_edge_cases_are_stable(
+    raw_address: str,
+    expected_street_line: str,
+) -> None:
+    normalized = normalize_address(raw_address, city="Los Angeles", state="CA", market="los_angeles")
+
+    assert normalized.canonical_street_line == expected_street_line
+    assert normalized.canonical_address == f"{expected_street_line} LOS ANGELES CA"
+    assert normalized.parser == "usaddress"
+
+
 def test_address_range_is_preserved_and_parsed() -> None:
     normalized = normalize_address("1435-1441 7th St", city="Santa Monica", state="CA")
 
@@ -70,3 +93,19 @@ def test_state_and_zip_normalization() -> None:
 def test_parse_address_range_helper() -> None:
     assert parse_address_range("1435-1441") == (1435, 1441)
     assert parse_address_range("1437") == (1437, 1437)
+
+
+def test_normalize_address_falls_back_when_parser_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_parse_error(_raw: str) -> list[tuple[str, str]]:
+        raise ValueError("synthetic parse failure")
+
+    monkeypatch.setattr("tcg_pipeline.matching.normalizer.usaddress.parse", raise_parse_error)
+
+    normalized = normalize_address("123 Main St, Apt 4, Los Angeles, CA 90012", market="los_angeles")
+
+    assert normalized.parser == "fallback"
+    assert normalized.canonical_street_line == "123 MAIN STREET"
+    assert normalized.canonical_address == "123 MAIN STREET LOS ANGELES CA 90012"
+    assert normalized.unit == "APT 4"
+    assert normalized.house_number_start == 123
+    assert normalized.house_number_end == 123

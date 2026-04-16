@@ -2,8 +2,8 @@
 
 > **Living document.** This file is the single source of truth for the project. Claude Code / Codex should read this at the start of every session, update it when the plan changes, and mark build steps complete as code is committed. Use commits as checkpoints to review the plan and evaluate if anything changed and should be recorded in this file.
 
-**Last updated:** 2026-04-15T16:58
-**Status:** Build in progress — foundation scaffolded, initial Supabase schema applied.
+**Last updated:** 2026-04-15T17:15
+**Status:** Build in progress — foundation scaffolded, initial Supabase schema applied, pre-ingester hardening complete.
 - ✅ Pipedream field mapping (81 fields)
 - ✅ CoStar field mapping (287 columns, MF + non-MF)
 - ✅ Master schema finalized
@@ -1872,9 +1872,12 @@ On each incoming record:
 | 2026-04-15 | Add a PostGIS `location` column and keep `lat`/`lng` as convenience fields | Spatial matching should use native geography/geometry types from day one. |
 | 2026-04-15 | Build address normalization before the seed ingesters | Both Pipedream and CoStar ingestion depend on canonical addresses for deduplication and future matching. |
 | 2026-04-15 | Address normalization canonical form uses uppercase full-word directionals/suffixes and strips units for building-level matching | Implemented with `usaddress` plus custom normalization rules. Numbered streets normalize to ordinal numeric form (`SEVENTH` → `7TH`), and LA market city aliases such as `DTLA` and `Hollywood` normalize to `Los Angeles` when `market='los_angeles'`. |
+| 2026-04-15 | Address normalization should degrade gracefully instead of failing a seed or collector run | `usaddress.parse()` remains the primary parser, but normalization now falls back to a loose street-line/city/state/ZIP pass if parsing fails so ingestion can continue while preserving the raw address. |
 | 2026-04-15 | Prefer `httpx` + `psycopg` + `typer`; keep `sodapy` and `supabase-py` optional | This keeps the runtime lean and closer to the underlying protocols while preserving future flexibility. |
 | 2026-04-15 | Start PDF extraction with `pdfplumber`, use `tabula-py` only as a fallback | Avoid a Java dependency unless a specific source materially benefits from lattice extraction. |
 | 2026-04-15 | Initial schema applied to Supabase via Alembic using session pooler connection | Local network does not support IPv6, so the Supabase session pooler URL is the reliable development path. Extensions `postgis` and `pg_trgm` are enabled in the target database. |
+| 2026-04-15 | `ProjectRelationship` uses explicit outgoing and incoming ORM paths | Self-referential project links need separate foreign-key-aware relationships for `RelP1-6` import and later graph queries. |
+| 2026-04-15 | Add lookup indexes in a follow-up migration and ignore PostGIS system tables in Alembic autogenerate | Added indexes for `status_history(project_id, status_date)`, `change_log(project_id, timestamp)`, `project_source_records(project_id)`, `project_identifiers(value)`, and `project_relationships(related_project_id)`. Alembic excludes `spatial_ref_sys` from future diffs. |
 
 ---
 
