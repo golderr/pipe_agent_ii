@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -40,6 +42,10 @@ def test_persist_collected_records_creates_status_change_review_item(
             "status_evidence_date": "2013-01-02",
             "total_units": 260,
         },
+        source_row_id="row-57hi~6iij-sky2",
+        source_created_at=datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC),
+        source_updated_at=datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC),
+        source_row_hash="abc123",
     )
 
     result = persist_collected_records(
@@ -47,20 +53,29 @@ def test_persist_collected_records_creates_status_change_review_item(
         market="los_angeles",
         source_name="ladbs_permits",
         raw_records=[raw_record],
+        collection_mode="incremental",
+        incremental_since=datetime(2020, 5, 3, 9, 18, 23, 851000, tzinfo=UTC),
     )
     postgres_session.flush()
 
     assert result.records_pulled == 1
+    assert result.collection_mode == "incremental"
     assert result.matched_existing_projects == 1
     assert result.matched_by_address == 1
     assert result.inserted_source_records == 1
     assert result.inserted_identifiers == 1
     assert result.status_change_review_items == 1
+    assert result.source_min_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
+    assert result.source_max_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
 
     source_run = postgres_session.execute(
         select(SourceRun).where(SourceRun.id == result.source_run_id)
     ).scalar_one()
     assert source_run.records_pulled == 1
+    assert source_run.collection_mode == "incremental"
+    assert source_run.incremental_since == datetime(2020, 5, 3, 9, 18, 23, 851000, tzinfo=UTC)
+    assert source_run.source_min_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
+    assert source_run.source_max_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
     assert source_run.new_matches == 1
     assert source_run.updates_found == 1
 
@@ -99,6 +114,10 @@ def test_persist_collected_records_creates_status_change_review_item(
     ).scalar_one()
     assert source_record.project_id == project.id
     assert source_record.source_record_id == "11010-10000-02451"
+    assert source_record.source_row_id == "row-57hi~6iij-sky2"
+    assert source_record.source_created_at == datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC)
+    assert source_record.source_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
+    assert source_record.source_row_hash == "abc123"
 
 
 def test_persist_collected_records_creates_new_candidate_review_item(

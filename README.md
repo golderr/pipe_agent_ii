@@ -21,6 +21,7 @@ This repository is scaffolded through Step `1.8` seed persistence:
 - first-pass public source matching/review persistence (`SourceRun`, `ProjectSourceRecord`, `ReviewItem`)
 - working LADBS Socrata completeness and recall-audit docs under `docs/source_specs/` and `docs/audits/`
 - first LADBS recall-audit results showing `Bldg-New` is a useful narrow slice, but not sufficient as the full LADBS lifecycle strategy
+- Socrata collector modes for `preview`, `full`, and `incremental` collection, with persisted source cursor metadata and row hashes for matched source records
 
 ## Local Setup
 
@@ -62,6 +63,7 @@ tcg-pipeline preview-costar .\data\seed\costar\ --market los_angeles --allowed-c
 tcg-pipeline seed-costar .\data\seed\costar\ --market los_angeles --allowed-city "Los Angeles" --dry-run
 tcg-pipeline preview-source ladbs_permits --market los_angeles --limit 3
 tcg-pipeline collect-source ladbs_permits --market los_angeles --limit 100 --dry-run
+tcg-pipeline collect-source ladbs_permits --market los_angeles --mode incremental --dry-run
 ```
 
 For the current `los_angeles` dataset, treat the seed as City of Los Angeles only. The ingesters already support `--allowed-city`, and using it now keeps West Hollywood, Glendale, Burbank, and other out-of-scope records out of the LA seed.

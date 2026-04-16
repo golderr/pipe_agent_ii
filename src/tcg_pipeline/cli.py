@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from sqlalchemy import select
 
+from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest
 from tcg_pipeline.collectors.factory import build_collector
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.connection import get_session_factory
+from tcg_pipeline.db.models import SourceRun
 from tcg_pipeline.db.seed import (
     ingest_costar_workbooks,
     ingest_pipedream_workbooks,
@@ -23,6 +27,10 @@ from tcg_pipeline.status_rules import get_status_evidence_rule
 from tcg_pipeline.utils.logging import configure_logging
 
 app = typer.Typer(help="TCG pipeline tracker CLI.")
+COLLECTION_MODE_OPTION = typer.Option(
+    CollectionMode.FULL,
+    help="Collection mode: full backfill or incremental from the last source-run cursor.",
+)
 
 
 @app.callback()
@@ -211,10 +219,13 @@ def preview_source(
         update={"max_records": limit}
     )
     collector = build_collector(source_config, market=market)
-    raw_records = asyncio.run(collector.collect())
+    raw_records = asyncio.run(
+        collector.collect(CollectionRequest(mode=CollectionMode.PREVIEW))
+    )
 
     typer.echo(f"Market: {market}")
     typer.echo(f"Source: {source_name}")
+    typer.echo(f"Mode: {CollectionMode.PREVIEW.value}")
     typer.echo(f"Collected records: {len(raw_records)}")
     for raw_record in raw_records[: min(limit, len(raw_records))]:
         direct_status = raw_record.mapped_fields.get("pipeline_status")
@@ -238,10 +249,16 @@ def preview_source(
 def collect_source(
     source_name: str,
     market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
+    mode: CollectionMode = COLLECTION_MODE_OPTION,
     limit: int | None = typer.Option(
         None,
         min=1,
         help="Optional max record count to collect for this run.",
+    ),
+    overlap_hours: int = typer.Option(
+        24,
+        min=0,
+        help="Overlap window used when deriving incremental runs from the previous source cursor.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -253,11 +270,30 @@ def collect_source(
     if limit is not None:
         source_config = source_config.model_copy(update={"max_records": limit})
 
+    request = CollectionRequest(mode=mode)
+    if mode == CollectionMode.INCREMENTAL:
+        session_factory = get_session_factory()
+        with session_factory() as session:
+            request.updated_since = _resolve_incremental_cursor(
+                session,
+                market=market,
+                source_name=source_name,
+                overlap_hours=overlap_hours,
+            )
+        if request.updated_since is None:
+            typer.echo(
+                "No prior source-run cursor metadata found; falling back to full collection mode."
+            )
+            request.mode = CollectionMode.FULL
+
     collector = build_collector(source_config, market=market)
-    raw_records = asyncio.run(collector.collect())
+    raw_records = asyncio.run(collector.collect(request))
 
     typer.echo(f"Market: {market}")
     typer.echo(f"Source: {source_name}")
+    typer.echo(f"Mode: {request.mode.value}")
+    if request.updated_since is not None:
+        typer.echo(f"Incremental since: {request.updated_since.isoformat()}")
     typer.echo(f"Collected records: {len(raw_records)}")
 
     if dry_run:
@@ -270,10 +306,16 @@ def collect_source(
             market=market,
             source_name=source_name,
             raw_records=raw_records,
+            collection_mode=request.mode.value,
+            incremental_since=request.updated_since,
         )
         session.commit()
 
     typer.echo(f"Source run id: {persist_result.source_run_id}")
+    if persist_result.source_min_updated_at is not None:
+        typer.echo(f"Source min updated_at: {persist_result.source_min_updated_at.isoformat()}")
+    if persist_result.source_max_updated_at is not None:
+        typer.echo(f"Source max updated_at: {persist_result.source_max_updated_at.isoformat()}")
     typer.echo(f"Matched existing projects: {persist_result.matched_existing_projects}")
     typer.echo(f"Matched by source record: {persist_result.matched_by_source_record}")
     typer.echo(f"Matched by identifier: {persist_result.matched_by_identifier}")
@@ -284,6 +326,25 @@ def collect_source(
     typer.echo(f"New candidate review items: {persist_result.new_candidate_review_items}")
     typer.echo(f"Status change review items: {persist_result.status_change_review_items}")
     typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
+
+
+def _resolve_incremental_cursor(
+    session,
+    *,
+    market: str,
+    source_name: str,
+    overlap_hours: int,
+):
+    latest_run = session.execute(
+        select(SourceRun).where(
+            SourceRun.market == market,
+            SourceRun.source_name == source_name,
+            SourceRun.source_max_updated_at.is_not(None),
+        ).order_by(SourceRun.run_timestamp.desc())
+    ).scalars().first()
+    if latest_run is None or latest_run.source_max_updated_at is None:
+        return None
+    return latest_run.source_max_updated_at - timedelta(hours=overlap_hours)
 
 
 def _echo_pipedream_import_summary(import_results: list[PipedreamImportResult]) -> None:

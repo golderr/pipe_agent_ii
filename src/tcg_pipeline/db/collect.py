@@ -34,6 +34,10 @@ from tcg_pipeline.status_rules import build_status_suggestion
 @dataclass(slots=True)
 class CollectPersistResult:
     source_run_id: uuid.UUID
+    collection_mode: str = "full"
+    incremental_since: datetime | None = None
+    source_min_updated_at: datetime | None = None
+    source_max_updated_at: datetime | None = None
     records_pulled: int = 0
     matched_existing_projects: int = 0
     matched_by_source_record: int = 0
@@ -53,11 +57,18 @@ def persist_collected_records(
     market: str,
     source_name: str,
     raw_records: list[RawRecord],
+    collection_mode: str = "full",
+    incremental_since: datetime | None = None,
 ) -> CollectPersistResult:
     run_started_at = datetime.now(UTC)
+    source_min_updated_at, source_max_updated_at = _source_updated_at_bounds(raw_records)
     source_run = SourceRun(
         market=market,
         source_name=source_name,
+        collection_mode=collection_mode,
+        incremental_since=incremental_since,
+        source_min_updated_at=source_min_updated_at,
+        source_max_updated_at=source_max_updated_at,
         records_pulled=len(raw_records),
     )
     session.add(source_run)
@@ -65,6 +76,10 @@ def persist_collected_records(
 
     result = CollectPersistResult(
         source_run_id=source_run.id,
+        collection_mode=collection_mode,
+        incremental_since=incremental_since,
+        source_min_updated_at=source_min_updated_at,
+        source_max_updated_at=source_max_updated_at,
         records_pulled=len(raw_records),
     )
 
@@ -164,6 +179,10 @@ def _upsert_source_record(
                 project_id=project.id,
                 source_name=raw_record.source_name,
                 source_record_id=raw_record.source_record_id,
+                source_row_id=raw_record.source_row_id,
+                source_created_at=raw_record.source_created_at,
+                source_updated_at=raw_record.source_updated_at,
+                source_row_hash=raw_record.source_row_hash,
                 first_seen_at=source_run_timestamp,
                 last_seen_at=source_run_timestamp,
                 last_pulled_at=source_run_timestamp,
@@ -175,6 +194,10 @@ def _upsert_source_record(
         return False
 
     source_record.project_id = project.id
+    source_record.source_row_id = raw_record.source_row_id
+    source_record.source_created_at = raw_record.source_created_at
+    source_record.source_updated_at = raw_record.source_updated_at
+    source_record.source_row_hash = raw_record.source_row_hash
     source_record.last_seen_at = source_run_timestamp
     source_record.last_pulled_at = source_run_timestamp
     source_record.raw_payload = _serialize_payload(raw_record.raw_payload)
@@ -338,6 +361,19 @@ def _build_status_suggestion_for_unmatched_record(
 
 def _serialize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: serialize_json_value(value) for key, value in payload.items()}
+
+
+def _source_updated_at_bounds(
+    raw_records: list[RawRecord],
+) -> tuple[datetime | None, datetime | None]:
+    updated_at_values = sorted(
+        raw_record.source_updated_at
+        for raw_record in raw_records
+        if raw_record.source_updated_at is not None
+    )
+    if not updated_at_values:
+        return None, None
+    return updated_at_values[0], updated_at_values[-1]
 
 
 def _coerce_text(value: Any) -> str | None:

@@ -142,7 +142,11 @@ class DismissReason(str, enum.Enum):
     OTHER = "other"
 
 
-PIPELINE_STATUS_ENUM = SAEnum(PipelineStatus, name="pipeline_status_enum", values_callable=_enum_values)
+PIPELINE_STATUS_ENUM = SAEnum(
+    PipelineStatus,
+    name="pipeline_status_enum",
+    values_callable=_enum_values,
+)
 RENT_OR_SALE_ENUM = SAEnum(RentOrSale, name="rent_or_sale_enum", values_callable=_enum_values)
 PRODUCT_TYPE_ENUM = SAEnum(ProductType, name="product_type_enum", values_callable=_enum_values)
 AGE_RESTRICTION_ENUM = SAEnum(
@@ -451,7 +455,17 @@ class ProjectSourceRecord(Base):
     )
     source_name: Mapped[str] = mapped_column(String(120), nullable=False)
     source_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_row_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    source_row_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_pulled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -471,10 +485,23 @@ class SourceRun(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     market: Mapped[str] = mapped_column(String(100), nullable=False)
     source_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    collection_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="full")
     run_timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+    incremental_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    source_min_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    source_max_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     records_pulled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     new_matches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
