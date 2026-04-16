@@ -1,48 +1,22 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date
 from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
 from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from tcg_pipeline.cli import app
-from tcg_pipeline.db.connection import get_engine
 from tcg_pipeline.db.models import IdentifierType, ProjectIdentifier, ProjectRelationship
 from tcg_pipeline.db.seed import (
     ingest_pipedream_workbooks,
     persist_pipedream_import_results,
 )
-from tcg_pipeline.settings import get_settings
 
 runner = CliRunner()
-
-
-@pytest.fixture()
-def postgres_session() -> Session:
-    if not get_settings().has_database_url:
-        pytest.skip("DATABASE_URL is required for persistence tests.")
-
-    engine = get_engine()
-    connection = engine.connect()
-    transaction = connection.begin()
-    session_factory = sessionmaker(
-        bind=connection,
-        autoflush=False,
-        expire_on_commit=False,
-        class_=Session,
-    )
-    session = session_factory()
-    try:
-        yield session
-    finally:
-        session.close()
-        transaction.rollback()
-        connection.close()
 
 
 def test_persist_import_results_resolves_cross_file_relationships(
@@ -165,6 +139,47 @@ def test_seed_pipedream_command_persists_when_not_dry_run(
         )
     ).scalar_one()
     assert persisted_identifier == "994.00001"
+
+
+def test_persist_import_results_is_idempotent_for_existing_project_ids(
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_repeat.xlsx",
+        [
+            {
+                "ProjectID": "995.00001",
+                "Address": "5939 W Sunset Blvd",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "Pending",
+            }
+        ],
+    )
+
+    first_import_results = ingest_pipedream_workbooks([workbook_path], market="los_angeles")
+    second_import_results = ingest_pipedream_workbooks([workbook_path], market="los_angeles")
+    first_persist_result = persist_pipedream_import_results(
+        postgres_session,
+        first_import_results,
+    )
+    second_persist_result = persist_pipedream_import_results(
+        postgres_session,
+        second_import_results,
+    )
+
+    assert first_persist_result.inserted_projects == 1
+    assert second_persist_result.inserted_projects == 0
+    assert second_persist_result.skipped_existing_project_ids == ["995.00001"]
+
+    identifier_rows = postgres_session.execute(
+        select(ProjectIdentifier.value).where(
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID
+        )
+    ).scalars()
+    assert list(identifier_rows) == ["995.00001"]
 
 
 def _build_pipedream_workbook(path: Path, rows: list[dict[str, object]]) -> Path:

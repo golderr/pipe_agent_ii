@@ -7,7 +7,9 @@ import typer
 
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.seed import (
+    ingest_costar_workbooks,
     ingest_pipedream_workbooks,
+    persist_costar_import_result,
     persist_pipedream_import_results,
 )
 from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
@@ -106,6 +108,11 @@ def seed_pipedream(
 
     typer.echo(f"Persisted projects: {persist_result.inserted_projects}")
     typer.echo(f"Persisted dismissed records: {persist_result.inserted_dismissed_records}")
+    typer.echo(f"Skipped existing projects: {persist_result.skipped_existing_project_count}")
+    typer.echo(
+        "Skipped existing dismissed records: "
+        f"{persist_result.skipped_existing_dismissed_count}"
+    )
     typer.echo(f"Created relationships: {persist_result.created_relationships}")
     typer.echo(f"Skipped existing relationships: {persist_result.skipped_existing_relationships}")
     typer.echo(f"Unresolved relationships: {persist_result.unresolved_relationship_count}")
@@ -133,6 +140,59 @@ def preview_costar(
     )
     result = ingester.ingest_workbooks(resolved_workbook_paths)
     _echo_costar_import_summary(result)
+
+
+@app.command()
+def seed_costar(
+    workbook_paths: list[Path],
+    market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
+    source_name: str = typer.Option("costar", help="Source name stored on source records."),
+    allowed_city: Annotated[
+        list[str] | None,
+        typer.Option(help="Optional city filter; may be provided multiple times."),
+    ] = None,
+    dry_run: bool = typer.Option(
+        False,
+        help="Preview import results without writing to the database.",
+    ),
+) -> None:
+    """Ingest one or more CoStar workbooks and optionally persist them."""
+    resolved_workbook_paths = _expand_workbook_inputs(workbook_paths, suffix=".xlsx")
+    if not resolved_workbook_paths:
+        raise typer.BadParameter("No .xlsx CoStar workbooks found in the provided paths.")
+
+    import_result = ingest_costar_workbooks(
+        resolved_workbook_paths,
+        market=market,
+        source_name=source_name,
+        allowed_cities=allowed_city or None,
+    )
+    _echo_costar_import_summary(import_result)
+
+    if dry_run:
+        return
+
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        persist_result = persist_costar_import_result(session, import_result)
+        session.commit()
+
+    typer.echo(f"Persisted new projects: {persist_result.inserted_projects}")
+    typer.echo(f"Matched existing projects: {persist_result.matched_existing_projects}")
+    typer.echo(f"Matched by CoStar property id: {persist_result.matched_by_costar_property_id}")
+    typer.echo(f"Matched by APN: {persist_result.matched_by_apn}")
+    typer.echo(f"Matched by address: {persist_result.matched_by_address}")
+    typer.echo(f"Inserted identifiers: {persist_result.inserted_identifiers}")
+    typer.echo(f"Skipped existing identifiers: {persist_result.skipped_existing_identifiers}")
+    typer.echo(f"Inserted source records: {persist_result.inserted_source_records}")
+    typer.echo(f"Updated source records: {persist_result.updated_source_records}")
+    typer.echo(f"Inserted status history entries: {persist_result.inserted_status_history_entries}")
+    typer.echo(
+        "Skipped existing status history entries: "
+        f"{persist_result.skipped_existing_status_history_entries}"
+    )
+    typer.echo(f"Merged fields: {persist_result.merged_fields}")
+    typer.echo(f"Ambiguous matches: {persist_result.ambiguous_match_count}")
 
 
 def _echo_pipedream_import_summary(import_results: list[PipedreamImportResult]) -> None:

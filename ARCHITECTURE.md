@@ -2,8 +2,8 @@
 
 > **Living document.** This file is the single source of truth for the project. Claude Code / Codex should read this at the start of every session, update it when the plan changes, and mark build steps complete as code is committed. Use commits as checkpoints to review the plan and evaluate if anything changed and should be recorded in this file.
 
-**Last updated:** 2026-04-15T17:59
-**Status:** Build in progress — foundation scaffolded, initial schema applied, Pipedream import/persistence is in place, and the CoStar ingester is implemented with header-based multi-file parsing and diagnostics.
+**Last updated:** 2026-04-15T20:26
+**Status:** Build in progress — foundation scaffolded, both seed ingesters and persistence/merge paths are implemented, and the repo is ready to run the real LA seed once the source workbooks are available.
 - ✅ Pipedream field mapping (81 fields)
 - ✅ CoStar field mapping (287 columns, MF + non-MF)
 - ✅ Master schema finalized
@@ -1755,7 +1755,7 @@ On each incoming record:
 | 1.5 | Build address normalization module | `done` | Implemented in `src/tcg_pipeline/matching/normalizer.py` with `usaddress` parsing, unit stripping, suffix/directional normalization, numbered-street normalization, address-range parsing, and initial LA city alias handling. Covered by targeted pytest cases. |
 | 1.6 | Build Pipedream ingester (seeder) | `done` | `src/tcg_pipeline/ingesters/pipedream.py` parses `DataStorage`, maps rows into ORM-ready project bundles, unrolls status history, stages project relationships, captures dismissed delete-flag rows, records diagnostics for invalid source values, and supports CLI preview via `tcg-pipeline preview-pipedream`. |
 | 1.7 | Build CoStar ingester (seeder) | `done` | `src/tcg_pipeline/ingesters/costar.py` ingests `.xlsx` exports by header name, deduplicates across files on `PropertyID`, normalizes CoStar city/ZIP/date formats, captures diagnostics for invalid source values, and supports directory-based CLI preview via `tcg-pipeline preview-costar`. |
-| 1.8 | Seed LA market with CoStar + Pipedream data | `not_started` | First real data in the system |
+| 1.8 | Seed LA market with CoStar + Pipedream data | `in_progress` | Seed persistence is implemented: `tcg-pipeline seed-pipedream` is rerunnable against existing Pipedream IDs, and `tcg-pipeline seed-costar` merges CoStar into existing projects by `costar_property_id`, APN, then canonical address while filling gaps only. The actual LA market seed still requires the real workbook files. |
 
 ### Phase 2: First Public Source + Matching
 > Goal: LADBS permits flowing in and matching against seeded data.
@@ -1844,6 +1844,8 @@ On each incoming record:
 | 2026-04-15 | CoStar "Abandoned" projects imported as Inactive, not actively tracked | 39% of CoStar export is Abandoned. Useful as history but shouldn't generate review queue noise. |
 | 2026-04-15 | CoStar bed mix percentages are 0-100 scale; Pipedream uses 0-1 | Normalize to 0-1 on import. Store as 0.0-1.0 in database. |
 | 2026-04-15 | CoStar `Secondary Type` and `Building Class` stay in source payload for now | They are useful source details, but the current canonical `Project` schema only needs `property_type` plus derived `product_type`. Keep the raw source values on `ProjectSourceRecord` until a concrete downstream use justifies schema expansion. |
+| 2026-04-15 | CoStar seed-time matching order is `costar_property_id` → APN → canonical address | `costar_property_id` makes reruns idempotent for already-seeded CoStar records. For first-pass dedup against Pipedream, APN remains the primary high-confidence key and canonical address is the fallback. |
+| 2026-04-15 | Seed persistence is rerunnable; existing seed identifiers are skipped or merged instead of hard-failing | Re-running `seed-pipedream` skips existing Pipedream IDs and dismissed records. Re-running `seed-costar` updates the existing CoStar source record, dedupes status history, and adds only missing identifiers/fields. |
 | 2026-04-15 | Source workflow analysis complete — all 6 Compound sources verified | All fields Compound claimed are confirmed extractable. Detailed access methods, endpoints, and workflows documented in Section 4b. |
 | 2026-04-15 | ZIMAS is enrichment-only, not discovery | No programmatic address→case lookup exists. Case numbers must come from other sources (LA Case Reports, LADBS, Pipedream URLs). PDIS pages are scrapeable once case number is known. |
 | 2026-04-15 | LA Case Reports is the primary LA discovery source | Biweekly PDFs via API at planning.lacity.gov/dcpapi/general/biweeklycase/doc/{id}. Must be PDF-parsed; no structured API. ~81/421 cases are housing-relevant per biweekly period. |
