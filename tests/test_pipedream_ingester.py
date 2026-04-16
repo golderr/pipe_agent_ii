@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook
 from typer.testing import CliRunner
 
@@ -207,6 +209,53 @@ def test_preview_pipedream_command_reports_counts(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "Imported projects: 1" in result.stdout
     assert "Dismissed records: 0" in result.stdout
+    assert "Missing ProjectID rows: 0" in result.stdout
+
+
+def test_ingest_workbook_records_diagnostics_for_invalid_values(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_invalid.xlsx",
+        [
+            {
+                "ProjectID": "23.00001",
+                "Address": "5939 W Sunset Blvd",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "04/01/2026",
+                "CurrStatusDate": "not a date",
+                "RentFS": "Lease",
+                "ProdType": "Tower",
+                "Senior": "Retiree",
+            },
+            {
+                "ProjectID": 23.1,
+                "Address": "9000 Sunset Blvd",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "Pending",
+            },
+        ],
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = PipedreamIngester(market="los_angeles").ingest_workbook(workbook_path)
+
+    assert result.imported_count == 2
+    assert result.issue_counts == {
+        "invalid_date": 1,
+        "invalid_enum": 3,
+        "invalid_status": 1,
+        "suspicious_identifier": 1,
+    }
+    assert result.project_records[0].project.pipeline_status == PipelineStatus.PROPOSED
+    assert result.project_records[1].project_identifier_value == "23.10000"
+    assert "Unrecognized pipeline status; defaulting to Proposed" in caplog.text
+    assert "Project identifier normalized to '23.10000'" in caplog.text
 
 
 def _build_pipedream_workbook(path: Path, rows: list[dict[str, object]]) -> Path:

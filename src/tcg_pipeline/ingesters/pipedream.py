@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -26,6 +28,8 @@ from tcg_pipeline.db.models import (
     StatusHistory,
 )
 from tcg_pipeline.matching.normalizer import normalize_address, normalize_city, normalize_postal_code
+
+logger = logging.getLogger(__name__)
 
 HEADER_ROW_INDEX = 3
 DATA_START_ROW_INDEX = 4
@@ -106,7 +110,17 @@ HEADER_COLUMNS = (
     "Editor",
     "EditDate",
 )
-PROJECT_ID_FIELDS = {"ProjectID", "CorrP", "PCPart", "RelP1", "RelP2", "RelP3", "RelP4", "RelP5", "RelP6"}
+PROJECT_ID_FIELDS = {
+    "ProjectID",
+    "CorrP",
+    "PCPart",
+    "RelP1",
+    "RelP2",
+    "RelP3",
+    "RelP4",
+    "RelP5",
+    "RelP6",
+}
 STATUS_FIELD_PAIRS = (
     ("PStat6", "PStatDate6"),
     ("PStat5", "PStatDate5"),
@@ -172,6 +186,15 @@ AGE_RESTRICTION_MAP = {
 
 
 @dataclass(slots=True)
+class PipedreamImportIssue:
+    issue_type: str
+    row_number: int
+    field_name: str
+    raw_value: str | None
+    message: str
+
+
+@dataclass(slots=True)
 class StagedProjectRelationship:
     project_identifier_value: str
     related_project_identifier_value: str
@@ -197,6 +220,8 @@ class PipedreamImportResult:
     dismissed_records: list[DismissedRecord] = field(default_factory=list)
     staged_relationships: list[StagedProjectRelationship] = field(default_factory=list)
     skipped_project_ids: list[str] = field(default_factory=list)
+    issues: list[PipedreamImportIssue] = field(default_factory=list)
+    missing_project_id_rows: int = 0
 
     @property
     def imported_count(self) -> int:
@@ -205,6 +230,42 @@ class PipedreamImportResult:
     @property
     def dismissed_count(self) -> int:
         return len(self.dismissed_records)
+
+    @property
+    def issue_count(self) -> int:
+        return len(self.issues)
+
+    @property
+    def issue_counts(self) -> dict[str, int]:
+        return dict(Counter(issue.issue_type for issue in self.issues))
+
+    def add_issue(
+        self,
+        *,
+        issue_type: str,
+        row_number: int,
+        field_name: str,
+        raw_value: Any,
+        message: str,
+    ) -> None:
+        issue = PipedreamImportIssue(
+            issue_type=issue_type,
+            row_number=row_number,
+            field_name=field_name,
+            raw_value=_display_value(raw_value),
+            message=message,
+        )
+        if issue in self.issues:
+            return
+        self.issues.append(issue)
+        logger.warning(
+            "%s row %s field %s: %s (raw=%r)",
+            self.source_path.name,
+            row_number,
+            field_name,
+            message,
+            issue.raw_value,
+        )
 
 
 class PipedreamIngester:
@@ -241,9 +302,22 @@ class PipedreamIngester:
                 worksheet.iter_rows(min_row=DATA_START_ROW_INDEX),
                 start=DATA_START_ROW_INDEX,
             ):
-                payload = _build_row_payload(row, column_to_header)
-                project_identifier = _clean_project_identifier(payload.get("ProjectID"))
+                payload = _build_row_payload(
+                    row,
+                    column_to_header,
+                    result=result,
+                    row_number=row_number,
+                )
+                project_identifier = _clean_project_identifier(
+                    payload.get("ProjectID"),
+                    result=result,
+                    row_number=row_number,
+                    field_name="ProjectID",
+                )
                 if not project_identifier:
+                    if _row_has_values(payload):
+                        result.missing_project_id_rows += 1
+                        logger.warning("%s row %s skipped: missing ProjectID", path.name, row_number)
                     continue
 
                 if self.allowed_cities:
@@ -254,7 +328,12 @@ class PipedreamIngester:
 
                 raw_status = _clean_text(payload.get("CurrStatus"))
                 result.staged_relationships.extend(
-                    _build_relationships(payload, project_identifier)
+                    _build_relationships(
+                        payload,
+                        project_identifier,
+                        result=result,
+                        row_number=row_number,
+                    )
                 )
 
                 if raw_status in DELETE_STATUS_REASON_MAP:
@@ -276,6 +355,7 @@ class PipedreamIngester:
                     market=self.market,
                     source_name=self.source_name,
                     imported_at=imported_at,
+                    result=result,
                 )
                 result.project_records.append(project_record)
 
@@ -293,14 +373,25 @@ def _extract_headers(worksheet: Worksheet) -> dict[int, str]:
     return headers
 
 
-def _build_row_payload(row: tuple[Any, ...], column_to_header: dict[int, str]) -> dict[str, Any]:
+def _build_row_payload(
+    row: tuple[Any, ...],
+    column_to_header: dict[int, str],
+    *,
+    result: PipedreamImportResult,
+    row_number: int,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for column_index, header in column_to_header.items():
         if column_index > len(row):
             continue
         cell_value = row[column_index - 1].value
         if header in PROJECT_ID_FIELDS:
-            payload[header] = _clean_project_identifier(cell_value)
+            payload[header] = _clean_project_identifier(
+                cell_value,
+                result=result,
+                row_number=row_number,
+                field_name=header,
+            )
         else:
             payload[header] = cell_value
     return payload
@@ -314,6 +405,7 @@ def _build_project_record(
     market: str,
     source_name: str,
     imported_at: datetime,
+    result: PipedreamImportResult,
 ) -> PipedreamProjectRecord:
     normalized_address = normalize_address(
         _clean_text(payload.get("Address")) or "",
@@ -337,11 +429,28 @@ def _build_project_record(
         tcg_region=_clean_text(payload.get("Region")),
         jurisdiction=_clean_text(payload.get("Jurisdiction")),
         project_name=_clean_text(payload.get("Name")),
-        previous_names=_dedupe_strings(_clean_text(payload.get(field)) for field in PREVIOUS_NAME_FIELDS),
+        previous_names=_dedupe_strings(
+            _clean_text(payload.get(field)) for field in PREVIOUS_NAME_FIELDS
+        ),
         developer=_clean_text(payload.get("Developer")),
-        rent_or_sale=_parse_rent_or_sale(payload.get("RentFS")),
-        product_type=_parse_product_type(payload.get("ProdType")),
-        age_restriction=_parse_age_restriction(payload.get("Senior")),
+        rent_or_sale=_parse_rent_or_sale(
+            payload.get("RentFS"),
+            result=result,
+            row_number=row_number,
+            field_name="RentFS",
+        ),
+        product_type=_parse_product_type(
+            payload.get("ProdType"),
+            result=result,
+            row_number=row_number,
+            field_name="ProdType",
+        ),
+        age_restriction=_parse_age_restriction(
+            payload.get("Senior"),
+            result=result,
+            row_number=row_number,
+            field_name="Senior",
+        ),
         stories=_parse_int(payload.get("Elevation")),
         total_units=_parse_int(payload.get("TotUnits")),
         market_rate_units=_parse_int(payload.get("MRUnits")),
@@ -354,11 +463,26 @@ def _build_project_record(
         retail_sf=_parse_int(payload.get("RetailSF")),
         office_sf=_parse_int(payload.get("OfficeSF")),
         hotel_keys=_parse_int(payload.get("HKeys")),
-        pipeline_status=_parse_pipeline_status(payload.get("CurrStatus")),
-        status_date=_parse_date(payload.get("CurrStatusDate")),
+        pipeline_status=_parse_pipeline_status(
+            payload.get("CurrStatus"),
+            result=result,
+            row_number=row_number,
+            field_name="CurrStatus",
+        ),
+        status_date=_parse_date(
+            payload.get("CurrStatusDate"),
+            result=result,
+            row_number=row_number,
+            field_name="CurrStatusDate",
+        ),
         status_confidence=StatusConfidence.HIGH,
         status_source=source_name,
-        date_delivery=_parse_date(payload.get("DeliveryDate")),
+        date_delivery=_parse_date(
+            payload.get("DeliveryDate"),
+            result=result,
+            row_number=row_number,
+            field_name="DeliveryDate",
+        ),
         planner_1_name=_clean_text(payload.get("Plan1Name")),
         planner_1_city=_clean_text(payload.get("Plan1City")),
         planner_1_email=_clean_text(payload.get("Plan1Email")),
@@ -372,12 +496,23 @@ def _build_project_record(
         change_notes=_clean_text(payload.get("ChangeNotes")),
         source_urls=_dedupe_strings(_clean_text(payload.get(field)) for field in SOURCE_URL_FIELDS),
         last_editor=_clean_text(payload.get("Editor")),
-        last_edit_date=_parse_date(payload.get("EditDate")),
+        last_edit_date=_parse_date(
+            payload.get("EditDate"),
+            result=result,
+            row_number=row_number,
+            field_name="EditDate",
+        ),
         created_by=PIPEDREAM_CREATED_BY,
     )
 
     identifiers = _build_identifiers(project, payload, source_name, imported_at, project_identifier)
-    status_history = _build_status_history(project, payload, source_name)
+    status_history = _build_status_history(
+        project,
+        payload,
+        source_name,
+        result=result,
+        row_number=row_number,
+    )
     mapped_fields = {
         "project_name": project.project_name,
         "canonical_address": project.canonical_address,
@@ -399,7 +534,11 @@ def _build_project_record(
         first_seen_at=imported_at,
         last_seen_at=imported_at,
         last_pulled_at=imported_at,
-        raw_payload={key: _serialize_json_value(payload.get(key)) for key in HEADER_COLUMNS if key in payload},
+        raw_payload={
+            key: _serialize_json_value(payload.get(key))
+            for key in HEADER_COLUMNS
+            if key in payload
+        },
         mapped_fields=mapped_fields,
         field_provenance={
             key: {"source": source_name, "confidence": StatusConfidence.HIGH.value}
@@ -469,6 +608,9 @@ def _build_status_history(
     project: Project,
     payload: dict[str, Any],
     source_name: str,
+    *,
+    result: PipedreamImportResult,
+    row_number: int,
 ) -> list[StatusHistory]:
     status_history: list[StatusHistory] = []
     for status_field, date_field in STATUS_FIELD_PAIRS:
@@ -478,8 +620,18 @@ def _build_status_history(
         status_history.append(
             StatusHistory(
                 project=project,
-                status=_parse_pipeline_status(raw_status),
-                status_date=_parse_date(payload.get(date_field)),
+                status=_parse_pipeline_status(
+                    raw_status,
+                    result=result,
+                    row_number=row_number,
+                    field_name=status_field,
+                ),
+                status_date=_parse_date(
+                    payload.get(date_field),
+                    result=result,
+                    row_number=row_number,
+                    field_name=date_field,
+                ),
                 source=source_name,
                 notes=f"Imported from {status_field}",
             )
@@ -490,8 +642,18 @@ def _build_status_history(
         status_history.append(
             StatusHistory(
                 project=project,
-                status=_parse_pipeline_status(current_status),
-                status_date=_parse_date(payload.get("CurrStatusDate")),
+                status=_parse_pipeline_status(
+                    current_status,
+                    result=result,
+                    row_number=row_number,
+                    field_name="CurrStatus",
+                ),
+                status_date=_parse_date(
+                    payload.get("CurrStatusDate"),
+                    result=result,
+                    row_number=row_number,
+                    field_name="CurrStatusDate",
+                ),
                 source=source_name,
                 notes="Imported from current Pipedream status",
             )
@@ -503,10 +665,18 @@ def _build_status_history(
 def _build_relationships(
     payload: dict[str, Any],
     project_identifier: str,
+    *,
+    result: PipedreamImportResult,
+    row_number: int,
 ) -> list[StagedProjectRelationship]:
     relationships: list[StagedProjectRelationship] = []
     for field_name, relationship_type in RELATIONSHIP_FIELD_MAP.items():
-        related_identifier = _clean_project_identifier(payload.get(field_name))
+        related_identifier = _clean_project_identifier(
+            payload.get(field_name),
+            result=result,
+            row_number=row_number,
+            field_name=field_name,
+        )
         if not related_identifier or related_identifier == project_identifier:
             continue
         relationships.append(
@@ -550,32 +720,108 @@ def _build_dismissed_record(
     )
 
 
-def _parse_pipeline_status(value: Any) -> PipelineStatus:
+def _parse_pipeline_status(
+    value: Any,
+    *,
+    result: PipedreamImportResult | None = None,
+    row_number: int | None = None,
+    field_name: str = "CurrStatus",
+) -> PipelineStatus:
     cleaned = _clean_text(value)
     if not cleaned:
         return PipelineStatus.PROPOSED
-    return PIPELINE_STATUS_MAP.get(cleaned, PipelineStatus.PROPOSED)
+
+    status = PIPELINE_STATUS_MAP.get(cleaned)
+    if status is not None:
+        return status
+
+    _record_issue(
+        result=result,
+        issue_type="invalid_status",
+        row_number=row_number,
+        field_name=field_name,
+        raw_value=value,
+        message="Unrecognized pipeline status; defaulting to Proposed",
+    )
+    return PipelineStatus.PROPOSED
 
 
-def _parse_rent_or_sale(value: Any) -> RentOrSale:
+def _parse_rent_or_sale(
+    value: Any,
+    *,
+    result: PipedreamImportResult | None = None,
+    row_number: int | None = None,
+    field_name: str = "RentFS",
+) -> RentOrSale:
     cleaned = _clean_text(value)
     if not cleaned:
         return RentOrSale.UNKNOWN
-    return RENT_OR_SALE_MAP.get(cleaned, RentOrSale.UNKNOWN)
+
+    parsed = RENT_OR_SALE_MAP.get(cleaned)
+    if parsed is not None:
+        return parsed
+
+    _record_issue(
+        result=result,
+        issue_type="invalid_enum",
+        row_number=row_number,
+        field_name=field_name,
+        raw_value=value,
+        message="Unrecognized rent/sale value; defaulting to Unknown",
+    )
+    return RentOrSale.UNKNOWN
 
 
-def _parse_product_type(value: Any) -> ProductType:
+def _parse_product_type(
+    value: Any,
+    *,
+    result: PipedreamImportResult | None = None,
+    row_number: int | None = None,
+    field_name: str = "ProdType",
+) -> ProductType:
     cleaned = _clean_text(value)
     if not cleaned:
         return ProductType.UNKNOWN
-    return PRODUCT_TYPE_MAP.get(cleaned, ProductType.OTHER)
+
+    parsed = PRODUCT_TYPE_MAP.get(cleaned)
+    if parsed is not None:
+        return parsed
+
+    _record_issue(
+        result=result,
+        issue_type="invalid_enum",
+        row_number=row_number,
+        field_name=field_name,
+        raw_value=value,
+        message="Unrecognized product type; defaulting to Other",
+    )
+    return ProductType.OTHER
 
 
-def _parse_age_restriction(value: Any) -> AgeRestriction:
+def _parse_age_restriction(
+    value: Any,
+    *,
+    result: PipedreamImportResult | None = None,
+    row_number: int | None = None,
+    field_name: str = "Senior",
+) -> AgeRestriction:
     cleaned = _clean_text(value)
     if not cleaned:
         return AgeRestriction.UNKNOWN
-    return AGE_RESTRICTION_MAP.get(cleaned, AgeRestriction.UNKNOWN)
+
+    parsed = AGE_RESTRICTION_MAP.get(cleaned)
+    if parsed is not None:
+        return parsed
+
+    _record_issue(
+        result=result,
+        issue_type="invalid_enum",
+        row_number=row_number,
+        field_name=field_name,
+        raw_value=value,
+        message="Unrecognized age restriction; defaulting to Unknown",
+    )
+    return AgeRestriction.UNKNOWN
 
 
 def _build_location(lat_value: Any, lng_value: Any) -> WKTElement | None:
@@ -617,17 +863,36 @@ def _clean_identifier_text(value: Any) -> str | None:
     return cleaned
 
 
-def _clean_project_identifier(value: Any) -> str | None:
+def _clean_project_identifier(
+    value: Any,
+    *,
+    result: PipedreamImportResult | None = None,
+    row_number: int | None = None,
+    field_name: str = "ProjectID",
+) -> str | None:
     cleaned = _clean_text(value)
     if cleaned is None:
         return None
+
+    normalized = cleaned
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return f"{float(value):.5f}"
-    if "." in cleaned:
+        normalized = f"{float(value):.5f}"
+    elif "." in cleaned:
         prefix, suffix = cleaned.split(".", 1)
         if prefix.isdigit() and suffix.isdigit():
-            return f"{prefix}.{suffix.ljust(5, '0')[:5]}"
-    return cleaned
+            normalized = f"{prefix}.{suffix.ljust(5, '0')[:5]}"
+
+    if _is_suspicious_project_identifier(value, cleaned):
+        _record_issue(
+            result=result,
+            issue_type="suspicious_identifier",
+            row_number=row_number,
+            field_name=field_name,
+            raw_value=value,
+            message=f"Project identifier normalized to {normalized!r}; verify abbreviated ID format",
+        )
+
+    return normalized
 
 
 def _parse_int(value: Any) -> int | None:
@@ -656,7 +921,13 @@ def _parse_float(value: Any) -> float | None:
         return None
 
 
-def _parse_date(value: Any) -> date | None:
+def _parse_date(
+    value: Any,
+    *,
+    result: PipedreamImportResult | None = None,
+    row_number: int | None = None,
+    field_name: str = "date",
+) -> date | None:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -673,6 +944,15 @@ def _parse_date(value: Any) -> date | None:
             return datetime.strptime(cleaned, fmt).date()
         except ValueError:
             continue
+
+    _record_issue(
+        result=result,
+        issue_type="invalid_date",
+        row_number=row_number,
+        field_name=field_name,
+        raw_value=value,
+        message="Unrecognized date value; storing null",
+    )
     return None
 
 
@@ -685,9 +965,66 @@ def _dedupe_strings(values: Iterable[str | None]) -> list[str]:
     return deduped
 
 
+def _display_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
 def _serialize_json_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, date):
         return value.isoformat()
     return value
+
+
+def _record_issue(
+    *,
+    result: PipedreamImportResult | None,
+    issue_type: str,
+    row_number: int | None,
+    field_name: str,
+    raw_value: Any,
+    message: str,
+) -> None:
+    if result is None or row_number is None:
+        return
+    result.add_issue(
+        issue_type=issue_type,
+        row_number=row_number,
+        field_name=field_name,
+        raw_value=raw_value,
+        message=message,
+    )
+
+
+def _is_suspicious_project_identifier(value: Any, cleaned: str) -> bool:
+    if "." not in cleaned:
+        return False
+
+    prefix, suffix = cleaned.split(".", 1)
+    if not prefix.isdigit() or not suffix.isdigit():
+        return False
+    if len(suffix) >= 5:
+        return False
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return True
+    return cleaned != f"{prefix}.{suffix.ljust(5, '0')[:5]}"
+
+
+def _row_has_values(payload: dict[str, Any]) -> bool:
+    return any(_has_value(value) for value in payload.values())
+
+
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() not in NULL_SENTINELS
+    return True
