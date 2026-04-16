@@ -38,3 +38,16 @@ def test_build_status_suggestion_ignores_non_advancing_signal() -> None:
     )
 
     assert suggestion is None
+
+
+def test_build_status_suggestion_supports_unmatched_candidate() -> None:
+    suggestion = build_status_suggestion(
+        current_status=None,
+        evidence_type="building_permit_issued",
+        evidence_date=date(2013, 1, 2),
+    )
+
+    assert suggestion is not None
+    assert suggestion.current_status is None
+    assert suggestion.suggested_status == PipelineStatus.APPROVED
+    assert suggestion.rule_code == "building_permit_issued"

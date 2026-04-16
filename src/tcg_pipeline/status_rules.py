@@ -27,7 +27,7 @@ class StatusEvidenceRule:
 
 @dataclass(frozen=True, slots=True)
 class StatusSuggestion:
-    current_status: PipelineStatus
+    current_status: PipelineStatus | None
     suggested_status: PipelineStatus
     evidence_type: str
     evidence_date: date | None
@@ -59,7 +59,7 @@ def get_status_evidence_rule(evidence_type: str | None) -> StatusEvidenceRule | 
 
 def build_status_suggestion(
     *,
-    current_status: PipelineStatus,
+    current_status: PipelineStatus | None,
     evidence_type: str | None,
     evidence_date: date | None,
     reason_override: str | None = None,
@@ -83,9 +83,11 @@ def build_status_suggestion(
 
 
 def _should_emit_status_suggestion(
-    current_status: PipelineStatus,
+    current_status: PipelineStatus | None,
     suggested_status: PipelineStatus,
 ) -> bool:
+    if current_status is None:
+        return True
     if current_status == suggested_status:
         return False
 

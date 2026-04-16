@@ -139,3 +139,16 @@ def test_persist_collected_records_creates_new_candidate_review_item(
     ).scalar_one()
     assert review_item.item_type == ReviewItemType.NEW_CANDIDATE
     assert review_item.project_id is None
+    assert review_item.payload["status_suggestion"] == {
+        "current_status": None,
+        "suggested_status": "Approved",
+        "evidence_type": "building_permit_issued",
+        "evidence_date": "2013-01-02",
+        "reason": (
+            "Building permit issued. Per TCG status definitions, permit issuance supports "
+            "Approved but does not prove Under Construction."
+        ),
+        "priority": "high",
+        "rule_code": "building_permit_issued",
+        "proof_level": "supporting",
+    }

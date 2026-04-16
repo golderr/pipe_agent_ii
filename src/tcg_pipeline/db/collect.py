@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -28,6 +28,7 @@ from tcg_pipeline.matching.differ import (
     diff_project_against_record,
 )
 from tcg_pipeline.matching.matcher import MatchResult, match_raw_record
+from tcg_pipeline.status_rules import build_status_suggestion
 
 
 @dataclass(slots=True)
@@ -219,6 +220,7 @@ def _create_unmatched_review_item(
     match_result: MatchResult,
     result: CollectPersistResult,
 ) -> None:
+    status_suggestion = _build_status_suggestion_for_unmatched_record(raw_record)
     if match_result.candidate_project_ids:
         item_type = ReviewItemType.POSSIBLE_MATCH
         priority = Priority.MEDIUM
@@ -242,6 +244,7 @@ def _create_unmatched_review_item(
                 "source_record_id": raw_record.source_record_id,
                 "canonical_address": raw_record.canonical_address,
                 "mapped_fields": _serialize_payload(raw_record.mapped_fields),
+                "status_suggestion": _serialize_status_suggestion(status_suggestion),
                 "raw_payload": _serialize_payload(raw_record.raw_payload),
             },
         )
@@ -306,7 +309,9 @@ def _serialize_status_suggestion(
     if suggestion is None:
         return None
     return {
-        "current_status": suggestion.current_status.value,
+        "current_status": (
+            suggestion.current_status.value if suggestion.current_status is not None else None
+        ),
         "suggested_status": suggestion.suggested_status.value,
         "evidence_type": suggestion.evidence_type,
         "evidence_date": serialize_json_value(suggestion.evidence_date),
@@ -317,5 +322,37 @@ def _serialize_status_suggestion(
     }
 
 
+def _build_status_suggestion_for_unmatched_record(
+    raw_record: RawRecord,
+) -> StatusSuggestion | None:
+    evidence_type = _coerce_text(raw_record.mapped_fields.get("status_evidence_type"))
+    evidence_date = _parse_date(raw_record.mapped_fields.get("status_evidence_date"))
+    reason = _coerce_text(raw_record.mapped_fields.get("status_evidence_reason"))
+    return build_status_suggestion(
+        current_status=None,
+        evidence_type=evidence_type,
+        evidence_date=evidence_date,
+        reason_override=reason,
+    )
+
+
 def _serialize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: serialize_json_value(value) for key, value in payload.items()}
+
+
+def _coerce_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_date(value: Any) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
