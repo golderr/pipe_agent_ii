@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
 import typer
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest
 from tcg_pipeline.collectors.factory import build_collector
@@ -250,15 +250,19 @@ def collect_source(
     source_name: str,
     market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
     mode: CollectionMode = COLLECTION_MODE_OPTION,
+    updated_since: str | None = typer.Option(
+        None,
+        help="Optional explicit lower bound for incremental mode, in ISO-8601 format.",
+    ),
     limit: int | None = typer.Option(
         None,
         min=1,
         help="Optional max record count to collect for this run.",
     ),
-    overlap_hours: int = typer.Option(
-        24,
+    overlap_hours: int | None = typer.Option(
+        None,
         min=0,
-        help="Overlap window used when deriving incremental runs from the previous source cursor.",
+        help="Optional override for the incremental overlap window. Defaults to the source config.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -270,16 +274,27 @@ def collect_source(
     if limit is not None:
         source_config = source_config.model_copy(update={"max_records": limit})
 
+    if updated_since is not None and mode != CollectionMode.INCREMENTAL:
+        raise typer.BadParameter("--updated-since can only be used with --mode incremental.")
+
     request = CollectionRequest(mode=mode)
     if mode == CollectionMode.INCREMENTAL:
-        session_factory = get_session_factory()
-        with session_factory() as session:
-            request.updated_since = _resolve_incremental_cursor(
-                session,
-                market=market,
-                source_name=source_name,
-                overlap_hours=overlap_hours,
+        if updated_since is not None:
+            request.updated_since = _parse_cli_datetime(updated_since)
+        else:
+            effective_overlap_hours = (
+                overlap_hours
+                if overlap_hours is not None
+                else source_config.incremental_overlap_hours
             )
+            session_factory = get_session_factory()
+            with session_factory() as session:
+                request.updated_since = _resolve_incremental_cursor(
+                    session,
+                    market=market,
+                    source_name=source_name,
+                    overlap_hours=effective_overlap_hours,
+                )
         if request.updated_since is None:
             typer.echo(
                 "No prior source-run cursor metadata found; falling back to full collection mode."
@@ -322,6 +337,7 @@ def collect_source(
     typer.echo(f"Matched by address: {persist_result.matched_by_address}")
     typer.echo(f"Inserted source records: {persist_result.inserted_source_records}")
     typer.echo(f"Updated source records: {persist_result.updated_source_records}")
+    typer.echo(f"Unchanged source records: {persist_result.unchanged_source_records}")
     typer.echo(f"Inserted identifiers: {persist_result.inserted_identifiers}")
     typer.echo(f"New candidate review items: {persist_result.new_candidate_review_items}")
     typer.echo(f"Status change review items: {persist_result.status_change_review_items}")
@@ -335,16 +351,28 @@ def _resolve_incremental_cursor(
     source_name: str,
     overlap_hours: int,
 ):
-    latest_run = session.execute(
-        select(SourceRun).where(
+    max_seen_updated_at = session.execute(
+        select(func.max(SourceRun.source_max_updated_at)).where(
             SourceRun.market == market,
             SourceRun.source_name == source_name,
             SourceRun.source_max_updated_at.is_not(None),
-        ).order_by(SourceRun.run_timestamp.desc())
-    ).scalars().first()
-    if latest_run is None or latest_run.source_max_updated_at is None:
+        )
+    ).scalar_one()
+    if max_seen_updated_at is None:
         return None
-    return latest_run.source_max_updated_at - timedelta(hours=overlap_hours)
+    return max_seen_updated_at - timedelta(hours=overlap_hours)
+
+
+def _parse_cli_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"Invalid datetime '{value}'. Use ISO-8601 format, for example 2026-04-16T00:00:00Z."
+        ) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _echo_pipedream_import_summary(import_results: list[PipedreamImportResult]) -> None:

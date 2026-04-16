@@ -15,6 +15,7 @@ sources:
       - permit_number
       - canonical_address
     schedule: weekly
+    incremental_overlap_hours: 24
     soql_filter: "permit_type='Bldg-New'"
     role: "update+discovery"
 

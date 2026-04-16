@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -45,10 +46,17 @@ class CollectPersistResult:
     matched_by_address: int = 0
     inserted_source_records: int = 0
     updated_source_records: int = 0
+    unchanged_source_records: int = 0
     inserted_identifiers: int = 0
     new_candidate_review_items: int = 0
     status_change_review_items: int = 0
     possible_match_review_items: int = 0
+
+
+class SourceRecordUpsertOutcome(enum.StrEnum):
+    INSERTED = "inserted"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
 
 
 def persist_collected_records(
@@ -101,17 +109,20 @@ def persist_collected_records(
 
         result.matched_existing_projects += 1
         _increment_match_counter(result, match_result)
-        was_existing_source_record = _upsert_source_record(
+        upsert_outcome = _upsert_source_record(
             session,
             project=project,
             raw_record=raw_record,
             source_run_timestamp=run_started_at,
         )
-        if was_existing_source_record:
-            result.updated_source_records += 1
-        else:
+        if upsert_outcome == SourceRecordUpsertOutcome.INSERTED:
             result.inserted_source_records += 1
             source_run.new_matches += 1
+        elif upsert_outcome == SourceRecordUpsertOutcome.UPDATED:
+            result.updated_source_records += 1
+        else:
+            result.unchanged_source_records += 1
+            continue
 
         result.inserted_identifiers += _persist_identifiers(
             session,
@@ -165,7 +176,7 @@ def _upsert_source_record(
     project: Project,
     raw_record: RawRecord,
     source_run_timestamp: datetime,
-) -> bool:
+) -> SourceRecordUpsertOutcome:
     source_record = session.execute(
         select(ProjectSourceRecord).where(
             ProjectSourceRecord.source_name == raw_record.source_name,
@@ -191,8 +202,17 @@ def _upsert_source_record(
                 field_provenance={key: raw_record.source_name for key in raw_record.mapped_fields},
             )
         )
-        return False
+        return SourceRecordUpsertOutcome.INSERTED
 
+    serialized_raw_payload = _serialize_payload(raw_record.raw_payload)
+    serialized_mapped_fields = _serialize_payload(raw_record.mapped_fields)
+    is_unchanged = (
+        source_record.project_id == project.id
+        and raw_record.source_row_hash is not None
+        and source_record.source_row_hash is not None
+        and raw_record.source_row_hash == source_record.source_row_hash
+        and source_record.mapped_fields == serialized_mapped_fields
+    )
     source_record.project_id = project.id
     source_record.source_row_id = raw_record.source_row_id
     source_record.source_created_at = raw_record.source_created_at
@@ -200,12 +220,15 @@ def _upsert_source_record(
     source_record.source_row_hash = raw_record.source_row_hash
     source_record.last_seen_at = source_run_timestamp
     source_record.last_pulled_at = source_run_timestamp
-    source_record.raw_payload = _serialize_payload(raw_record.raw_payload)
-    source_record.mapped_fields = _serialize_payload(raw_record.mapped_fields)
+    source_record.raw_payload = serialized_raw_payload
+    if is_unchanged:
+        return SourceRecordUpsertOutcome.UNCHANGED
+
+    source_record.mapped_fields = serialized_mapped_fields
     source_record.field_provenance = {
         key: raw_record.source_name for key in raw_record.mapped_fields
     }
-    return True
+    return SourceRecordUpsertOutcome.UPDATED
 
 
 def _persist_identifiers(session: Session, *, project: Project, raw_record: RawRecord) -> int:

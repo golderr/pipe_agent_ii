@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -13,6 +14,7 @@ from tcg_pipeline.market_config import SourceConfig
 from tcg_pipeline.settings import get_settings
 
 RawRecordAdapter = Callable[[Mapping[str, Any]], RawRecord | None]
+logger = logging.getLogger(__name__)
 
 DEFAULT_PREVIEW_ORDER = ":updated_at DESC, :id DESC"
 DEFAULT_PRODUCTION_ORDER = ":updated_at ASC, :id ASC"
@@ -112,8 +114,6 @@ def _build_effective_where(config: SourceConfig, *, request: CollectionRequest) 
 def _build_select_clause(select: str | None) -> str:
     if not select:
         return DEFAULT_SELECT
-    if ":*" in select or all(field in select for field in [":id", ":created_at", ":updated_at"]):
-        return select
     return f":id, :created_at, :updated_at, {select}"
 
 
@@ -139,6 +139,7 @@ def _parse_socrata_timestamp(value: Any) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
+        logger.debug("Unable to parse Socrata timestamp value: %r", value)
         return None
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
@@ -153,7 +154,12 @@ def _format_socrata_timestamp(value: datetime) -> str:
 
 
 def _hash_row(row: dict[str, Any]) -> str:
-    payload = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    content_row = {
+        key: value
+        for key, value in row.items()
+        if not str(key).startswith(":")
+    }
+    payload = json.dumps(content_row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

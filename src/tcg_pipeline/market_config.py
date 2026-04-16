@@ -36,6 +36,7 @@ class SourceConfig(BaseModel):
     page_size: int = 1000
     max_records: int | None = None
     timeout_seconds: float = 30.0
+    incremental_overlap_hours: int = 24
     mode: str | None = None
     trigger: str | None = None
 

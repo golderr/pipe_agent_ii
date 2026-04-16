@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tcg_pipeline.cli import _resolve_incremental_cursor
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.models import (
@@ -120,6 +121,122 @@ def test_persist_collected_records_creates_status_change_review_item(
     assert source_record.source_row_hash == "abc123"
 
 
+def test_persist_collected_records_skips_unchanged_overlap_rows(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="7270 MANCHESTER AVENUE LOS ANGELES CA 90045",
+        raw_addresses=["7270 Manchester Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    original_seen_at = datetime(2026, 4, 15, 8, 0, tzinfo=UTC)
+    postgres_session.add(
+        ProjectSourceRecord(
+            project_id=project.id,
+            source_name="ladbs_permits",
+            source_record_id="11010-10000-02451",
+            source_row_id="row-1",
+            source_created_at=datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC),
+            source_updated_at=datetime(2026, 4, 15, 12, 0, tzinfo=UTC),
+            source_row_hash="stable-hash",
+            first_seen_at=original_seen_at,
+            last_seen_at=original_seen_at,
+            last_pulled_at=original_seen_at,
+            raw_payload={
+                ":id": "row-1",
+                ":updated_at": "2026-04-15T12:00:00.000Z",
+                "pcis_permit": "11010-10000-02451",
+            },
+            mapped_fields={
+                "status_evidence_type": "building_permit_issued",
+                "status_evidence_date": "2013-01-02",
+                "total_units": 260,
+            },
+            field_provenance={
+                "status_evidence_type": "ladbs_permits",
+                "status_evidence_date": "ladbs_permits",
+                "total_units": "ladbs_permits",
+            },
+        )
+    )
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="11010-10000-02451",
+        raw_payload={
+            ":id": "row-1",
+            ":updated_at": "2026-04-16T12:00:00.000Z",
+            "pcis_permit": "11010-10000-02451",
+        },
+        canonical_address="7270 MANCHESTER AVENUE LOS ANGELES CA 90045",
+        identifiers={"permit_number": ["11010-10000-02451"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2013-01-02",
+            "total_units": 260,
+        },
+        source_row_id="row-1",
+        source_created_at=datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC),
+        source_updated_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+        source_row_hash="stable-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        collection_mode="incremental",
+        incremental_since=datetime(2026, 4, 15, 0, 0, tzinfo=UTC),
+    )
+    postgres_session.flush()
+
+    assert result.records_pulled == 1
+    assert result.matched_existing_projects == 1
+    assert result.matched_by_source_record == 1
+    assert result.inserted_source_records == 0
+    assert result.updated_source_records == 0
+    assert result.unchanged_source_records == 1
+    assert result.inserted_identifiers == 0
+    assert result.status_change_review_items == 0
+
+    source_run = postgres_session.execute(
+        select(SourceRun).where(SourceRun.id == result.source_run_id)
+    ).scalar_one()
+    assert source_run.new_matches == 0
+    assert source_run.updates_found == 0
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(ReviewItem.source_run_id == result.source_run_id)
+    ).scalar_one_or_none()
+    assert review_item is None
+
+    source_record = postgres_session.execute(
+        select(ProjectSourceRecord).where(
+            ProjectSourceRecord.project_id == project.id,
+            ProjectSourceRecord.source_name == "ladbs_permits",
+            ProjectSourceRecord.source_record_id == "11010-10000-02451",
+        )
+    ).scalar_one()
+    assert source_record.source_updated_at == datetime(2026, 4, 16, 12, 0, tzinfo=UTC)
+    assert source_record.source_row_hash == "stable-hash"
+    assert source_record.raw_payload[":updated_at"] == "2026-04-16T12:00:00.000Z"
+    assert source_record.mapped_fields == {
+        "status_evidence_type": "building_permit_issued",
+        "status_evidence_date": "2013-01-02",
+        "total_units": 260,
+    }
+    assert source_record.last_seen_at is not None
+    assert source_record.last_seen_at > original_seen_at
+
+
 def test_persist_collected_records_creates_new_candidate_review_item(
     postgres_session: Session,
 ) -> None:
@@ -171,3 +288,47 @@ def test_persist_collected_records_creates_new_candidate_review_item(
         "rule_code": "building_permit_issued",
         "proof_level": "supporting",
     }
+
+
+def test_resolve_incremental_cursor_uses_max_source_updated_at(
+    postgres_session: Session,
+) -> None:
+    postgres_session.add_all(
+        [
+            SourceRun(
+                market="los_angeles",
+                source_name="ladbs_permits",
+                run_timestamp=datetime(2026, 4, 15, 10, 0, tzinfo=UTC),
+                source_max_updated_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+            ),
+            SourceRun(
+                market="los_angeles",
+                source_name="ladbs_permits",
+                run_timestamp=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                source_max_updated_at=datetime(2026, 4, 16, 9, 0, tzinfo=UTC),
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    cursor = _resolve_incremental_cursor(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        overlap_hours=24,
+    )
+
+    assert cursor == datetime(2026, 4, 15, 12, 0, tzinfo=UTC)
+
+
+def test_resolve_incremental_cursor_returns_none_without_source_metadata(
+    postgres_session: Session,
+) -> None:
+    cursor = _resolve_incremental_cursor(
+        postgres_session,
+        market="los_angeles",
+        source_name="source_without_metadata",
+        overlap_hours=24,
+    )
+
+    assert cursor is None

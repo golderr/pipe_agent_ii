@@ -11,6 +11,8 @@ from tcg_pipeline.collectors.socrata import (
     DEFAULT_PREVIEW_ORDER,
     DEFAULT_PRODUCTION_ORDER,
     SocrataCollector,
+    _build_select_clause,
+    _hash_row,
 )
 from tcg_pipeline.market_config import SourceConfig
 
@@ -135,3 +137,30 @@ def test_socrata_collector_uses_preview_and_incremental_query_shapes() -> None:
     assert "permit_type='Bldg-New'" in incremental_wheres[0]
     assert ":updated_at >=" in incremental_wheres[0]
     assert "2026-04-15T12:30:00.000Z" in incremental_wheres[0]
+
+
+def test_hash_row_ignores_socrata_system_fields() -> None:
+    row_with_old_metadata = {
+        ":id": "row-1",
+        ":created_at": "2020-05-04T09:18:09.965Z",
+        ":updated_at": "2020-05-04T09:18:23.851Z",
+        "pcis_permit": "P-1",
+        "valuation": "1000",
+    }
+    row_with_new_metadata = {
+        ":id": "row-99",
+        ":created_at": "2020-05-01T00:00:00.000Z",
+        ":updated_at": "2026-04-16T00:00:00.000Z",
+        ":version": "42",
+        "pcis_permit": "P-1",
+        "valuation": "1000",
+    }
+
+    assert _hash_row(row_with_old_metadata) == _hash_row(row_with_new_metadata)
+
+
+def test_build_select_clause_prepends_required_system_fields() -> None:
+    assert (
+        _build_select_clause("pcis_permit, permit_type")
+        == ":id, :created_at, :updated_at, pcis_permit, permit_type"
+    )
