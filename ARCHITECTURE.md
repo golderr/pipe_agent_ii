@@ -2,8 +2,8 @@
 
 > **Living document.** This file is the single source of truth for the project. Claude Code / Codex should read this at the start of every session, update it when the plan changes, and mark build steps complete as code is committed. Use commits as checkpoints to review the plan and evaluate if anything changed and should be recorded in this file.
 
-**Last updated:** 2026-04-15T20:26
-**Status:** Build in progress — foundation scaffolded, both seed ingesters and persistence/merge paths are implemented, and the repo is ready to run the real LA seed once the source workbooks are available.
+**Last updated:** 2026-04-15T21:35
+**Status:** Build in progress — foundation scaffolded, both seed ingesters and persistence/merge paths are implemented, and the repo is ready to run the scoped LA seed against local source workbooks.
 - ✅ Pipedream field mapping (81 fields)
 - ✅ CoStar field mapping (287 columns, MF + non-MF)
 - ✅ Master schema finalized
@@ -30,6 +30,8 @@ Seed (once per market) → Collect (scheduled) → Match → Diff → Review (hu
 - **TCG research is the gold standard.** Where Pipedream or other TCG-verified data exists, it takes priority over all other sources. Researcher overrides are never clobbered by automated updates.
 - **Automate collection, not judgment.** The system presents findings; researchers decide. Low-confidence items are flagged, not silently ingested.
 - **Source types are reusable, source instances are per-market.** A Socrata collector works for any Socrata-based open data portal. Each market just configures which endpoints to hit.
+- **Market is a dataset scope, not a synonym for city.** For now `market=los_angeles` means the City of Los Angeles dataset. Projects still retain their real `city`, `county`, and `jurisdiction` values.
+- **Source coverage can operate at multiple geography levels.** A source instance may be city-, jurisdiction-, county-, or regional-scoped even when it feeds one market dataset.
 - **Start with LA, design for any market.** Every architectural decision should consider whether it generalizes.
 
 ---
@@ -48,8 +50,14 @@ Runs once when standing up a new market. Two jobs:
 
 **Job B — Register market sources:**
 - Each market has a config file defining which collectors to run
-- Config specifies: source name, collector type, endpoint/URL, geographic bounds, query parameters, update frequency
+- Config specifies: source name, collector type, endpoint/URL, geographic bounds, coverage scope, query parameters, update frequency
 - On first run, executes all collectors and runs a full match/diff cycle to catch projects the baseline missed
+
+**Geographic scope model:**
+- `market` is the logical dataset we are building, not necessarily the smallest government boundary.
+- The current `los_angeles` market remains scoped to the City of Los Angeles only.
+- `city`, `county`, and `jurisdiction` remain project-level attributes so multiple datasets can share one database without losing the governing geography of each record.
+- Future expansion should add new market configs and source lists for places like West Hollywood, Glendale, Burbank, Santa Monica, or county/unincorporated coverage rather than widening the LA city dataset and mixing scopes together.
 
 **Example market config — Los Angeles (verified endpoints):**
 ```yaml
@@ -215,7 +223,7 @@ Modular, one per source type. Each collector:
 
 **Multi-file handling:** LA has 3 Pipedream files covering different submarkets. Each has a different region prefix in ProjectID. Import all three; deduplication should be handled by address matching (same project shouldn't appear in two files unless it's on a boundary). If duplicates are found across files, flag for researcher review.
 
-**Scope filtering (City of LA only):** Since some Pipedream files cover areas outside City of LA (e.g., West Hollywood, Glendale/Burbank), filter on `City == "Los Angeles"` during import for the LA proof of concept. Preserve the others in a separate holding table for when those markets are added.
+**Scope filtering (City of LA only):** Since some Pipedream files cover areas outside City of LA (e.g., West Hollywood, Glendale/Burbank), run the LA seed with `allowed_cities=["Los Angeles"]` (CLI: `--allowed-city "Los Angeles"`). The current implementation skips those rows from the active LA import and reports their IDs in preview results. If those cities become their own markets later, seed them under their own market config instead of carrying them inside the LA dataset.
 
 #### CoStar Ingester — Detailed Spec
 
@@ -237,6 +245,8 @@ constr_status = row_vals.get(headers['Constr Status'])
 This approach handles any CoStar export regardless of property type and is robust against CoStar changing their export layout in the future.
 
 **Multi-file input:** The seeder accepts a folder of CoStar export files. Each file is read independently with its own header mapping. Files may contain MF, non-MF, or a mix of property types. All records flow into the same pipeline.
+
+**Scope filtering (City of LA only):** Apply the same `allowed_cities=["Los Angeles"]` filter to LA CoStar runs. City normalization happens before filtering so LA aliases such as `Hollywood`, `DTLA`, `Downtown Los Angeles`, and `Los Angeles CBD` still resolve into the City of Los Angeles dataset.
 
 **CoStar exports are capped at 500 rows.** For full LA coverage, expect 4-8 export files per market (split by property type, submarket, or status). Nate stitches these together manually today; our system handles them natively as separate files.
 
@@ -627,7 +637,7 @@ Project:
   lng:                  float (convenience copy for exports/debugging)
   location:             geography(Point, 4326) (primary spatial column for PostGIS)
   geocode_confidence:   enum [high, medium, low, none]
-  market:               string (FK to market config, e.g., "los_angeles")
+  market:               string (dataset scope slug, e.g., "los_angeles" for the City of Los Angeles dataset)
   city:                 string (e.g., "Los Angeles", "West Hollywood")
   state:                string (e.g., "CA")
   county:               string (e.g., "Los Angeles")
@@ -840,7 +850,7 @@ Tracks every time a collector runs:
 ```
 SourceRun:
   id:                   UUID
-  market:               string
+  market:               string (dataset scope slug)
   source_name:          string
   run_timestamp:        datetime
   records_pulled:       int
@@ -1836,6 +1846,9 @@ On each incoming record:
 | 2026-04-15 | "--" is Pipedream's null sentinel | Must be treated as null/empty during import. Consistent across all fields. |
 | 2026-04-15 | Pipedream addresses are the initial address normalization benchmark | Addresses like "5939 W Sunset Blvd" and "1718 N Las Palmas Ave" define the formatting patterns we need to handle. |
 | 2026-04-15 | Filter Pipedream import to City == "Los Angeles" for LA POC | Pipedream files cover broader areas (West Hollywood, Glendale/Burbank). Those cities are separate markets. |
+| 2026-04-15 | Use one shared database with `market` as a dataset scope slug | This preserves cross-market reporting while letting projects keep their real `city`, `county`, and `jurisdiction` values. The current `los_angeles` market remains City of Los Angeles only; future cities, jurisdictions, or county rollups get their own configs and source lists. |
+| 2026-04-15 | Use explicit seed-scope filters on city-scoped imports | Seed workbooks can contain out-of-scope rows. Current LA Pipedream and CoStar runs should use `--allowed-city "Los Angeles"` so the City of LA dataset is not contaminated during seed. |
+| 2026-04-15 | Keep seed ingestion path-driven, but prefer market-first folders as the repo grows | Current LA files can stay where they are, but future markets should be organized as `data/seed/<market>/<source>/` to avoid mixing workbooks across datasets. |
 | 2026-04-15 | Scope includes all development types, not just residential | Pipeline tracks rental, for-sale, and commercial development. Pipedream is residential-focused but the system should accept commercial projects from CoStar and public sources. |
 | 2026-04-15 | CoStar ingested after Pipedream; fills gaps only, never overwrites | Preserves researcher-verified Pipedream data. CoStar's key unique contributions: APN (92%), zoning, owner, total SF, style, construction start date. |
 | 2026-04-15 | APN is the primary match key for CoStar ↔ Pipedream dedup | CoStar has 92% APN coverage vs. Pipedream's 1%. APN is more reliable than address matching. |
@@ -1907,7 +1920,8 @@ On each incoming record:
 - [ ] **Pipedream "Pending" → public source status mapping:** Pipedream "Pending" means in entitlement (EIR underway, planning review). LADBS and ZIMAS use different status terminology. Need a mapping table. Same for "Stalled" — how do we detect stall from public sources? Probably absence of activity for X months.
 - [ ] **Unit count threshold for new project candidates:** What's the minimum unit count for the system to flag a new project? Pipedream's smallest projects are ~10-20 units. Should the system flag a 5-unit project from LADBS? A 2-unit ADU?
 - [ ] **Update frequency:** How often should each source be polled? Weekly? Biweekly? Different per source?
-- [ ] **Multi-market coordination:** When we expand beyond LA, do markets share a single database or get separate databases? Single is better for cross-market reporting but adds complexity.
+- [x] **Multi-market coordination:** **RESOLVED 2026-04-15.** Use one shared Supabase database. Each tracked dataset gets its own `market` slug and source configuration. For now `los_angeles` remains City of Los Angeles only; future cities, jurisdictions, and county rollups are added as separate market configs instead of widening the LA dataset.
+- [ ] **Out-of-scope seed staging:** Current seed commands can skip out-of-scope rows via `--allowed-city`, but those skipped rows are not persisted unless the source itself marks them as a dismissal. Decide later whether raw workbooks are sufficient as the holding layer or if we need a dedicated cross-market staging table.
 - [x] **Hosting/scheduling:** **RESOLVED 2026-04-15.** Collectors run locally during development. Production: Render for backend workers/cron jobs, Vercel for frontend review UI (Phase 4+). Database is Supabase (always cloud-hosted). Collection schedule: biweekly full cycle aligned with LA Case Reports, weekly LADBS/SM Socrata pulls.
 - [ ] **Pipedream ongoing sync:** After initial seed, will researchers continue to update Pipedream files? If so, we need a recurring import/sync process, not just a one-time seed. Or does the new system replace Pipedream entirely?
 
@@ -1955,6 +1969,9 @@ On each incoming record:
 - This is future scope — not needed until Phase 4 (review interface)
 
 ### Project Structure
+
+Recommended as the repo expands to multiple markets: `data/seed/<market>/<source>/`. The current LA workbooks can remain in the existing source-first folders because the CLI already accepts explicit file and directory paths.
+
 ```
 tcg-pipeline/
   ARCHITECTURE.md          ← this file (Claude Code reads at session start)

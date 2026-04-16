@@ -8,13 +8,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from geoalchemy2.elements import WKTElement
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from tcg_pipeline.db.models import (
     AgeRestriction,
-    GeocodeConfidence,
     IdentifierType,
     PipelineStatus,
     ProductType,
@@ -24,6 +22,36 @@ from tcg_pipeline.db.models import (
     RentOrSale,
     StatusConfidence,
     StatusHistory,
+)
+from tcg_pipeline.ingesters._common import (
+    build_location as _build_location,
+)
+from tcg_pipeline.ingesters._common import (
+    clean_identifier_text as _clean_identifier_text,
+)
+from tcg_pipeline.ingesters._common import (
+    clean_text as _clean_text,
+)
+from tcg_pipeline.ingesters._common import (
+    dedupe_strings as _dedupe_strings,
+)
+from tcg_pipeline.ingesters._common import (
+    determine_geocode_confidence as _determine_geocode_confidence,
+)
+from tcg_pipeline.ingesters._common import (
+    display_value as _display_value,
+)
+from tcg_pipeline.ingesters._common import (
+    parse_float as _parse_float,
+)
+from tcg_pipeline.ingesters._common import (
+    parse_int as _parse_int,
+)
+from tcg_pipeline.ingesters._common import (
+    row_has_values as _row_has_values,
+)
+from tcg_pipeline.ingesters._common import (
+    serialize_json_value as _serialize_json_value,
 )
 from tcg_pipeline.matching.normalizer import (
     normalize_address,
@@ -37,7 +65,6 @@ COSTAR_SOURCE_NAME = "costar"
 COSTAR_CREATED_BY = "costar_import"
 HEADER_ROW_INDEX = 1
 DATA_START_ROW_INDEX = 2
-NULL_SENTINELS = {"", "--"}
 MONTH_NAME_TO_NUMBER = {
     "JAN": 1,
     "FEB": 2,
@@ -257,7 +284,10 @@ def _build_project_record(
         lat=_parse_float(payload.get("Latitude")),
         lng=_parse_float(payload.get("Longitude")),
         location=_build_location(payload.get("Latitude"), payload.get("Longitude")),
-        geocode_confidence=_determine_geocode_confidence(payload),
+        geocode_confidence=_determine_geocode_confidence(
+            payload.get("Latitude"),
+            payload.get("Longitude"),
+        ),
         market=market,
         city=normalized_address.city or normalize_city(payload.get("City"), market=market) or "",
         state=normalized_address.state or _clean_text(payload.get("State")) or "",
@@ -671,104 +701,3 @@ def _parse_month_token(value: str) -> int | None:
     if alpha_only in MONTH_NAME_TO_NUMBER:
         return MONTH_NAME_TO_NUMBER[alpha_only]
     return MONTH_NAME_TO_NUMBER.get(alpha_only[:3])
-
-
-def _build_location(lat_value: Any, lng_value: Any) -> WKTElement | None:
-    lat = _parse_float(lat_value)
-    lng = _parse_float(lng_value)
-    if lat is None or lng is None:
-        return None
-    return WKTElement(f"POINT({lng} {lat})", srid=4326)
-
-
-def _determine_geocode_confidence(payload: dict[str, Any]) -> GeocodeConfidence:
-    latitude = _parse_float(payload.get("Latitude"))
-    longitude = _parse_float(payload.get("Longitude"))
-    if latitude is not None and longitude is not None:
-        return GeocodeConfidence.HIGH
-    return GeocodeConfidence.NONE
-
-
-def _clean_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    text = str(value).strip()
-    if text in NULL_SENTINELS:
-        return None
-    return text
-
-
-def _clean_identifier_text(value: Any) -> str | None:
-    cleaned = _clean_text(value)
-    if cleaned is None:
-        return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        numeric = _parse_float(value)
-        if numeric is None:
-            return cleaned
-        return str(int(numeric)) if numeric.is_integer() else str(numeric)
-    return cleaned
-
-
-def _parse_int(value: Any) -> int | None:
-    numeric = _parse_float(value)
-    if numeric is None:
-        return None
-    return int(round(numeric))
-
-
-def _parse_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    cleaned = _clean_text(value)
-    if cleaned is None:
-        return None
-
-    normalized = cleaned.replace(",", "").replace("%", "")
-    try:
-        return float(normalized)
-    except ValueError:
-        return None
-
-
-def _dedupe_strings(values: Iterable[str | None]) -> list[str]:
-    deduped: list[str] = []
-    for value in values:
-        if not value or value in deduped:
-            continue
-        deduped.append(value)
-    return deduped
-
-
-def _display_value(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
-
-
-def _serialize_json_value(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return value
-
-
-def _row_has_values(payload: dict[str, Any]) -> bool:
-    return any(
-        value is not None and str(value).strip() not in NULL_SENTINELS
-        for value in payload.values()
-    )

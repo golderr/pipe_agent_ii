@@ -636,6 +636,8 @@ def _merge_project_fields(
         existing_project.geocode_confidence = incoming_project.geocode_confidence
         merged_fields += 1
 
+    # CoStar only carries total units, not separate market-rate or affordable unit counts.
+    # Keep those Pipedream-specific fields untouched until a future source provides them.
     for field_name in (
         "city",
         "state",

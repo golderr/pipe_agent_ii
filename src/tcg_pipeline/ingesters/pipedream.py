@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from geoalchemy2.elements import WKTElement
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from tcg_pipeline.db.models import (
     AgeRestriction,
-    DismissReason,
     DismissedRecord,
-    GeocodeConfidence,
+    DismissReason,
     IdentifierType,
     PipelineStatus,
     ProductType,
@@ -27,14 +26,47 @@ from tcg_pipeline.db.models import (
     StatusConfidence,
     StatusHistory,
 )
-from tcg_pipeline.matching.normalizer import normalize_address, normalize_city, normalize_postal_code
+from tcg_pipeline.ingesters._common import (
+    build_location as _build_location,
+)
+from tcg_pipeline.ingesters._common import (
+    clean_identifier_text as _clean_identifier_text,
+)
+from tcg_pipeline.ingesters._common import (
+    clean_text as _clean_text,
+)
+from tcg_pipeline.ingesters._common import (
+    dedupe_strings as _dedupe_strings,
+)
+from tcg_pipeline.ingesters._common import (
+    determine_geocode_confidence as _determine_geocode_confidence,
+)
+from tcg_pipeline.ingesters._common import (
+    display_value as _display_value,
+)
+from tcg_pipeline.ingesters._common import (
+    parse_float as _parse_float,
+)
+from tcg_pipeline.ingesters._common import (
+    parse_int as _parse_int,
+)
+from tcg_pipeline.ingesters._common import (
+    row_has_values as _row_has_values,
+)
+from tcg_pipeline.ingesters._common import (
+    serialize_json_value as _serialize_json_value,
+)
+from tcg_pipeline.matching.normalizer import (
+    normalize_address,
+    normalize_city,
+    normalize_postal_code,
+)
 
 logger = logging.getLogger(__name__)
 
 HEADER_ROW_INDEX = 3
 DATA_START_ROW_INDEX = 4
 DATA_STORAGE_TAB_NAME = "DataStorage"
-NULL_SENTINELS = {"", "--"}
 PIPEDREAM_SOURCE_NAME = "pipedream"
 PIPEDREAM_CREATED_BY = "pipedream_import"
 HEADER_COLUMNS = (
@@ -295,7 +327,7 @@ class PipedreamIngester:
 
             worksheet = workbook[DATA_STORAGE_TAB_NAME]
             column_to_header = _extract_headers(worksheet)
-            imported_at = datetime.now(timezone.utc)
+            imported_at = datetime.now(UTC)
             result = PipedreamImportResult(source_path=path)
 
             for row_number, row in enumerate(
@@ -317,7 +349,11 @@ class PipedreamIngester:
                 if not project_identifier:
                     if _row_has_values(payload):
                         result.missing_project_id_rows += 1
-                        logger.warning("%s row %s skipped: missing ProjectID", path.name, row_number)
+                        logger.warning(
+                            "%s row %s skipped: missing ProjectID",
+                            path.name,
+                            row_number,
+                        )
                     continue
 
                 if self.allowed_cities:
@@ -420,7 +456,10 @@ def _build_project_record(
         lat=_parse_float(payload.get("Lat")),
         lng=_parse_float(payload.get("Long")),
         location=_build_location(payload.get("Lat"), payload.get("Long")),
-        geocode_confidence=_determine_geocode_confidence(payload),
+        geocode_confidence=_determine_geocode_confidence(
+            payload.get("Lat"),
+            payload.get("Long"),
+        ),
         market=market,
         city=normalized_address.city or _clean_text(payload.get("City")) or "",
         state=normalized_address.state or _clean_text(payload.get("State")) or "",
@@ -824,45 +863,6 @@ def _parse_age_restriction(
     return AgeRestriction.UNKNOWN
 
 
-def _build_location(lat_value: Any, lng_value: Any) -> WKTElement | None:
-    lat = _parse_float(lat_value)
-    lng = _parse_float(lng_value)
-    if lat is None or lng is None:
-        return None
-    return WKTElement(f"POINT({lng} {lat})", srid=4326)
-
-
-def _determine_geocode_confidence(payload: dict[str, Any]) -> GeocodeConfidence:
-    if _parse_float(payload.get("Lat")) is not None and _parse_float(payload.get("Long")) is not None:
-        return GeocodeConfidence.HIGH
-    return GeocodeConfidence.NONE
-
-
-def _clean_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    text = str(value).strip()
-    if text in NULL_SENTINELS:
-        return None
-    return text
-
-
-def _clean_identifier_text(value: Any) -> str | None:
-    cleaned = _clean_text(value)
-    if cleaned is None:
-        return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        numeric = _parse_float(value)
-        if numeric is None:
-            return cleaned
-        return str(int(numeric)) if numeric.is_integer() else str(numeric)
-    return cleaned
-
-
 def _clean_project_identifier(
     value: Any,
     *,
@@ -889,36 +889,13 @@ def _clean_project_identifier(
             row_number=row_number,
             field_name=field_name,
             raw_value=value,
-            message=f"Project identifier normalized to {normalized!r}; verify abbreviated ID format",
+            message=(
+                f"Project identifier normalized to {normalized!r}; "
+                "verify abbreviated ID format"
+            ),
         )
 
     return normalized
-
-
-def _parse_int(value: Any) -> int | None:
-    numeric = _parse_float(value)
-    if numeric is None:
-        return None
-    return int(round(numeric))
-
-
-def _parse_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    cleaned = _clean_text(value)
-    if cleaned is None:
-        return None
-
-    normalized = cleaned.replace(",", "").replace("%", "")
-    try:
-        return float(normalized)
-    except ValueError:
-        return None
 
 
 def _parse_date(
@@ -956,33 +933,6 @@ def _parse_date(
     return None
 
 
-def _dedupe_strings(values: Iterable[str | None]) -> list[str]:
-    deduped: list[str] = []
-    for value in values:
-        if not value or value in deduped:
-            continue
-        deduped.append(value)
-    return deduped
-
-
-def _display_value(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
-
-
-def _serialize_json_value(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return value
-
-
 def _record_issue(
     *,
     result: PipedreamImportResult | None,
@@ -1016,15 +966,3 @@ def _is_suspicious_project_identifier(value: Any, cleaned: str) -> bool:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return True
     return cleaned != f"{prefix}.{suffix.ljust(5, '0')[:5]}"
-
-
-def _row_has_values(payload: dict[str, Any]) -> bool:
-    return any(_has_value(value) for value in payload.values())
-
-
-def _has_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip() not in NULL_SENTINELS
-    return True

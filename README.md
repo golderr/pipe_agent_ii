@@ -29,7 +29,9 @@ pip install -e .[dev]
 3. Copy `.env.example` to `.env`.
 4. Fill in `DATABASE_URL` with the Postgres connection string from the Supabase dashboard.
    `postgresql://...` and `postgresql+psycopg://...` are both accepted.
-5. Run a quick config check:
+5. Place seed workbooks under `data/seed/pipedream/` and `data/seed/costar/` for the current LA run.
+   For future multi-market work, prefer `data/seed/<market>/pipedream/` and `data/seed/<market>/costar/`. The CLI accepts explicit paths either way.
+6. Run a quick config check:
 
 ```powershell
 tcg-pipeline doctor
@@ -49,8 +51,10 @@ To verify the local environment:
 ```powershell
 tcg-pipeline doctor
 pytest tests/test_normalizer.py -q
-tcg-pipeline preview-pipedream .\data\seed\your_file.xlsm --market los_angeles
-tcg-pipeline seed-pipedream .\data\seed\file1.xlsm .\data\seed\file2.xlsm --market los_angeles --dry-run
-tcg-pipeline preview-costar .\data\seed\costar\ --market los_angeles
-tcg-pipeline seed-costar .\data\seed\costar\ --market los_angeles --dry-run
+tcg-pipeline preview-pipedream .\data\seed\pipedream\your_file.xlsm --market los_angeles --allowed-city "Los Angeles"
+tcg-pipeline seed-pipedream .\data\seed\pipedream\file1.xlsm .\data\seed\pipedream\file2.xlsm --market los_angeles --allowed-city "Los Angeles" --dry-run
+tcg-pipeline preview-costar .\data\seed\costar\ --market los_angeles --allowed-city "Los Angeles"
+tcg-pipeline seed-costar .\data\seed\costar\ --market los_angeles --allowed-city "Los Angeles" --dry-run
 ```
+
+For the current `los_angeles` dataset, treat the seed as City of Los Angeles only. The ingesters already support `--allowed-city`, and using it now keeps West Hollywood, Glendale, Burbank, and other out-of-scope records out of the LA seed.
