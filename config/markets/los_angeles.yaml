@@ -21,7 +21,14 @@ sources:
 
   - name: ladbs_new_housing
     collector: socrata
+    adapter: ladbs_new_housing
     endpoint: "https://data.lacity.org/resource/cpkv-aajs.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
+    matching_keys:
+      - permit_number
+      - apn
+      - canonical_address
     schedule: weekly
     role: "discovery"
 
