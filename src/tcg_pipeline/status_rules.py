@@ -48,6 +48,16 @@ STATUS_EVIDENCE_RULES: dict[str, StatusEvidenceRule] = {
             "Approved but does not prove Under Construction."
         ),
     ),
+    "certificate_of_occupancy_issued": StatusEvidenceRule(
+        evidence_type="certificate_of_occupancy_issued",
+        suggested_status=PipelineStatus.COMPLETE,
+        priority=Priority.HIGH,
+        proof_level="direct",
+        reason=(
+            "Certificate of Occupancy issued. Per TCG status definitions, CofO issuance is "
+            "direct evidence that a project is Complete."
+        ),
+    ),
 }
 
 

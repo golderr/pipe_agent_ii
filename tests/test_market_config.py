@@ -8,6 +8,7 @@ def test_load_market_config_reads_ladbs_source_metadata() -> None:
 
     source = config.get_source("ladbs_permits")
     housing_source = config.get_source("ladbs_new_housing")
+    cofo_source = config.get_source("ladbs_cofo")
 
     assert config.market == "los_angeles"
     assert source.collector == "socrata"
@@ -20,3 +21,7 @@ def test_load_market_config_reads_ladbs_source_metadata() -> None:
     assert housing_source.jurisdiction == "city_of_los_angeles"
     assert housing_source.coverage_scope == "city"
     assert housing_source.matching_keys == ["permit_number", "apn", "canonical_address"]
+    assert cofo_source.adapter_name == "ladbs_cofo"
+    assert cofo_source.jurisdiction == "city_of_los_angeles"
+    assert cofo_source.coverage_scope == "city"
+    assert cofo_source.matching_keys == ["permit_number", "apn", "canonical_address"]

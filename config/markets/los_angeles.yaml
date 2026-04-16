@@ -34,7 +34,14 @@ sources:
 
   - name: ladbs_cofo
     collector: socrata
+    adapter: ladbs_cofo
     endpoint: "https://data.lacity.org/resource/3f9m-afei.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
+    matching_keys:
+      - permit_number
+      - apn
+      - canonical_address
     schedule: weekly
     role: "update"
 

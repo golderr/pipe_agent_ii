@@ -17,6 +17,9 @@ RawRecordAdapter = Callable[[Mapping[str, Any]], RawRecord | None]
 LADBS_CITY = "Los Angeles"
 LADBS_COUNTY = "Los Angeles"
 LADBS_STATE = "CA"
+ASSESSOR_BOOK_LENGTH = 4
+ASSESSOR_PAGE_LENGTH = 3
+ASSESSOR_PARCEL_LENGTH = 3
 
 
 def make_ladbs_permits_adapter(*, market: str, source_name: str) -> RawRecordAdapter:
@@ -26,38 +29,11 @@ def make_ladbs_permits_adapter(*, market: str, source_name: str) -> RawRecordAda
             return None
 
         normalized = _normalize_ladbs_address(row, market=market)
-
-        issue_date = _normalize_date_string(row.get("issue_date"))
-        applicant_name = _compose_name(
-            row.get("applicant_business_name"),
-            row.get("applicant_first_name"),
-            row.get("applicant_last_name"),
-        )
-        contractor_name = _compose_name(
-            row.get("contractors_business_name"),
-            row.get("principal_first_name"),
-            row.get("principal_last_name"),
-        )
         mapped_fields = {
             "status_evidence_type": "building_permit_issued",
-            "status_evidence_date": issue_date,
-            "permit_issue_date": issue_date,
-            "total_units": parse_int(row.get("of_residential_dwelling_units")),
-            "stories": parse_int(row.get("of_stories")),
-            "description": clean_text(row.get("work_description")),
-            "applicant": applicant_name,
-            "contractor": contractor_name,
-            "zoning": clean_text(row.get("zone")),
-            "jurisdiction": "city_of_los_angeles",
-            "permit_type": clean_text(row.get("permit_type")),
-            "permit_sub_type": clean_text(row.get("permit_sub_type")),
-            "valuation": parse_int(row.get("valuation")),
+            "status_evidence_date": _normalize_date_string(row.get("issue_date")),
             "council_district": clean_text(row.get("council_district")),
-            "initiating_office": clean_text(row.get("initiating_office")),
-            "city": LADBS_CITY,
-            "county": LADBS_COUNTY,
-            "state": LADBS_STATE,
-            "zip": normalized.postal_code,
+            **_build_common_ladbs_fields(row, normalized=normalized),
         }
 
         return RawRecord(
@@ -66,7 +42,7 @@ def make_ladbs_permits_adapter(*, market: str, source_name: str) -> RawRecordAda
             raw_payload=dict(row),
             canonical_address=normalized.canonical_address,
             project_name=None,
-            identifiers={"permit_number": [permit_number]},
+            identifiers=_build_ladbs_identifiers(permit_number=permit_number),
             mapped_fields={key: value for key, value in mapped_fields.items() if value is not None},
         )
 
@@ -80,49 +56,19 @@ def make_ladbs_new_housing_adapter(*, market: str, source_name: str) -> RawRecor
             return None
 
         normalized = _normalize_ladbs_address(row, market=market)
-        issue_date = _normalize_date_string(row.get("issue_date"))
-        applicant_name = _compose_name(
-            row.get("applicant_business_name"),
-            row.get("applicant_first_name"),
-            row.get("applicant_last_name"),
-        )
-        contractor_name = _compose_name(
-            row.get("contractors_business_name"),
-            row.get("principal_first_name"),
-            row.get("principal_last_name"),
-        )
         apn = _build_assessor_apn(row)
         lat, lng = _extract_coordinates(row.get("location_1"))
 
-        identifiers = {"permit_number": [permit_number]}
-        if apn is not None:
-            identifiers["apn"] = [apn]
-
         mapped_fields = {
             "status_evidence_type": "building_permit_issued",
-            "status_evidence_date": issue_date,
-            "permit_issue_date": issue_date,
-            "total_units": parse_int(row.get("of_residential_dwelling_units")),
-            "stories": parse_int(row.get("of_stories")),
-            "description": clean_text(row.get("work_description")),
-            "applicant": applicant_name,
-            "contractor": contractor_name,
-            "zoning": clean_text(row.get("zone")),
-            "jurisdiction": "city_of_los_angeles",
-            "permit_type": clean_text(row.get("permit_type")),
-            "permit_sub_type": clean_text(row.get("permit_sub_type")),
+            "status_evidence_date": _normalize_date_string(row.get("issue_date")),
             "permit_category": clean_text(row.get("permit_category")),
-            "valuation": parse_int(row.get("valuation")),
-            "initiating_office": clean_text(row.get("initiating_office")),
             "census_tract": clean_text(row.get("census_tract")),
             "tract": clean_text(row.get("tract")),
             "block": clean_text(row.get("block")),
             "lot": clean_text(row.get("lot")),
             "apn": apn,
-            "city": LADBS_CITY,
-            "county": LADBS_COUNTY,
-            "state": LADBS_STATE,
-            "zip": normalized.postal_code,
+            **_build_common_ladbs_fields(row, normalized=normalized),
         }
 
         return RawRecord(
@@ -131,7 +77,51 @@ def make_ladbs_new_housing_adapter(*, market: str, source_name: str) -> RawRecor
             raw_payload=dict(row),
             canonical_address=normalized.canonical_address,
             project_name=None,
-            identifiers=identifiers,
+            identifiers=_build_ladbs_identifiers(permit_number=permit_number, apn=apn),
+            mapped_fields={key: value for key, value in mapped_fields.items() if value is not None},
+            lat=lat,
+            lng=lng,
+        )
+
+    return adapter
+
+
+def make_ladbs_cofo_adapter(*, market: str, source_name: str) -> RawRecordAdapter:
+    def adapter(row: Mapping[str, Any]) -> RawRecord | None:
+        cofo_number = clean_identifier_text(row.get("cofo_number"))
+        if cofo_number is None:
+            return None
+        permit_number = clean_identifier_text(row.get("pcis_permit"))
+
+        normalized = _normalize_ladbs_address(row, market=market)
+        apn = _build_assessor_apn(row)
+        lat, lng = _extract_latitude_longitude(row.get("latitude_longitude"))
+        cofo_issue_date = _normalize_date_string(row.get("cofo_issue_date"))
+        status_date = _normalize_date_string(row.get("status_date")) or cofo_issue_date
+        evidence_type = _build_cofo_evidence_type(row, cofo_issue_date=cofo_issue_date)
+
+        mapped_fields = {
+            "status_evidence_type": evidence_type,
+            "status_evidence_date": cofo_issue_date if evidence_type is not None else None,
+            "status_date": status_date,
+            "date_delivery": cofo_issue_date,
+            "cofo_number": cofo_number,
+            "cofo_issue_date": cofo_issue_date,
+            "latest_status": clean_text(row.get("latest_status")),
+            "tract": clean_text(row.get("tract")),
+            "block": clean_text(row.get("block")),
+            "lot": clean_text(row.get("lot")),
+            "apn": apn,
+            **_build_common_ladbs_fields(row, normalized=normalized),
+        }
+
+        return RawRecord(
+            source_name=source_name,
+            source_record_id=cofo_number,
+            raw_payload=dict(row),
+            canonical_address=normalized.canonical_address,
+            project_name=None,
+            identifiers=_build_ladbs_identifiers(permit_number=permit_number, apn=apn),
             mapped_fields={key: value for key, value in mapped_fields.items() if value is not None},
             lat=lat,
             lng=lng,
@@ -159,6 +149,55 @@ def _normalize_date_string(value: Any) -> str | None:
     if raw is None:
         return None
     return raw.split("T", 1)[0]
+
+
+def _build_ladbs_identifiers(
+    *,
+    permit_number: str | None,
+    apn: str | None = None,
+) -> dict[str, list[str]]:
+    identifiers: dict[str, list[str]] = {}
+    if permit_number is not None:
+        identifiers["permit_number"] = [permit_number]
+    if apn is not None:
+        identifiers["apn"] = [apn]
+    return identifiers
+
+
+def _build_common_ladbs_fields(
+    row: Mapping[str, Any],
+    *,
+    normalized,
+) -> dict[str, Any]:
+    issue_date = _normalize_date_string(row.get("issue_date"))
+    applicant_name = _compose_name(
+        row.get("applicant_business_name"),
+        row.get("applicant_first_name"),
+        row.get("applicant_last_name"),
+    )
+    contractor_name = _compose_name(
+        row.get("contractors_business_name"),
+        row.get("principal_first_name"),
+        row.get("principal_last_name"),
+    )
+    return {
+        "permit_issue_date": issue_date,
+        "total_units": parse_int(row.get("of_residential_dwelling_units")),
+        "stories": parse_int(row.get("of_stories")),
+        "description": clean_text(row.get("work_description")),
+        "applicant": applicant_name,
+        "contractor": contractor_name,
+        "zoning": clean_text(row.get("zone")),
+        "jurisdiction": "city_of_los_angeles",
+        "permit_type": clean_text(row.get("permit_type")),
+        "permit_sub_type": clean_text(row.get("permit_sub_type")),
+        "valuation": parse_int(row.get("valuation")),
+        "initiating_office": clean_text(row.get("initiating_office")),
+        "city": LADBS_CITY,
+        "county": LADBS_COUNTY,
+        "state": LADBS_STATE,
+        "zip": normalized.postal_code,
+    }
 
 
 def _normalize_ladbs_address(row: Mapping[str, Any], *, market: str):
@@ -192,7 +231,33 @@ def _build_assessor_apn(row: Mapping[str, Any]) -> str | None:
     parcel = clean_identifier_text(row.get("assessor_parcel"))
     if not book or not page or not parcel:
         return None
-    return f"{book.zfill(4)}{page.zfill(3)}{parcel.zfill(3)}"
+    if not all(part.isdigit() for part in [book, page, parcel]):
+        return None
+    if len(book) > ASSESSOR_BOOK_LENGTH:
+        return None
+    if len(page) > ASSESSOR_PAGE_LENGTH:
+        return None
+    if len(parcel) > ASSESSOR_PARCEL_LENGTH:
+        return None
+    return (
+        f"{book.zfill(ASSESSOR_BOOK_LENGTH)}"
+        f"{page.zfill(ASSESSOR_PAGE_LENGTH)}"
+        f"{parcel.zfill(ASSESSOR_PARCEL_LENGTH)}"
+    )
+
+
+def _build_cofo_evidence_type(
+    row: Mapping[str, Any],
+    *,
+    cofo_issue_date: str | None,
+) -> str | None:
+    latest_status = clean_text(row.get("latest_status"))
+    # Only a final CofO issuance with a real issue date is treated as direct Complete evidence.
+    if cofo_issue_date is None:
+        return None
+    if latest_status is not None and latest_status.casefold() == "cofo issued":
+        return "certificate_of_occupancy_issued"
+    return None
 
 
 def _extract_coordinates(value: Any) -> tuple[float | None, float | None]:
@@ -203,4 +268,12 @@ def _extract_coordinates(value: Any) -> tuple[float | None, float | None]:
         return None, None
     lng = parse_float(coordinates[0])
     lat = parse_float(coordinates[1])
+    return lat, lng
+
+
+def _extract_latitude_longitude(value: Any) -> tuple[float | None, float | None]:
+    if not isinstance(value, Mapping):
+        return None, None
+    lat = parse_float(value.get("latitude"))
+    lng = parse_float(value.get("longitude"))
     return lat, lng

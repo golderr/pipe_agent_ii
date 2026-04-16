@@ -5,6 +5,7 @@ from collections.abc import Callable
 from tcg_pipeline.market_config import SourceConfig
 from tcg_pipeline.source_adapters.ladbs import (
     RawRecordAdapter,
+    make_ladbs_cofo_adapter,
     make_ladbs_new_housing_adapter,
     make_ladbs_permits_adapter,
 )
@@ -14,6 +15,7 @@ AdapterBuilder = Callable[..., RawRecordAdapter]
 ADAPTER_BUILDERS: dict[str, AdapterBuilder] = {
     "ladbs_permits": make_ladbs_permits_adapter,
     "ladbs_new_housing": make_ladbs_new_housing_adapter,
+    "ladbs_cofo": make_ladbs_cofo_adapter,
 }
 
 
