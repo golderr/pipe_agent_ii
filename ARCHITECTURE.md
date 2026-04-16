@@ -2,8 +2,8 @@
 
 > **Living document.** This file is the single source of truth for the project. Claude Code / Codex should read this at the start of every session, update it when the plan changes, and mark build steps complete as code is committed. Use commits as checkpoints to review the plan and evaluate if anything changed and should be recorded in this file.
 
-**Last updated:** 2026-04-15T21:35
-**Status:** Build in progress — foundation scaffolded, both seed ingesters and persistence/merge paths are implemented, and the repo is ready to run the scoped LA seed against local source workbooks.
+**Last updated:** 2026-04-16
+**Status:** Build in progress — foundation scaffolded, seed ingesters and persistence/merge paths are implemented, and the first Phase 2 LADBS/Socrata collection slice is now in place with live preview verification.
 - ✅ Pipedream field mapping (81 fields)
 - ✅ CoStar field mapping (287 columns, MF + non-MF)
 - ✅ Master schema finalized
@@ -29,14 +29,25 @@ Seed (once per market) → Collect (scheduled) → Match → Diff → Review (hu
 - **CoStar is the baseline, not the ceiling.** Every market gets seeded with CoStar. Public sources fill the gaps CoStar misses and keep things current.
 - **TCG research is the gold standard.** Where Pipedream or other TCG-verified data exists, it takes priority over all other sources. Researcher overrides are never clobbered by automated updates.
 - **Automate collection, not judgment.** The system presents findings; researchers decide. Low-confidence items are flagged, not silently ingested.
+- **One database, one pipeline, many source configurations.** Markets should not fork the source of truth or the codebase. Reusable collection, matching, and review infrastructure lives in one system.
+- **Market, jurisdiction, and source are separate concepts.** `market` is the dataset/reporting scope, `jurisdiction` is the governing authority, and `source` is the concrete feed being ingested. Do not let "Los Angeles" stand in for all three.
 - **Source types are reusable, source instances are per-market.** A Socrata collector works for any Socrata-based open data portal. Each market just configures which endpoints to hit.
 - **Market is a dataset scope, not a synonym for city.** For now `market=los_angeles` means the City of Los Angeles dataset. Projects still retain their real `city`, `county`, and `jurisdiction` values.
 - **Source coverage can operate at multiple geography levels.** A source instance may be city-, jurisdiction-, county-, or regional-scoped even when it feeds one market dataset.
+- **Flexible fields are a staging area, not the final schema.** Use free text and source payloads early, but when a concept shows up across multiple markets with stable meaning, promote it into the normalized model.
 - **Start with LA, design for any market.** Every architectural decision should consider whether it generalizes.
 
 ---
 
 ## 2. System Architecture
+
+### Core vocabulary
+- `market`: the internal dataset/reporting scope staff filter on in the portal and CLI.
+- `jurisdiction`: the governing city/county/agency authority whose approvals, permits, or statuses apply to a project.
+- `source`: a concrete feed or dataset instance such as LADBS permits, LAHD affordable housing, or a Santa Monica PDF.
+- `source coverage`: the geography a source actually covers. This may be narrower or broader than the target market.
+- `source adapter`: the source-specific mapping/parsing layer that turns fetched rows into normalized `RawRecord` objects.
+- `status evidence rule`: the centralized mapping from source evidence (for example `building_permit_issued`) to a suggested canonical status, review priority, and proof level.
 
 ### Layer 0: Market Seeder
 Runs once when standing up a new market. Two jobs:
@@ -50,19 +61,41 @@ Runs once when standing up a new market. Two jobs:
 
 **Job B — Register market sources:**
 - Each market has a config file defining which collectors to run
-- Config specifies: source name, collector type, endpoint/URL, geographic bounds, coverage scope, query parameters, update frequency
+- Config specifies: source name, collector type, source adapter, endpoint/URL, jurisdiction scope, coverage scope, applicable markets, query parameters, inclusion rules, and update frequency
 - On first run, executes all collectors and runs a full match/diff cycle to catch projects the baseline missed
 
 **Geographic scope model:**
 - `market` is the logical dataset we are building, not necessarily the smallest government boundary.
 - The current `los_angeles` market remains scoped to the City of Los Angeles only.
 - `city`, `county`, and `jurisdiction` remain project-level attributes so multiple datasets can share one database without losing the governing geography of each record.
+- Source definitions must declare both `jurisdiction` and `coverage_scope`; a source should never be assumed to apply just because its name contains "Los Angeles".
+- Long-term routing should rely on declared source coverage plus geographic checks (address, parcel, or geometry), not only on source-provided jurisdiction strings.
+- The current schema still stores a single `market` on `Project`. This is an intentional short-term simplification while active markets do not overlap.
+- Before overlapping datasets go live (for example, a future `la_county` market alongside `los_angeles`), replace the single-column assumption with a `ProjectMarketMembership` model and refactor query paths accordingly.
 - Future expansion should add new market configs and source lists for places like West Hollywood, Glendale, Burbank, Santa Monica, or county/unincorporated coverage rather than widening the LA city dataset and mixing scopes together.
+
+**Recommended source config shape (collector + adapter split):**
+```yaml
+- name: ladbs_permits
+  collector: socrata
+  adapter: ladbs_permits
+  endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
+  jurisdiction: city_of_los_angeles
+  coverage_scope: city
+  supported_markets:
+    - los_angeles
+  inclusion_rule: within_market_boundary
+  matching_keys:
+    - permit_number
+    - canonical_address
+  schedule: weekly
+  soql_filter: "permit_type='Bldg-New'"
+```
 
 **Example market config — Los Angeles (verified endpoints):**
 ```yaml
 market: los_angeles
-display_name: "Los Angeles"
+display_name: "Los Angeles (City)"
 bounds:
   jurisdictions:
     - city_of_los_angeles
@@ -71,39 +104,59 @@ sources:
   # ── DISCOVERY + UPDATE (Socrata — bulk lists) ──
   - name: ladbs_permits
     collector: socrata
+    adapter: ladbs_permits
     endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
     schedule: weekly
     soql_filter: "permit_type='Bldg-New'"
     role: update + discovery
 
   - name: ladbs_new_housing
     collector: socrata
+    adapter: ladbs_new_housing
     endpoint: "https://data.lacity.org/resource/cpkv-aajs.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
     schedule: weekly
     role: discovery (by-right projects)
 
   - name: ladbs_cofo
     collector: socrata
+    adapter: ladbs_cofo
     endpoint: "https://data.lacity.org/resource/3f9m-afei.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
     schedule: weekly
     role: update (completion detection)
 
   - name: lahd_affordable
     collector: socrata
+    adapter: lahd_affordable
     endpoint: "https://data.lacity.org/resource/mymu-zi3s.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
     schedule: monthly
     role: discovery + update (affordable pipeline)
 
-  - name: la_county_planning
-    collector: socrata
-    endpoint: "https://data.lacounty.gov/resource/ccmr-xemc.json"
-    schedule: monthly
-    role: discovery (unincorporated areas — future expansion)
+  # County-scoped sources belong in a future county/unincorporated market config,
+  # not in the active City of Los Angeles dataset.
+  # - name: la_county_planning
+  #   collector: socrata
+  #   adapter: la_county_planning
+  #   endpoint: "https://data.lacounty.gov/resource/ccmr-xemc.json"
+  #   jurisdiction: county_of_los_angeles
+  #   coverage_scope: county
+  #   schedule: monthly
+  #   role: discovery (future county/unincorporated market)
 
   # ── DISCOVERY (PDF parsing) ──
   - name: la_case_reports
     collector: pdf_parser
+    adapter: la_case_reports
     endpoint: "https://planning.lacity.gov/dcpapi/general/biweeklycase/doc/{id}"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
     schedule: biweekly
     role: discovery (primary — new planning filings)
     notes: "PDF format. IDs are numeric, increment biweekly. Filter for housing request types: HCA, VHCA, DB, TOC, QPSH, 100% Affordable."
@@ -111,21 +164,30 @@ sources:
   # ── ENRICHMENT (scraper — lookup only) ──
   - name: zimas_pdis
     collector: scraper
+    adapter: zimas_pdis
     endpoint: "https://planning.lacity.gov/pdiscaseinfo/Search/casenumber/{case_number}"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
     mode: enrichment_only
     trigger: on_new_case_number
     role: enrichment (full case detail once case number is known)
 
   - name: zimas_arcgis
     collector: arcgis
+    adapter: zimas_arcgis
     endpoint: "https://zimas.lacity.org/arcgis/rest/services/D_CASES_WDI_PWA/MapServer/0/query"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
     mode: enrichment_only
     role: enrichment (geometry + limited fields for known cases)
 
   # ── EARLY WARNING ──
   - name: ceqanet
     collector: ceqa_scraper
+    adapter: ceqanet
     endpoint: "https://ceqanet.lci.ca.gov/..."
+    jurisdiction: state_of_california
+    coverage_scope: regional
     schedule: monthly
     role: discovery (large projects in environmental review)
 ```
@@ -184,6 +246,12 @@ Modular, one per source type. Each collector:
 - Queries the source and handles pagination
 - Outputs a list of standardized `RawRecord` objects
 - Logs what it pulled (record count, date range, any errors)
+
+**Collector/adapter split:**
+- The collector type handles transport only: HTTP requests, pagination, retries, throttling, file download, and raw response decoding.
+- The source adapter handles interpretation: field mapping, source-specific filters, status-evidence emission, address assembly, and other one-off quirks.
+- Central status rules handle status suggestion derivation from adapter-emitted evidence. Adapters should not each hardcode their own canonical status transitions as the number of sources grows.
+- Market configs bind a reusable collector type to a source-specific adapter. Adding a market should usually mean config plus a small adapter, not a new codepath for the entire market.
 
 **Collector types to build (in priority order):**
 
@@ -369,7 +437,20 @@ Conceptual → Proposed → Pending → Approved → Under Construction → Pre-
                                                     ↘ Inactive
 Special: Delete - Duplicate | Delete - Outside Market Area | Delete - Not Residential
 ```
-Note: "Pending" in Pipedream means in entitlement review (EIR in progress, planning commission review, etc.). "Approved" means entitled but not yet permitted/under construction. The system tracks up to 6 previous statuses with dates, providing a full status history per project.
+Canonical meaning of each status from `Status Definitions 5.1.2024.xlsx`:
+- `Conceptual`: first mention, preliminary information requests, high-level info gathering, and very early zoning/application discussion.
+- `Proposed`: preliminary or full application activity has begun, but the project is still in active planning/design review and has not reached the later entitlement/permit milestones below.
+- `Pending`: advanced entitlement/in-review state. Includes items like formal SDP submission, tentative map/site approval/final map activity, draft EIR / environmental review, and projects being materially reworked while permits are in process.
+- `Approved`: entitled / meaningfully advanced, but not yet proven to have started vertical construction. Includes completed environmental review, submitted building permit, site permit approval, first building permit issuance, and demolition / grading / shoring / excavation.
+- `Under Construction`: actual construction start is visible. This requires obvious concrete / foundation pour or comparable above-ground construction evidence, not just permit issuance or sitework.
+- `Pre-Leasing/Pre-Selling`: leasing/sales activity has started before final completion.
+- `Complete`: first move-ins, first closings, or project completion.
+- `Stalled`: meaningful inactivity or construction stoppage after advancement. This includes below-ground work ceasing with indeterminate next steps or inactivity-threshold rules in Pipedream.
+- `Inactive`: long-term inactivity, explicit abandonment, project cancellation, or scope change that effectively removes the housing pipeline project.
+
+Important implementation note: the percentages shown beside statuses in the workbook are rough delivery-likelihood heuristics, not status confidence. Do not use them as classification logic in the collector/differ pipeline. If retained later, they belong in a separate delivery-probability model.
+
+Note: "Pending" in Pipedream means in entitlement review (EIR in progress, planning commission review, etc.). "Approved" means entitled or permit-advanced but not yet proven under construction. The system tracks up to 6 previous statuses with dates, providing a full status history per project.
 
 **Important workflow note:** When status moves to Pre-Leasing/Pre-Selling or Complete, the researcher is instructed to set CurrStatusDate to the lease start date (not the date they updated the record). This means status dates have real-world meaning, not just edit timestamps.
 
@@ -1011,12 +1092,12 @@ DismissedRecord:
 $where=permit_type='Bldg-New'
 ```
 
-**Maps to DB fields:** `ProjectIdentifier (permit_number)`, `pipeline_status` (permit issued = Under Construction transition signal), `total_units`, `total_sf`, `canonical_address`, `ProjectIdentifier (apn)`, `date_construction_start`
+**Maps to DB fields:** `ProjectIdentifier (permit_number)`, `canonical_address`, `total_units`, `total_sf`, permit issue evidence/date on `ProjectSourceRecord.mapped_fields`, and a suggested status of `Approved` for review. Permit issuance is not enough by itself to set `Under Construction` or `date_construction_start`.
 
 **Workflow — how the tool uses it:**
 1. Weekly: query SODA API for permits filed/issued since last run, filtered for Bldg-New
 2. For each permit: match against master DB by APN (primary) or address (fallback)
-3. If match found → update permit numbers, check for status change signals (permit issued = construction start)
+3. If match found → update permit numbers and queue a status suggestion/evidence review item (permit issued = strong `Approved` evidence, not proof of `Under Construction`)
 4. If no match → check if it's a significant project (unit count > threshold) → flag as NEW CANDIDATE
 5. Periodic: query Certificate of Occupancy dataset to detect project completion
 6. Periodic: query Inspections dataset for construction progress signals
@@ -1399,7 +1480,7 @@ Run sources that reveal whether known projects have progressed through the pipel
 
 | Source | Signal detected | Maps to status change | Frequency |
 |--------|----------------|----------------------|-----------|
-| LADBS Permits (hbkd-qubn) | Permit issued for a tracked project | Approved → Under Construction | Weekly |
+| LADBS Permits (hbkd-qubn) | Building permit issued for a tracked project | Strong `Approved` evidence; not construction-start proof by itself | Weekly |
 | LADBS CofO (3f9m-afei) | Certificate of Occupancy issued | Under Construction → Complete | Weekly |
 | SM ePermit/Socrata (kpzy-s8rg) | Permit status moves (In Review → Issued → Finaled) | Tracks SM construction progression | Weekly |
 | SM Ministerial PDF | Approval date populated, plans approved | Pending → Approved | Monthly |
@@ -1772,12 +1853,12 @@ On each incoming record:
 
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
-| 2.1 | Build Socrata collector (generic) | `not_started` | Reusable for LADBS, LAHD, LA County, SM permits. Accepts dataset ID + SoQL filter + field mapping. |
-| 2.2 | Configure LADBS permit source (hbkd-qubn) | `not_started` | Also register ydma-y4hd (new buildings) and cpkv-aajs (new housing units) as supplementary |
-| 2.3 | Build matcher (address normalization + matching logic) | `not_started` | APN match first, address fallback. See Section 4e for case number chaining. |
-| 2.4 | Build differ (change detection + priority assignment) | `not_started` | |
-| 2.5 | Persist review items + decisions in the database | `not_started` | Review state is core system state, even if the first researcher surface is Excel. |
-| 2.6 | Run first LADBS collection + match/diff cycle | `not_started` | Validate the whole pipeline |
+| 2.1 | Build Socrata collector (generic) | `done` | Implemented in `src/tcg_pipeline/collectors/socrata.py` with page-based pagination, optional app-token headers, typed config loading, and mock-backed tests. |
+| 2.2 | Configure LADBS permit source (hbkd-qubn) | `done` | `config/markets/los_angeles.yaml` now declares the LADBS adapter plus jurisdiction/coverage metadata, and `src/tcg_pipeline/source_adapters/ladbs.py` maps live hbkd-qubn rows into `RawRecord`s. |
+| 2.3 | Build matcher (address normalization + matching logic) | `done` | First-pass matcher implemented in `src/tcg_pipeline/matching/matcher.py`: existing source record first, then deterministic identifiers, then exact canonical address within market. Fuzzy/proximity tiers remain deferred. |
+| 2.4 | Build differ (change detection + priority assignment) | `in_progress` | Minimal differ implemented in `src/tcg_pipeline/matching/differ.py`. Status suggestions now resolve through `src/tcg_pipeline/status_rules.py` instead of adapter literals, plus basic field diffs (`status_date`, `date_construction_start`, `total_units`). Broader field-level diffing still pending. |
+| 2.5 | Persist review items + decisions in the database | `in_progress` | `src/tcg_pipeline/db/collect.py` now persists `SourceRun`, `ProjectSourceRecord`, and `ReviewItem` rows for new candidates, possible matches, and evidence-backed status suggestions with rule metadata. Researcher decision write paths still need to be wired. |
+| 2.6 | Run first LADBS collection + match/diff cycle | `in_progress` | Live `preview-source ladbs_permits --market los_angeles --limit 3` verified the endpoint and adapter output on 2026-04-16. A first committed collect run against the active database is still pending. |
 | 2.7 | Review results, tune matching thresholds | `not_started` | Iterative |
 
 ### Phase 3: Discovery + Enrichment
@@ -1798,7 +1879,7 @@ On each incoming record:
 |------|------|--------|-------|
 | 4.1 | Build review queue surface (Excel export or minimal web UI) | `not_started` | The underlying review tables already exist by this phase; this step is about researcher-facing delivery. |
 | 4.2 | Add LAHD affordable housing collector | `not_started` | Socrata mymu-zi3s / an7z-aq2k — reuses Socrata collector |
-| 4.3 | Add LA County planning collector | `not_started` | Socrata ccmr-xemc — reuses Socrata collector |
+| 4.3 | Prepare LA County planning collector | `not_started` | County-scoped Socrata ccmr-xemc. Keep the adapter/source definition ready, but do not wire it into the City of LA dataset until a county or unincorporated market exists. |
 | 4.4 | Add LADBS CofO collector (3f9m-afei) | `not_started` | Completion detection. Reuses Socrata collector. |
 | 4.5 | Add CEQAnet collector | `not_started` | Custom scraper — early warning for large projects |
 | 4.6 | Full end-to-end test: seed → collect → match → diff → review | `not_started` | |
@@ -1821,9 +1902,12 @@ On each incoming record:
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
 | 6.1 | Document market onboarding process | `not_started` | What sources does a new market need? How to configure? |
-| 6.2 | Build market config template + validation | `not_started` | |
-| 6.3 | Select third market (different metro area) | `not_started` | True generalization test |
-| 6.4 | Stand up third market | `not_started` | |
+| 6.2 | Build market config template + validation | `not_started` | Include collector type, source adapter, jurisdiction, coverage scope, supported markets, inclusion rules, and matching keys. |
+| 6.3 | Formalize source registry + adapter contract | `not_started` | Make source metadata first-class so market setup is mostly config and small adapter code. |
+| 6.4 | Plan `ProjectMarketMembership` migration for overlapping markets | `not_started` | Required before any city + county or other overlapping datasets go live. Treat this as pre-work, not an optional cleanup. |
+| 6.5 | Add optional market hierarchy / rollup metadata | `not_started` | Consider `parent_market` or equivalent only if researchers need county/metro rollups beyond explicit multi-market filters. |
+| 6.6 | Select third market (different metro area) | `not_started` | True generalization test |
+| 6.7 | Stand up third market | `not_started` | |
 
 ---
 
@@ -1847,6 +1931,15 @@ On each incoming record:
 | 2026-04-15 | Pipedream addresses are the initial address normalization benchmark | Addresses like "5939 W Sunset Blvd" and "1718 N Las Palmas Ave" define the formatting patterns we need to handle. |
 | 2026-04-15 | Filter Pipedream import to City == "Los Angeles" for LA POC | Pipedream files cover broader areas (West Hollywood, Glendale/Burbank). Those cities are separate markets. |
 | 2026-04-15 | Use one shared database with `market` as a dataset scope slug | This preserves cross-market reporting while letting projects keep their real `city`, `county`, and `jurisdiction` values. The current `los_angeles` market remains City of Los Angeles only; future cities, jurisdictions, or county rollups get their own configs and source lists. |
+| 2026-04-16 | Treat `market`, `jurisdiction`, and `source` as distinct architectural concepts | `market` is the dataset/reporting scope, `jurisdiction` is the governing authority, and `source` is the concrete feed. This prevents "Los Angeles" from meaning three different things at once. |
+| 2026-04-16 | Split reusable collectors from source-specific adapters | Collector types handle transport; adapters/config handle field mapping, status derivation, and source quirks. This keeps market onboarding mostly declarative while leaving room for custom parsing where needed. |
+| 2026-04-16 | Keep `Project.market` for now, but treat it as a temporary simplification | The current single-market column works while active markets do not overlap. Before county + city or any other overlapping datasets go live, migrate to `ProjectMarketMembership` and refactor market scoping logic. |
+| 2026-04-16 | Promote recurring concepts out of flexible fields once they stabilize across markets | `raw_payload`, free text, and source-specific details are acceptable staging areas early on, but repeated concepts should graduate into normalized columns/enums instead of accumulating indefinitely in blobs. |
+| 2026-04-16 | First public-source slice uses generic `preview-source` / `collect-source` commands backed by market YAML | The CLI should resolve configured sources through market config instead of adding one-off commands per city/source. This keeps Phase 2 reusable while still starting with LADBS only. |
+| 2026-04-16 | First-pass public-source matching stays conservative | Current collector runs match by existing source record, then deterministic identifiers, then exact canonical address. Fuzzy/proximity tiers are intentionally deferred until real review output shows they are needed. |
+| 2026-04-16 | Treat LADBS permit issuance as status evidence, not direct proof of `Under Construction` | TCG's status definitions put first building permit issuance and sitework inside `Approved`; `Under Construction` requires visible vertical construction. The differ should queue a suggested status, not overstate the transition. |
+| 2026-04-16 | Treat workbook percentages as delivery-likelihood heuristics, not status confidence | The percentages in TCG's status workbook are rough delivery probability estimates. They should remain separate from canonical status and from `status_confidence`, with any future implementation living in a separate forecasting layer. |
+| 2026-04-16 | Centralize status suggestion logic in `status_rules.py` instead of adapter literals | Public-source adapters should emit normalized evidence types; one shared rule registry maps those events to suggested statuses, priorities, and proof levels so the logic stays auditable and reusable across LADBS, LAHD, PDFs, and future markets. |
 | 2026-04-15 | Use explicit seed-scope filters on city-scoped imports | Seed workbooks can contain out-of-scope rows. Current LA Pipedream and CoStar runs should use `--allowed-city "Los Angeles"` so the City of LA dataset is not contaminated during seed. |
 | 2026-04-15 | Keep seed ingestion path-driven, but prefer market-first folders as the repo grows | Current LA files can stay where they are, but future markets should be organized as `data/seed/<market>/<source>/` to avoid mixing workbooks across datasets. |
 | 2026-04-15 | Scope includes all development types, not just residential | Pipeline tracks rental, for-sale, and commercial development. Pipedream is residential-focused but the system should accept commercial projects from CoStar and public sources. |
@@ -1918,9 +2011,14 @@ On each incoming record:
 - [ ] **Review interface format:** Which researcher surface should sit on top of the persisted review tables first: Excel output or a simple web UI? Excel fits existing workflow but limits collaboration. Pipedream is already Excel-based, so Excel output would feel natural to researchers.
 - [x] **ZIMAS address-to-case-number lookup:** **RESOLVED 2026-04-15.** Confirmed: no programmatic address→case endpoint exists. But this is a non-issue — case numbers flow in from three other sources: (1) LA Case Reports biweekly PDFs, (2) LADBS permit records, (3) Pipedream Site1 URLs which often contain PDIS case links. ZIMAS is enrichment-only; we never need to search it cold. See Section 4b Source 1 and Section 4e (Case Number Chain).
 - [ ] **Pipedream "Pending" → public source status mapping:** Pipedream "Pending" means in entitlement (EIR underway, planning review). LADBS and ZIMAS use different status terminology. Need a mapping table. Same for "Stalled" — how do we detect stall from public sources? Probably absence of activity for X months.
+- [ ] **Stalled / inactive evaluator:** The status workbook defines time-based inactivity rules that are not source mappings. Implement these later as a scheduled evaluator over current status, status dates, and cross-source activity history rather than inside adapters.
+- [ ] **Delivery probability model:** The status workbook includes rough delivery-likelihood percentages. Decide later whether to store these as a separate forecasting field/model (`delivery_probability`, method, timestamp) once the methodology is stable enough to justify implementation.
 - [ ] **Unit count threshold for new project candidates:** What's the minimum unit count for the system to flag a new project? Pipedream's smallest projects are ~10-20 units. Should the system flag a 5-unit project from LADBS? A 2-unit ADU?
 - [ ] **Update frequency:** How often should each source be polled? Weekly? Biweekly? Different per source?
 - [x] **Multi-market coordination:** **RESOLVED 2026-04-15.** Use one shared Supabase database. Each tracked dataset gets its own `market` slug and source configuration. For now `los_angeles` remains City of Los Angeles only; future cities, jurisdictions, and county rollups are added as separate market configs instead of widening the LA dataset.
+- [ ] **Overlapping market support:** `Project.market` is sufficient while active markets are non-overlapping. Before any county + city or other overlapping datasets go live, add a `ProjectMarketMembership` model and refactor market-scoped queries/review filters.
+- [ ] **Market hierarchy vs. flat markets:** If researchers need county- or metro-level rollups, do we want an explicit `parent_market` hierarchy or just multi-market filtering? Decide when a second overlapping market is on the roadmap.
+- [ ] **Boundary-based routing:** Current city-scoped filtering can rely on source coverage declarations plus `--allowed-city` style rules. Before broader county/metro expansion, define how to do boundary checks from parsed address, parcel, or geometry.
 - [ ] **Out-of-scope seed staging:** Current seed commands can skip out-of-scope rows via `--allowed-city`, but those skipped rows are not persisted unless the source itself marks them as a dismissal. Decide later whether raw workbooks are sufficient as the holding layer or if we need a dedicated cross-market staging table.
 - [x] **Hosting/scheduling:** **RESOLVED 2026-04-15.** Collectors run locally during development. Production: Render for backend workers/cron jobs, Vercel for frontend review UI (Phase 4+). Database is Supabase (always cloud-hosted). Collection schedule: biweekly full cycle aligned with LA Case Reports, weekly LADBS/SM Socrata pulls.
 - [ ] **Pipedream ongoing sync:** After initial seed, will researchers continue to update Pipedream files? If so, we need a recurring import/sync process, not just a one-time seed. Or does the new system replace Pipedream entirely?

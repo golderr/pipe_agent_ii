@@ -1,5 +1,5 @@
 market: los_angeles
-display_name: "Los Angeles"
+display_name: "Los Angeles (City)"
 bounds:
   jurisdictions:
     - city_of_los_angeles
@@ -7,8 +7,15 @@ bounds:
 sources:
   - name: ladbs_permits
     collector: socrata
+    adapter: ladbs_permits
     endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
+    matching_keys:
+      - permit_number
+      - canonical_address
     schedule: weekly
+    soql_filter: "permit_type='Bldg-New'"
     role: "update+discovery"
 
   - name: ladbs_new_housing

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from tcg_pipeline.collectors.factory import build_collector
+from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.seed import (
     ingest_costar_workbooks,
@@ -14,7 +17,9 @@ from tcg_pipeline.db.seed import (
 )
 from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
+from tcg_pipeline.market_config import get_market_config
 from tcg_pipeline.settings import get_settings
+from tcg_pipeline.status_rules import get_status_evidence_rule
 from tcg_pipeline.utils.logging import configure_logging
 
 app = typer.Typer(help="TCG pipeline tracker CLI.")
@@ -193,6 +198,92 @@ def seed_costar(
     )
     typer.echo(f"Merged fields: {persist_result.merged_fields}")
     typer.echo(f"Ambiguous matches: {persist_result.ambiguous_match_count}")
+
+
+@app.command()
+def preview_source(
+    source_name: str,
+    market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
+    limit: int = typer.Option(5, min=1, help="Maximum records to collect for the preview."),
+) -> None:
+    """Collect a small preview batch from a configured public source."""
+    source_config = get_market_config(market).get_source(source_name).model_copy(
+        update={"max_records": limit}
+    )
+    collector = build_collector(source_config, market=market)
+    raw_records = asyncio.run(collector.collect())
+
+    typer.echo(f"Market: {market}")
+    typer.echo(f"Source: {source_name}")
+    typer.echo(f"Collected records: {len(raw_records)}")
+    for raw_record in raw_records[: min(limit, len(raw_records))]:
+        direct_status = raw_record.mapped_fields.get("pipeline_status")
+        suggested_status = None
+        evidence_type = raw_record.mapped_fields.get("status_evidence_type")
+        evidence_rule = get_status_evidence_rule(str(evidence_type) if evidence_type else None)
+        if evidence_rule is not None:
+            suggested_status = evidence_rule.suggested_status.value
+        status_label = direct_status or suggested_status or "n/a"
+        status_prefix = "status" if direct_status else "suggested_status"
+        typer.echo(
+            "  "
+            f"{raw_record.source_record_id} | "
+            f"{raw_record.canonical_address or 'NO_ADDRESS'} | "
+            f"units={raw_record.mapped_fields.get('total_units', 'n/a')} | "
+            f"{status_prefix}={status_label}"
+        )
+
+
+@app.command()
+def collect_source(
+    source_name: str,
+    market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
+    limit: int | None = typer.Option(
+        None,
+        min=1,
+        help="Optional max record count to collect for this run.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        help="Collect and summarize without writing to the database.",
+    ),
+) -> None:
+    """Collect a configured public source and persist the first-pass review artifacts."""
+    source_config = get_market_config(market).get_source(source_name)
+    if limit is not None:
+        source_config = source_config.model_copy(update={"max_records": limit})
+
+    collector = build_collector(source_config, market=market)
+    raw_records = asyncio.run(collector.collect())
+
+    typer.echo(f"Market: {market}")
+    typer.echo(f"Source: {source_name}")
+    typer.echo(f"Collected records: {len(raw_records)}")
+
+    if dry_run:
+        return
+
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        persist_result = persist_collected_records(
+            session,
+            market=market,
+            source_name=source_name,
+            raw_records=raw_records,
+        )
+        session.commit()
+
+    typer.echo(f"Source run id: {persist_result.source_run_id}")
+    typer.echo(f"Matched existing projects: {persist_result.matched_existing_projects}")
+    typer.echo(f"Matched by source record: {persist_result.matched_by_source_record}")
+    typer.echo(f"Matched by identifier: {persist_result.matched_by_identifier}")
+    typer.echo(f"Matched by address: {persist_result.matched_by_address}")
+    typer.echo(f"Inserted source records: {persist_result.inserted_source_records}")
+    typer.echo(f"Updated source records: {persist_result.updated_source_records}")
+    typer.echo(f"Inserted identifiers: {persist_result.inserted_identifiers}")
+    typer.echo(f"New candidate review items: {persist_result.new_candidate_review_items}")
+    typer.echo(f"Status change review items: {persist_result.status_change_review_items}")
+    typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
 
 
 def _echo_pipedream_import_summary(import_results: list[PipedreamImportResult]) -> None:

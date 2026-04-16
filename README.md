@@ -16,6 +16,9 @@ This repository is scaffolded through Step `1.8` seed persistence:
 - Pipedream workbook ingester with diagnostics plus rerunnable seed persistence
 - CoStar workbook ingester with header-name mapping, cross-file `PropertyID` dedupe, and seed-time merge/dedup against existing projects
 - CLI preview/seed commands for both seed sources
+- market YAML loading for configured sources
+- generic Socrata collector plus first LADBS adapter (`hbkd-qubn`)
+- first-pass public source matching/review persistence (`SourceRun`, `ProjectSourceRecord`, `ReviewItem`)
 
 ## Local Setup
 
@@ -55,6 +58,8 @@ tcg-pipeline preview-pipedream .\data\seed\pipedream\your_file.xlsm --market los
 tcg-pipeline seed-pipedream .\data\seed\pipedream\file1.xlsm .\data\seed\pipedream\file2.xlsm --market los_angeles --allowed-city "Los Angeles" --dry-run
 tcg-pipeline preview-costar .\data\seed\costar\ --market los_angeles --allowed-city "Los Angeles"
 tcg-pipeline seed-costar .\data\seed\costar\ --market los_angeles --allowed-city "Los Angeles" --dry-run
+tcg-pipeline preview-source ladbs_permits --market los_angeles --limit 3
+tcg-pipeline collect-source ladbs_permits --market los_angeles --limit 100 --dry-run
 ```
 
 For the current `los_angeles` dataset, treat the seed as City of Los Angeles only. The ingesters already support `--allowed-city`, and using it now keeps West Hollywood, Glendale, Burbank, and other out-of-scope records out of the LA seed.
