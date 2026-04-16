@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -135,43 +135,54 @@ def test_persist_collected_records_skips_unchanged_overlap_rows(
     postgres_session.add(project)
     postgres_session.flush()
 
-    original_seen_at = datetime(2026, 4, 15, 8, 0, tzinfo=UTC)
-    postgres_session.add(
-        ProjectSourceRecord(
-            project_id=project.id,
-            source_name="ladbs_permits",
-            source_record_id="11010-10000-02451",
-            source_row_id="row-1",
-            source_created_at=datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC),
-            source_updated_at=datetime(2026, 4, 15, 12, 0, tzinfo=UTC),
-            source_row_hash="stable-hash",
-            first_seen_at=original_seen_at,
-            last_seen_at=original_seen_at,
-            last_pulled_at=original_seen_at,
-            raw_payload={
-                ":id": "row-1",
-                ":updated_at": "2026-04-15T12:00:00.000Z",
-                "pcis_permit": "11010-10000-02451",
-            },
-            mapped_fields={
-                "status_evidence_type": "building_permit_issued",
-                "status_evidence_date": "2013-01-02",
-                "total_units": 260,
-            },
-            field_provenance={
-                "status_evidence_type": "ladbs_permits",
-                "status_evidence_date": "ladbs_permits",
-                "total_units": "ladbs_permits",
-            },
-        )
+    initial_raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="11010-10000-02451",
+        raw_payload={
+            ":id": "row-1",
+            "as_of_date": date(2026, 4, 15),
+            ":updated_at": "2026-04-15T12:00:00.000Z",
+            "pcis_permit": "11010-10000-02451",
+        },
+        canonical_address="7270 MANCHESTER AVENUE LOS ANGELES CA 90045",
+        identifiers={"permit_number": ["11010-10000-02451"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": date(2013, 1, 2),
+            "total_units": 260,
+        },
+        source_row_id="row-1",
+        source_created_at=datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC),
+        source_updated_at=datetime(2026, 4, 15, 12, 0, tzinfo=UTC),
+        source_row_hash="stable-hash",
+    )
+    initial_result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[initial_raw_record],
+        collection_mode="full",
     )
     postgres_session.flush()
+
+    original_source_record = postgres_session.execute(
+        select(ProjectSourceRecord).where(
+            ProjectSourceRecord.project_id == project.id,
+            ProjectSourceRecord.source_name == "ladbs_permits",
+            ProjectSourceRecord.source_record_id == "11010-10000-02451",
+        )
+    ).scalar_one()
+    original_seen_at = original_source_record.last_seen_at
+    assert initial_result.inserted_source_records == 1
+
+    postgres_session.expire_all()
 
     raw_record = RawRecord(
         source_name="ladbs_permits",
         source_record_id="11010-10000-02451",
         raw_payload={
             ":id": "row-1",
+            "as_of_date": date(2026, 4, 15),
             ":updated_at": "2026-04-16T12:00:00.000Z",
             "pcis_permit": "11010-10000-02451",
         },
@@ -179,7 +190,7 @@ def test_persist_collected_records_skips_unchanged_overlap_rows(
         identifiers={"permit_number": ["11010-10000-02451"]},
         mapped_fields={
             "status_evidence_type": "building_permit_issued",
-            "status_evidence_date": "2013-01-02",
+            "status_evidence_date": date(2013, 1, 2),
             "total_units": 260,
         },
         source_row_id="row-1",
@@ -228,6 +239,7 @@ def test_persist_collected_records_skips_unchanged_overlap_rows(
     assert source_record.source_updated_at == datetime(2026, 4, 16, 12, 0, tzinfo=UTC)
     assert source_record.source_row_hash == "stable-hash"
     assert source_record.raw_payload[":updated_at"] == "2026-04-16T12:00:00.000Z"
+    assert source_record.raw_payload["as_of_date"] == "2026-04-15"
     assert source_record.mapped_fields == {
         "status_evidence_type": "building_permit_issued",
         "status_evidence_date": "2013-01-02",

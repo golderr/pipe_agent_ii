@@ -6,6 +6,11 @@ Related plan: [ladbs_recall_audit_plan.md](./ladbs_recall_audit_plan.md)
 
 This document records the first recall audit of the current Los Angeles LADBS permit strategy.
 
+Operator note:
+
+- the current persisted `ladbs_permits` incremental cursor was seeded on 2026-04-16 from a bounded oldest-first slice and currently reflects only that historical window, not the true source high-water mark
+- treat the source's default incremental mode as provisional until the cursor is ratcheted forward through catch-up runs or reset after a proper backfill
+
 The audited source configuration was:
 
 - source: `ladbs_permits`
