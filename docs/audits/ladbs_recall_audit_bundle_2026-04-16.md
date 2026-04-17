@@ -69,6 +69,8 @@ The broader LADBS bundle is directionally correct, but it does **not** eliminate
 Key results:
 
 - the narrow `Bldg-New` slice is still weak for `Approved` and only partial for `Under Construction`
+- the `Approved` gap is expected for a permit-family source because many `Approved` projects are still
+  pre-permit and will be recovered more naturally through Planning-family sources, not LADBS alone
 - broader `hbkd-qubn` activity remains the largest single recall lift outside the current narrow filter
 - `cpkv-aajs` still helps, but mostly as enrichment and occasional APN rescue
 - `3f9m-afei` adds important completion evidence semantics, but in this deterministic recall pass it did not
@@ -104,6 +106,8 @@ Interpretation:
 
 - `Approved` remains mostly an early-lifecycle problem, not a LADBS-family completeness problem that `cpkv` or
   `cofo` can solve on their own
+- the not-found share here should not be read as a pipeline failure; it is mostly evidence that permit-family
+  sources are the wrong place to expect full entitlement-stage recall
 
 ### `Under Construction` (224 projects)
 
@@ -181,12 +185,41 @@ It **does** suggest:
    - genuinely absent from current LADBS public data
    - recoverable only through a different source family
 
+## Follow-Up: Identifier-Based UC Miss-Bucket Check
+
+After this rerun, the remaining `75` `Under Construction` misses were checked again using the current
+production-matching primitives that were not part of the original address-led audit:
+
+- seeded `permit_number` identifiers
+- seeded `apn` identifiers
+- source-row lookups by those identifiers in `hbkd-qubn`, `cpkv-aajs`, and `3f9m-afei`
+- `match_raw_record(...)` against the live database for any rows returned by those identifier queries
+
+Result:
+
+- `0 / 75` were recoverable through existing permit/APN-based production matching
+- `56 / 75` had at least one APN or permit identifier, but no current LADBS-bundle rows were found by those
+  identifiers
+- `19 / 75` had no APN or permit identifier available for this follow-up check
+
+Interpretation:
+
+- the current `75`-project UC miss bucket does **not** appear to be primarily an overlooked permit/APN matcher
+  bug
+- the remaining gap is more likely a mix of:
+  - stale seeded `Under Construction` statuses
+  - source incompleteness or source-family limits
+  - cases that need a different public-source chain
+
+That does not eliminate matching as a future workstream. It does mean the next highest-value investigation is not
+"add permit-number matching" but "classify why these projects are absent from the current LADBS family at all."
+
 ## Note on `2w4b-a48u`
 
 A quick exploratory check on 2026-04-16 suggests the public `2w4b-a48u` endpoint is **not** an immediate
 drop-in address-based construction-activity source:
 
-- the simple public row shape surfaced only `permit` and `permit_status`
+- the Socrata catalog metadata confirms the exposed schema is only `permit` and `permit_status`
 - direct address-field lookups failed because address columns were not exposed in that view
 
 That does not prove the inspections family is useless. It does mean the next inspection-source step should begin
@@ -195,5 +228,11 @@ with a source-profile pass, not with immediate adapter implementation.
 ## Recommended Next Step
 
 Run a targeted investigation on the remaining `75` `Under Construction` projects not found in the current LADBS
-bundle, and treat `2w4b-a48u` as a profiling task rather than an implementation task until its usable field
-shape is confirmed.
+bundle, with the next split now narrowed to:
+
+- stale seeded status vs still-active UC status
+- true LADBS/source-family absence
+- recovery through a different public-source chain
+
+Treat `2w4b-a48u` as a profiling task rather than an implementation task until its usable field shape is
+confirmed.

@@ -1,6 +1,6 @@
 # LADBS Socrata Completeness Spec
 
-Last updated: 2026-04-16
+Last updated: 2026-04-17
 
 This document defines how the Los Angeles Department of Building and Safety (LADBS) Socrata datasets should be treated for completeness, incremental collection, reconciliation, and lifecycle inference.
 
@@ -68,83 +68,70 @@ Until a more mature source-state model exists:
 
 ## LADBS Source Bundle
 
-### 1. `hbkd-qubn` - Building Permits
+### 1. `pi9x-tg5x` - Building Permits Issued 2020-Present
 
-- Dataset: `https://data.lacity.org/resource/hbkd-qubn.json`
-- Current role: broad permit discovery and permit-detail tracking
-- Current config role: `update+discovery`
-- Primary business key: `pcis_permit`
+- Dataset: `https://data.lacity.org/resource/pi9x-tg5x.json`
+- Current role: live permit discovery plus permit-activity enrichment
+- Active config roles:
+  - `ladbs_permits`: `permit_type='Bldg-New'`, `update+discovery`
+  - `ladbs_permit_activity`: `permit_type != 'Bldg-New'`, `update`, `create_new_candidates: false`
+- Primary business key: `permit_nbr`
 - Incremental cursor: `:updated_at`
-- Current inclusion rule under evaluation: `permit_type='Bldg-New'`
 
-Likely authoritative for:
+Authoritative or preferred for:
 
-- permit existence
-- permit issuance evidence
+- current permit issuance evidence
 - permit type and subtype
-- work description
-- valuation
-- applicant and contractor names
+- work description via `work_desc`
+- explicit publisher status via `status_desc`
+- APN via `apn`
+- units and stories when present
+- geometry via `lat`, `lon`, or `geolocation`
+- housing-oriented enrichment via `use_desc`
 
-Known limitations:
+Important operating note:
 
-- the visible row shape is relatively sparse
-- no obvious APN in the current row shape
-- no visible geocode in the sampled row shape
-- the current `Bldg-New` filter has not yet been recall-audited against seeded LA projects
+- The pipeline intentionally runs two logical sources against the same dataset. This duplicates HTTP
+  work during collection, but it keeps the semantics clean: `ladbs_permits` remains a narrow
+  `Bldg-New` discovery slice, while `ladbs_permit_activity` handles broader non-`Bldg-New` update
+  evidence without flooding the review queue with unmatched rows.
 
 Status use:
 
 - building permit issuance is strong `Approved` evidence
 - permit issuance is not proof of `Under Construction`
+- `use_desc` currently uses the minimum safe housing allowlist from the rewire plan:
+  `Apartment`, `Duplex`, `Dwelling - Single Family`; widening that set remains a deliberate follow-up
 
-### 2. `ydma-y4hd` - New Building Permits
+### 2. `9w5z-rg2h` - Building and Safety Inspections
 
-- Dataset: `https://data.lacity.org/resource/ydma-y4hd.json`
-- Current role: comparison and recall-validation feed
-- Primary business key: expected to include `pcis_permit` or equivalent permit identifier
+- Dataset: `https://data.lacity.org/resource/9w5z-rg2h.json`
+- Current role: update-only construction-activity evidence
+- Active config role: `ladbs_inspections`, `update`, `create_new_candidates: false`
+- Primary business keys: Socrata `:id` for row identity plus normalized `permit` for matching
 - Incremental cursor: `:updated_at`
 
-Planned use:
+Preferred for:
 
-- validate whether `hbkd-qubn` plus the current filter is missing relevant rows
-- compare coverage, field shape, and refresh behavior against `hbkd-qubn`
-
-Known limitations:
-
-- currently unverified in the live collection workflow
-- may be redundant or differently prefiltered in ways we do not fully control
+- inspection detail via `inspection`, `inspection_date`, and `inspection_result`
+- permit workflow state via `permit_status`
+- address-level matching context via `address`
+- per-row coordinates via `lat_lon`
 
 Status use:
 
-- none until validated
+- normalize the source permit format from spaces to dashes on read
+- persist all inspection rows as source context
+- emit direct `Under Construction` evidence only when all of the following are true:
+  - `inspection_date` is present and recent
+  - `inspection_result` is a substantive positive outcome
+  - `permit_status` is still an active in-progress state, not a terminal/completed one
 
-### 3. `cpkv-aajs` - Building Permits: New Housing Units
+This keeps inspection evidence calibrated with the project status definitions. Old, cancelled,
+scheduled, correction-only, or terminal-permit inspections are useful context but not safe direct
+status signals.
 
-- Dataset: `https://data.lacity.org/resource/cpkv-aajs.json`
-- Current role: housing-specific enrichment
-- Primary business key: `pcis_permit`
-- Incremental cursor: `:updated_at`
-
-Sampled fields indicate likely authority for:
-
-- residential unit count
-- stories
-- assessor book/page/parcel
-- location geometry or coordinates via `location_1`
-- permit details for housing-specific rows
-
-Known limitations:
-
-- overlap with `hbkd-qubn` means field-authority rules must be explicit
-- field-level disagreements between datasets should be tracked, not silently ignored
-
-Status use:
-
-- permit issuance can support `Approved`
-- housing-specific permit data may improve candidate prioritization and matching
-
-### 4. `3f9m-afei` - Certificate of Occupancy
+### 3. `3f9m-afei` - Certificate of Occupancy
 
 - Dataset: `https://data.lacity.org/resource/3f9m-afei.json`
 - Current role: completion evidence
@@ -168,25 +155,58 @@ Status use:
 
 - primary LADBS evidence for `Complete`
 
-### 5. `2w4b-a48u` - Inspections
+### 4. `hbkd-qubn` - Building Permits (deprecated frozen feed)
 
-- Dataset: `https://data.lacity.org/resource/2w4b-a48u.json`
-- Current role: experimental construction-activity feed
-- Visible sample fields: `permit`, `permit_status`
+- Dataset: `https://data.lacity.org/resource/hbkd-qubn.json`
+- Publisher state: frozen since `2023-05-22T09:33:30.736Z`
+- Current role: deprecated historical replay only
+- Primary business key: `pcis_permit`
 - Incremental cursor: `:updated_at`
-
-Planned use:
-
-- evaluate whether inspections provide defensible evidence for `Under Construction`
 
 Known limitations:
 
-- currently too sparse to treat as authoritative for lifecycle transitions
-- needs validation before it is allowed to drive status suggestions
+- no row updates after the freeze timestamp
+- zero observed 2024, 2025, or 2026 row growth in the coverage audit
+- materially worse field shape than `pi9x-tg5x`
 
 Status use:
 
-- none until field shape and evidentiary value are validated against the status definitions
+- none for live collection cutover
+- legacy adapters are retained only so historical snapshots can still be replayed deliberately
+
+### 5. `cpkv-aajs` - Building Permits: New Housing Units (deprecated frozen feed)
+
+- Dataset: `https://data.lacity.org/resource/cpkv-aajs.json`
+- Publisher state: frozen since `2023-05-22T09:33:30.736Z`
+- Current role: deprecated historical replay only
+- Primary business key: `pcis_permit`
+- Incremental cursor: `:updated_at`
+
+Formerly useful for:
+
+- residential unit count
+- stories
+- reconstructed APN fragments
+- location geometry via `location_1`
+
+Current treatment:
+
+- its useful enrichment has been folded into the live `pi9x-tg5x` adapter path
+- it should no longer be used as an active housing-enrichment source
+
+### 6. `ydma-y4hd` - New Building Permits (removed from catalog)
+
+- Publisher state: removed from the live LADBS Socrata catalog during the 2026-04-17 coverage audit
+- Current role: none
+- Status use: none
+
+### 7. `2w4b-a48u` - Inspections (superseded sparse feed)
+
+- Dataset: `https://data.lacity.org/resource/2w4b-a48u.json`
+- Current role: none
+- Reason retired: the public row shape is too sparse for defensible matching or lifecycle inference,
+  and `9w5z-rg2h` supersedes it with address, inspection, date, result, and coordinate fields
+- Status use: none
 
 ## Field Authority Rules
 
@@ -194,11 +214,11 @@ Where multiple LADBS datasets expose the same concept, authority must be explici
 
 Initial direction:
 
-- permit issuance detail: prefer `hbkd-qubn`
-- residential unit detail: prefer `cpkv-aajs`
-- APN or assessor fields: prefer `cpkv-aajs` when present, otherwise retain non-authoritative values as supporting source detail
+- permit issuance detail: prefer `pi9x-tg5x`
+- residential unit detail: prefer `pi9x-tg5x`
+- APN or assessor fields: prefer direct `pi9x-tg5x.apn`; keep legacy `cpkv-aajs` values only for historical replay
 - completion evidence: prefer `3f9m-afei`
-- construction activity: do not use `2w4b-a48u` for canonical status until validated
+- construction activity: prefer filtered `9w5z-rg2h` inspections; do not use `2w4b-a48u`
 
 When a non-authoritative dataset disagrees with the authoritative one:
 
@@ -271,21 +291,22 @@ Longer term, the system may need full source-row history rather than just curren
 
 ## Required Audits
 
-Before building more LADBS adapters, run a recall audit of the current `hbkd-qubn` inclusion rule against seeded Los Angeles projects.
+The current live-state references for this source family are:
 
-See [ladbs_recall_audit_plan.md](../audits/ladbs_recall_audit_plan.md) for the execution checklist.
+- [ladbs_socrata_coverage_2026-04-17.md](../audits/ladbs_socrata_coverage_2026-04-17.md)
+- [ladbs_socrata_rewire_verification_2026-04-17.md](../audits/ladbs_socrata_rewire_verification_2026-04-17.md)
 
-The recall audit should answer:
+Any future LADBS source changes should re-answer the same questions those audits covered:
 
-- are seeded LA projects showing up under the current `Bldg-New` filter?
-- if not, do they appear elsewhere in `hbkd-qubn`?
-- if not, do they appear in sibling LADBS datasets?
-- what miss categories explain the gap?
+- is the configured dataset still live and updating?
+- does the active row shape still support the adapter assumptions?
+- does the rewired source bundle still recover the audit calibration cohorts at roughly the same rate?
+- are status-evidence rules still conservative relative to the current source taxonomy?
 
 ## Known Open Items
 
-- Validate the actual field shape and usefulness of `ydma-y4hd`
-- Validate whether `2w4b-a48u` supports defensible `Under Construction` evidence
 - Decide whether source-row history requires a dedicated version table or lighter row-state metadata first
 - Define explicit discrepancy-reporting behavior when sibling datasets disagree
 - Define operational policy for repeated source disappearance before canonical data is changed
+- Revisit whether the `use_desc` housing allowlist should expand beyond the current minimum safe set
+- Re-profile `9w5z-rg2h` inspection outcomes if the publisher changes the result/status taxonomy
