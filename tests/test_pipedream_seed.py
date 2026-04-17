@@ -28,7 +28,7 @@ def test_persist_import_results_resolves_cross_file_relationships(
         [
             {
                 "ProjectID": "991.00001",
-                "Address": "5939 W Sunset Blvd",
+                "Address": "9901 W Example Blvd",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
@@ -42,7 +42,7 @@ def test_persist_import_results_resolves_cross_file_relationships(
         [
             {
                 "ProjectID": "992.00001",
-                "Address": "1718 N Las Palmas Ave",
+                "Address": "9902 N Example Ave",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
@@ -61,14 +61,26 @@ def test_persist_import_results_resolves_cross_file_relationships(
     assert persist_result.created_relationships == 1
     assert persist_result.unresolved_relationship_count == 0
 
+    test_ids = ["991.00001", "992.00001"]
     identifier_rows = postgres_session.execute(
         select(ProjectIdentifier.value).where(
-            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value.in_(test_ids),
         )
     ).scalars()
-    assert sorted(identifier_rows) == ["991.00001", "992.00001"]
+    assert sorted(identifier_rows) == test_ids
 
-    relationship = postgres_session.execute(select(ProjectRelationship)).scalar_one()
+    source_project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value == "991.00001",
+        )
+    ).scalar_one()
+    relationship = postgres_session.execute(
+        select(ProjectRelationship).where(
+            ProjectRelationship.project_id == source_project_id,
+        )
+    ).scalar_one()
     assert relationship.relationship_type.value == "phase"
 
 
@@ -81,7 +93,7 @@ def test_persist_import_results_reports_unresolved_relationships(
         [
             {
                 "ProjectID": "993.00001",
-                "Address": "5939 W Sunset Blvd",
+                "Address": "9903 S Example Dr",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
@@ -110,7 +122,7 @@ def test_seed_pipedream_command_persists_when_not_dry_run(
         [
             {
                 "ProjectID": "994.00001",
-                "Address": "5939 W Sunset Blvd",
+                "Address": "9904 E Example Ln",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
@@ -135,7 +147,8 @@ def test_seed_pipedream_command_persists_when_not_dry_run(
 
     persisted_identifier = postgres_session.execute(
         select(ProjectIdentifier.value).where(
-            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value == "994.00001",
         )
     ).scalar_one()
     assert persisted_identifier == "994.00001"
@@ -150,7 +163,7 @@ def test_persist_import_results_is_idempotent_for_existing_project_ids(
         [
             {
                 "ProjectID": "995.00001",
-                "Address": "5939 W Sunset Blvd",
+                "Address": "9905 W Example Ct",
                 "State": "CA",
                 "County": "Los Angeles",
                 "City": "Los Angeles",
@@ -174,12 +187,49 @@ def test_persist_import_results_is_idempotent_for_existing_project_ids(
     assert second_persist_result.inserted_projects == 0
     assert second_persist_result.skipped_existing_project_ids == ["995.00001"]
 
-    identifier_rows = postgres_session.execute(
+    identifier_row = postgres_session.execute(
         select(ProjectIdentifier.value).where(
-            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value == "995.00001",
         )
-    ).scalars()
-    assert list(identifier_rows) == ["995.00001"]
+    ).scalar_one()
+    assert identifier_row == "995.00001"
+
+
+def test_persist_import_results_stores_harvested_permit_number_identifiers(
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_permit_identifier.xlsx",
+        [
+            {
+                "ProjectID": "996.00001",
+                "Address": "329 S Bonnie Brae St",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "Approved",
+                "Site1": (
+                    "https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                    "PcisPermitDetail?id1=18010&id2=10000&id3=03620"
+                ),
+            }
+        ],
+    )
+
+    import_results = ingest_pipedream_workbooks([workbook_path], market="los_angeles")
+    persist_result = persist_pipedream_import_results(postgres_session, import_results)
+
+    assert persist_result.inserted_projects == 1
+
+    permit_identifier = postgres_session.execute(
+        select(ProjectIdentifier.value).where(
+            ProjectIdentifier.identifier_type == IdentifierType.PERMIT_NUMBER,
+            ProjectIdentifier.value == "18010-10000-03620",
+        )
+    ).scalar_one()
+    assert permit_identifier == "18010-10000-03620"
 
 
 def _build_pipedream_workbook(path: Path, rows: list[dict[str, object]]) -> Path:

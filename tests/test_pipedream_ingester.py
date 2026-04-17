@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
 import logging
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -16,8 +16,40 @@ from tcg_pipeline.db.models import (
     RelationshipType,
 )
 from tcg_pipeline.ingesters.pipedream import PipedreamIngester
+from tcg_pipeline.permit_numbers import extract_ladbs_pcis_permit_numbers
 
 runner = CliRunner()
+
+
+def test_extract_ladbs_pcis_permit_numbers_ignores_malformed_urls_and_dedupes_matches() -> None:
+    permit_numbers = extract_ladbs_pcis_permit_numbers(
+        [
+            (
+                "First https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                "PcisPermitDetail?id1=18010&id2=10000&id3=03620#details "
+                "second https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                "PcisPermitDetail?id1=22010&id2=10000&id3=04890"
+            ),
+            (
+                "https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                "PcisPermitDetail?id1=18010&id2=10000&id3=03620"
+            ),
+            (
+                "https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                "PcisPermitDetail?id1=bad&id2=10000&id3=03620"
+            ),
+            (
+                "https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                "PcisPermitDetail?id1=23010&id2=10000"
+            ),
+            "https://example.com/not-ladbs",
+        ]
+    )
+
+    assert permit_numbers == [
+        "18010-10000-03620",
+        "22010-10000-04890",
+    ]
 
 
 def test_ingest_workbook_builds_project_records_and_history(tmp_path: Path) -> None:
@@ -216,6 +248,71 @@ def test_ingest_workbook_uses_name_as_address_when_address_is_entity_name(
         "8000 W 3rd St",
         "8008 Third Street Investments, LLC",
     ]
+
+
+def test_ingest_workbook_does_not_harvest_ladbs_permit_numbers_outside_los_angeles_market(
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_non_la_market.xlsx",
+        [
+            {
+                "ProjectID": "24.00086",
+                "Address": "1437 4th Street",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Santa Monica",
+                "CurrStatus": "Pending",
+                "Site1": (
+                    "https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                    "PcisPermitDetail?id1=18010&id2=10000&id3=03620"
+                ),
+            }
+        ],
+    )
+
+    result = PipedreamIngester(market="santa_monica").ingest_workbook(workbook_path)
+
+    assert result.imported_count == 1
+    identifier_types = {
+        identifier.identifier_type for identifier in result.project_records[0].identifiers
+    }
+    assert IdentifierType.PERMIT_NUMBER not in identifier_types
+
+
+def test_ingest_workbook_extracts_pcis_permit_identifiers_from_source_urls(
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_permit_urls.xlsx",
+        [
+            {
+                "ProjectID": "24.00223",
+                "Address": "10608 W Pico Blvd",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "Approved",
+                "Site1": (
+                    "https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                    "PcisPermitDetail?id1=22010&id2=10000&id3=04890"
+                ),
+                "Site2": (
+                    "https://www.ladbsservices2.lacity.org/OnlineServices/PermitReport/"
+                    "PcisPermitDetail?id1=22010&id2=10000&id3=04890"
+                ),
+            }
+        ],
+    )
+
+    result = PipedreamIngester(market="los_angeles").ingest_workbook(workbook_path)
+
+    assert result.imported_count == 1
+    identifiers = {
+        (identifier.identifier_type, identifier.value)
+        for identifier in result.project_records[0].identifiers
+    }
+    assert (IdentifierType.PERMIT_NUMBER, "22010-10000-04890") in identifiers
 
 
 def test_preview_pipedream_command_reports_counts(tmp_path: Path) -> None:

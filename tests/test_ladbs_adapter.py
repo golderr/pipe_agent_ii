@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from datetime import date
+
 from tcg_pipeline.source_adapters.ladbs import (
     make_ladbs_cofo_adapter,
+    make_ladbs_inspections_9w5z_rg2h_adapter,
     make_ladbs_new_housing_adapter,
     make_ladbs_permit_activity_adapter,
+    make_ladbs_permit_activity_pi9x_tg5x_adapter,
     make_ladbs_permits_adapter,
+    make_ladbs_permits_pi9x_tg5x_adapter,
 )
 
 
@@ -173,6 +178,276 @@ def test_ladbs_permit_activity_adapter_keeps_permit_detail_without_status_eviden
     assert raw_record.mapped_fields["permit_type"] == "Bldg-Alter/Repair"
     assert raw_record.mapped_fields["permit_sub_type"] == "1 or 2 Family Dwelling"
     assert raw_record.mapped_fields["council_district"] == "12"
+
+
+def test_ladbs_pi9x_permits_adapter_maps_bldg_new_row() -> None:
+    adapter = make_ladbs_permits_pi9x_tg5x_adapter(
+        market="los_angeles",
+        source_name="ladbs_permits",
+    )
+
+    raw_record = adapter(
+        {
+            "permit_nbr": "22010-10000-04890",
+            "permit_type": "Bldg-New",
+            "permit_sub_type": "Commercial",
+            "initiating_office": "METRO",
+            "issue_date": "2024-09-25T00:00:00.000",
+            "primary_address": "10610 W PICO BLVD 1-50",
+            "zip_code": "90064",
+            "work_desc": "Construct new six-story mixed-use building.",
+            "valuation": "21500000",
+            "of_residential_dwelling_units": "50",
+            "of_stories": "6",
+            "contractors_business_name": "BUILDER ONE",
+            "applicant_business_name": "DEVELOPER LLC",
+            "zone": "C2-1VL",
+            "council_district": "5",
+            "status_desc": "Issued",
+            "use_desc": "Apartment",
+            "apn": "4318003010",
+            "lat": "34.03819",
+            "lon": "-118.43055",
+        }
+    )
+
+    assert raw_record is not None
+    assert raw_record.source_record_id == "22010-10000-04890"
+    assert raw_record.canonical_address == "10610 WEST PICO BOULEVARD LOS ANGELES CA 90064"
+    assert raw_record.identifiers == {
+        "permit_number": ["22010-10000-04890"],
+        "apn": ["4318003010"],
+    }
+    assert raw_record.lat == 34.03819
+    assert raw_record.lng == -118.43055
+    assert raw_record.mapped_fields["status_evidence_type"] == "building_permit_issued"
+    assert raw_record.mapped_fields["status_evidence_date"] == "2024-09-25"
+    assert raw_record.mapped_fields["status_desc"] == "Issued"
+    assert raw_record.mapped_fields["use_desc"] == "Apartment"
+    assert raw_record.mapped_fields["housing_use_desc"] == "Apartment"
+    assert raw_record.mapped_fields["description"] == "Construct new six-story mixed-use building."
+    assert raw_record.mapped_fields["total_units"] == 50
+    assert raw_record.mapped_fields["stories"] == 6
+
+
+def test_ladbs_pi9x_permits_adapter_normalizes_primary_address_unit_range() -> None:
+    adapter = make_ladbs_permits_pi9x_tg5x_adapter(
+        market="los_angeles",
+        source_name="ladbs_permits",
+    )
+
+    raw_record = adapter(
+        {
+            "permit_nbr": "18010-10000-03620",
+            "permit_type": "Bldg-New",
+            "permit_sub_type": "Apartment",
+            "issue_date": "2023-05-23T00:00:00.000",
+            "primary_address": "329 S BONNIE BRAE ST 1-30",
+            "zip_code": "90057",
+            "work_desc": "New apartment building.",
+            "of_residential_dwelling_units": "30",
+            "of_stories": "7",
+            "status_desc": "Issued",
+            "use_desc": "Apartment",
+            "apn": "5154027008",
+        }
+    )
+
+    assert raw_record is not None
+    assert raw_record.canonical_address == "329 SOUTH BONNIE BRAE STREET LOS ANGELES CA 90057"
+    assert raw_record.identifiers == {
+        "permit_number": ["18010-10000-03620"],
+        "apn": ["5154027008"],
+    }
+    assert raw_record.mapped_fields["housing_use_desc"] == "Apartment"
+
+
+def test_ladbs_pi9x_permit_activity_adapter_maps_bldg_alter_repair_row() -> None:
+    adapter = make_ladbs_permit_activity_pi9x_tg5x_adapter(
+        market="los_angeles",
+        source_name="ladbs_permit_activity",
+    )
+
+    raw_record = adapter(
+        {
+            "permit_nbr": "23016 90000 16465",
+            "permit_type": "Bldg-Alter/Repair",
+            "permit_sub_type": "1 or 2 Family Dwelling",
+            "initiating_office": "INTERNET",
+            "issue_date": "2023-05-19T00:00:00.000",
+            "primary_address": "8317 DENISE LANE",
+            "zip_code": "91304",
+            "work_desc": "Replace 1 window(s). Same size, location, number, type.",
+            "valuation": "501",
+            "contractors_business_name": "HOME DEPOT THE",
+            "applicant_first_name": "CA",
+            "applicant_last_name": "PERMITS",
+            "zone": "RE11-1",
+            "council_district": "12",
+            "status_desc": "Issued",
+            "use_desc": "Dwelling - Single Family",
+            "apn": "2001001001",
+            "geolocation": {
+                "type": "Point",
+                "coordinates": [-118.64091, 34.22018],
+            },
+        }
+    )
+
+    assert raw_record is not None
+    assert raw_record.source_record_id == "23016-90000-16465"
+    assert raw_record.canonical_address == "8317 DENISE LANE LOS ANGELES CA 91304"
+    assert raw_record.identifiers == {
+        "permit_number": ["23016-90000-16465"],
+        "apn": ["2001001001"],
+    }
+    assert raw_record.lat == 34.22018
+    assert raw_record.lng == -118.64091
+    assert "status_evidence_type" not in raw_record.mapped_fields
+    assert "status_evidence_date" not in raw_record.mapped_fields
+    assert raw_record.mapped_fields["permit_type"] == "Bldg-Alter/Repair"
+    assert raw_record.mapped_fields["status_desc"] == "Issued"
+    assert raw_record.mapped_fields["use_desc"] == "Dwelling - Single Family"
+
+
+def test_ladbs_inspections_adapter_maps_recent_inspection_row() -> None:
+    adapter = make_ladbs_inspections_9w5z_rg2h_adapter(
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        as_of=date(2026, 4, 17),
+    )
+
+    raw_record = adapter(
+        {
+            ":id": "99112233",
+            "permit": "18010 10000 03620",
+            "inspection": "Frame Inspection",
+            "inspection_date": "2026-03-25T00:00:00.000",
+            "inspection_result": "Approved",
+            "permit_status": "Issued",
+            "address": "329 S BONNIE BRAE ST",
+            "lat_lon": {
+                "latitude": "34.0567",
+                "longitude": "-118.2712",
+            },
+        }
+    )
+
+    assert raw_record is not None
+    assert raw_record.source_record_id == "99112233"
+    assert raw_record.canonical_address == "329 SOUTH BONNIE BRAE STREET LOS ANGELES CA"
+    assert raw_record.identifiers == {"permit_number": ["18010-10000-03620"]}
+    assert raw_record.lat == 34.0567
+    assert raw_record.lng == -118.2712
+    assert raw_record.mapped_fields["status_evidence_type"] == "building_inspection_recorded"
+    assert raw_record.mapped_fields["status_evidence_date"] == "2026-03-25"
+    assert (
+        raw_record.mapped_fields["status_evidence_reason"]
+        == "Recent LADBS inspection with substantive result 'Approved' on active permit status "
+        "'Issued'."
+    )
+    assert raw_record.mapped_fields["inspection"] == "Frame Inspection"
+    assert raw_record.mapped_fields["inspection_result"] == "Approved"
+    assert raw_record.mapped_fields["permit_status"] == "Issued"
+
+
+def test_ladbs_inspections_adapter_drops_status_evidence_without_inspection_date() -> None:
+    adapter = make_ladbs_inspections_9w5z_rg2h_adapter(
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        as_of=date(2026, 4, 17),
+    )
+
+    raw_record = adapter(
+        {
+            ":id": "99112234",
+            "permit": "18010 10000 03620",
+            "inspection": "Frame Inspection",
+            "inspection_result": "Approved",
+            "permit_status": "Issued",
+            "address": "329 S BONNIE BRAE ST",
+        }
+    )
+
+    assert raw_record is not None
+    assert "status_evidence_type" not in raw_record.mapped_fields
+    assert "status_evidence_date" not in raw_record.mapped_fields
+    assert "status_evidence_reason" not in raw_record.mapped_fields
+
+
+def test_ladbs_inspections_adapter_drops_status_evidence_for_stale_inspection() -> None:
+    adapter = make_ladbs_inspections_9w5z_rg2h_adapter(
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        as_of=date(2026, 4, 17),
+    )
+
+    raw_record = adapter(
+        {
+            ":id": "99112235",
+            "permit": "18010 10000 03620",
+            "inspection": "Frame Inspection",
+            "inspection_date": "2024-03-01T00:00:00.000",
+            "inspection_result": "Approved",
+            "permit_status": "Issued",
+            "address": "329 S BONNIE BRAE ST",
+        }
+    )
+
+    assert raw_record is not None
+    assert "status_evidence_type" not in raw_record.mapped_fields
+    assert "status_evidence_date" not in raw_record.mapped_fields
+    assert "status_evidence_reason" not in raw_record.mapped_fields
+
+
+def test_ladbs_inspections_adapter_drops_status_evidence_for_non_substantive_result() -> None:
+    adapter = make_ladbs_inspections_9w5z_rg2h_adapter(
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        as_of=date(2026, 4, 17),
+    )
+
+    raw_record = adapter(
+        {
+            ":id": "99112236",
+            "permit": "18010 10000 03620",
+            "inspection": "Frame Inspection",
+            "inspection_date": "2026-03-25T00:00:00.000",
+            "inspection_result": "Corrections Issued",
+            "permit_status": "Issued",
+            "address": "329 S BONNIE BRAE ST",
+        }
+    )
+
+    assert raw_record is not None
+    assert "status_evidence_type" not in raw_record.mapped_fields
+    assert "status_evidence_date" not in raw_record.mapped_fields
+    assert "status_evidence_reason" not in raw_record.mapped_fields
+
+
+def test_ladbs_inspections_adapter_drops_status_evidence_for_terminal_permit_status() -> None:
+    adapter = make_ladbs_inspections_9w5z_rg2h_adapter(
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        as_of=date(2026, 4, 17),
+    )
+
+    raw_record = adapter(
+        {
+            ":id": "99112237",
+            "permit": "18010 10000 03620",
+            "inspection": "Final",
+            "inspection_date": "2026-03-25T00:00:00.000",
+            "inspection_result": "Approved",
+            "permit_status": "Permit Finaled",
+            "address": "329 S BONNIE BRAE ST",
+        }
+    )
+
+    assert raw_record is not None
+    assert "status_evidence_type" not in raw_record.mapped_fields
+    assert "status_evidence_date" not in raw_record.mapped_fields
+    assert "status_evidence_reason" not in raw_record.mapped_fields
 
 
 def test_ladbs_cofo_adapter_maps_completion_evidence() -> None:

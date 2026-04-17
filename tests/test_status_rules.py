@@ -74,3 +74,27 @@ def test_build_status_suggestion_advances_project_to_complete_from_cofo() -> Non
     assert suggestion.suggested_status == PipelineStatus.COMPLETE
     assert suggestion.rule_code == "certificate_of_occupancy_issued"
     assert suggestion.proof_level == "direct"
+
+
+def test_get_status_evidence_rule_returns_inspection_rule() -> None:
+    rule = get_status_evidence_rule("building_inspection_recorded")
+
+    assert rule is not None
+    assert rule.suggested_status == PipelineStatus.UNDER_CONSTRUCTION
+    assert rule.priority == Priority.HIGH
+    assert rule.proof_level == "direct"
+    assert "Recent, substantive LADBS inspection" in rule.reason
+
+
+def test_build_status_suggestion_advances_project_to_under_construction_from_inspection() -> None:
+    suggestion = build_status_suggestion(
+        current_status=PipelineStatus.APPROVED,
+        evidence_type="building_inspection_recorded",
+        evidence_date=date(2026, 4, 13),
+    )
+
+    assert suggestion is not None
+    assert suggestion.current_status == PipelineStatus.APPROVED
+    assert suggestion.suggested_status == PipelineStatus.UNDER_CONSTRUCTION
+    assert suggestion.rule_code == "building_inspection_recorded"
+    assert suggestion.proof_level == "direct"
