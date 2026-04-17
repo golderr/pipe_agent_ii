@@ -48,6 +48,16 @@ STATUS_EVIDENCE_RULES: dict[str, StatusEvidenceRule] = {
             "Approved but does not prove Under Construction."
         ),
     ),
+    "building_inspection_recorded": StatusEvidenceRule(
+        evidence_type="building_inspection_recorded",
+        suggested_status=PipelineStatus.UNDER_CONSTRUCTION,
+        priority=Priority.HIGH,
+        proof_level="direct",
+        reason=(
+            "Recent, substantive LADBS inspection recorded on an active permit. Per TCG status "
+            "definitions, this is direct evidence that a project is Under Construction."
+        ),
+    ),
     "certificate_of_occupancy_issued": StatusEvidenceRule(
         evidence_type="certificate_of_occupancy_issued",
         suggested_status=PipelineStatus.COMPLETE,

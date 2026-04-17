@@ -7,37 +7,8 @@ bounds:
 sources:
   - name: ladbs_permits
     collector: socrata
-    adapter: ladbs_permits
-    endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
-    jurisdiction: city_of_los_angeles
-    coverage_scope: city
-    matching_keys:
-      - permit_number
-      - canonical_address
-    schedule: weekly
-    incremental_overlap_hours: 24
-    soql_filter: "permit_type='Bldg-New'"
-    role: "update+discovery"
-
-  - name: ladbs_permit_activity
-    collector: socrata
-    adapter: ladbs_permit_activity
-    endpoint: "https://data.lacity.org/resource/hbkd-qubn.json"
-    jurisdiction: city_of_los_angeles
-    coverage_scope: city
-    matching_keys:
-      - permit_number
-      - canonical_address
-    schedule: weekly
-    incremental_overlap_hours: 24
-    soql_filter: "permit_type != 'Bldg-New'"
-    create_new_candidates: false
-    role: "update"
-
-  - name: ladbs_new_housing
-    collector: socrata
-    adapter: ladbs_new_housing
-    endpoint: "https://data.lacity.org/resource/cpkv-aajs.json"
+    adapter: ladbs_permits_pi9x_tg5x
+    endpoint: "https://data.lacity.org/resource/pi9x-tg5x.json"
     jurisdiction: city_of_los_angeles
     coverage_scope: city
     matching_keys:
@@ -45,7 +16,42 @@ sources:
       - apn
       - canonical_address
     schedule: weekly
-    role: "discovery"
+    incremental_overlap_hours: 24
+    soql_filter: "permit_type = 'Bldg-New'"
+    role: "update+discovery"
+
+  - name: ladbs_permit_activity
+    collector: socrata
+    adapter: ladbs_permit_activity_pi9x_tg5x
+    endpoint: "https://data.lacity.org/resource/pi9x-tg5x.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
+    matching_keys:
+      - permit_number
+      - apn
+      - canonical_address
+    schedule: weekly
+    incremental_overlap_hours: 24
+    soql_filter: "permit_type != 'Bldg-New'"
+    create_new_candidates: false
+    role: "update"
+
+  # `ladbs_new_housing` on `cpkv-aajs` was retired after the publisher freeze on 2023-05-22.
+  # Housing enrichment now comes from `pi9x-tg5x` via `use_desc`, APN, and unit fields.
+  - name: ladbs_inspections
+    collector: socrata
+    adapter: ladbs_inspections_9w5z_rg2h
+    endpoint: "https://data.lacity.org/resource/9w5z-rg2h.json"
+    jurisdiction: city_of_los_angeles
+    coverage_scope: city
+    matching_keys:
+      - permit_number
+      - canonical_address
+    schedule: weekly
+    incremental_overlap_hours: 24
+    timeout_seconds: 90
+    create_new_candidates: false
+    role: "update"
 
   - name: ladbs_cofo
     collector: socrata

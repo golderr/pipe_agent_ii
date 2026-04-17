@@ -6,9 +6,12 @@ from tcg_pipeline.market_config import SourceConfig
 from tcg_pipeline.source_adapters.ladbs import (
     RawRecordAdapter,
     make_ladbs_cofo_adapter,
+    make_ladbs_inspections_9w5z_rg2h_adapter,
     make_ladbs_new_housing_adapter,
     make_ladbs_permit_activity_adapter,
+    make_ladbs_permit_activity_pi9x_tg5x_adapter,
     make_ladbs_permits_adapter,
+    make_ladbs_permits_pi9x_tg5x_adapter,
 )
 
 AdapterBuilder = Callable[..., RawRecordAdapter]
@@ -18,6 +21,9 @@ ADAPTER_BUILDERS: dict[str, AdapterBuilder] = {
     "ladbs_permit_activity": make_ladbs_permit_activity_adapter,
     "ladbs_new_housing": make_ladbs_new_housing_adapter,
     "ladbs_cofo": make_ladbs_cofo_adapter,
+    "ladbs_permits_pi9x_tg5x": make_ladbs_permits_pi9x_tg5x_adapter,
+    "ladbs_permit_activity_pi9x_tg5x": make_ladbs_permit_activity_pi9x_tg5x_adapter,
+    "ladbs_inspections_9w5z_rg2h": make_ladbs_inspections_9w5z_rg2h_adapter,
 }
 
 

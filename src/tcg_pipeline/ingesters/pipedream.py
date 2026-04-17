@@ -62,6 +62,7 @@ from tcg_pipeline.matching.normalizer import (
     normalize_city,
     normalize_postal_code,
 )
+from tcg_pipeline.permit_numbers import extract_ladbs_pcis_permit_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -614,9 +615,7 @@ def _build_project_record(
         last_seen_at=imported_at,
         last_pulled_at=imported_at,
         raw_payload={
-            key: _serialize_json_value(payload.get(key))
-            for key in HEADER_COLUMNS
-            if key in payload
+            key: _serialize_json_value(payload.get(key)) for key in HEADER_COLUMNS if key in payload
         },
         mapped_fields=mapped_fields,
         field_provenance={
@@ -679,6 +678,20 @@ def _build_identifiers(
                 last_seen_at=imported_at,
             )
         )
+
+    # Keep URL harvesting market-scoped until the seed ingester has a per-market extractor registry.
+    if project.market == "los_angeles":
+        for permit_number in extract_ladbs_pcis_permit_numbers(project.source_urls):
+            identifiers.append(
+                ProjectIdentifier(
+                    project=project,
+                    identifier_type=IdentifierType.PERMIT_NUMBER,
+                    value=permit_number,
+                    source=source_name,
+                    first_seen_at=imported_at,
+                    last_seen_at=imported_at,
+                )
+            )
 
     return identifiers
 
@@ -952,8 +965,7 @@ def _clean_project_identifier(
             field_name=field_name,
             raw_value=value,
             message=(
-                f"Project identifier normalized to {normalized!r}; "
-                "verify abbreviated ID format"
+                f"Project identifier normalized to {normalized!r}; verify abbreviated ID format"
             ),
         )
 

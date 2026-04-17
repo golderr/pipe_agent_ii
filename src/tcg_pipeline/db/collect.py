@@ -49,6 +49,7 @@ class CollectPersistResult:
     unchanged_source_records: int = 0
     inserted_identifiers: int = 0
     new_candidate_review_items: int = 0
+    suppressed_new_candidate_records: int = 0
     status_change_review_items: int = 0
     possible_match_review_items: int = 0
 
@@ -276,6 +277,7 @@ def _create_unmatched_review_item(
         result.possible_match_review_items += 1
     else:
         if not create_new_candidates:
+            result.suppressed_new_candidate_records += 1
             return
         item_type = ReviewItemType.NEW_CANDIDATE
         priority = _priority_for_candidate(raw_record)

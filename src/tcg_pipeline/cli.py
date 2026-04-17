@@ -341,6 +341,10 @@ def collect_source(
     typer.echo(f"Unchanged source records: {persist_result.unchanged_source_records}")
     typer.echo(f"Inserted identifiers: {persist_result.inserted_identifiers}")
     typer.echo(f"New candidate review items: {persist_result.new_candidate_review_items}")
+    typer.echo(
+        "Suppressed new candidate records: "
+        f"{persist_result.suppressed_new_candidate_records}"
+    )
     typer.echo(f"Status change review items: {persist_result.status_change_review_items}")
     typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
 
