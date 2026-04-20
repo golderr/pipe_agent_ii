@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.collectors.base import RawRecord
+from tcg_pipeline.db.evidence import write_raw_record_evidence
 from tcg_pipeline.db.models import (
     IdentifierType,
     Priority,
@@ -26,9 +27,11 @@ from tcg_pipeline.matching.differ import (
     DetectedChange,
     DiffResult,
     StatusSuggestion,
-    diff_project_against_record,
+    diff_project_snapshots,
+    snapshot_project_for_diff,
 )
 from tcg_pipeline.matching.matcher import MatchResult, match_raw_record
+from tcg_pipeline.resolution import resolve_project
 from tcg_pipeline.status_rules import build_status_suggestion
 
 
@@ -71,6 +74,7 @@ def persist_collected_records(
     create_new_candidates: bool = True,
 ) -> CollectPersistResult:
     run_started_at = datetime.now(UTC)
+    identifier_owner_cache: dict[tuple[IdentifierType, str], uuid.UUID] = {}
     source_min_updated_at, source_max_updated_at = _source_updated_at_bounds(raw_records)
     source_run = SourceRun(
         market=market,
@@ -96,6 +100,13 @@ def persist_collected_records(
     for raw_record in raw_records:
         match_result = match_raw_record(session, market=market, raw_record=raw_record)
         if match_result.project_id is None:
+            write_raw_record_evidence(
+                session,
+                raw_record=raw_record,
+                project_id=None,
+                collected_at=run_started_at,
+                ingest_method="scheduled_collector",
+            )
             _create_unmatched_review_item(
                 session,
                 source_run=source_run,
@@ -108,10 +119,26 @@ def persist_collected_records(
 
         project = session.get(Project, match_result.project_id)
         if project is None:
+            write_raw_record_evidence(
+                session,
+                raw_record=raw_record,
+                project_id=None,
+                collected_at=run_started_at,
+                ingest_method="scheduled_collector",
+                notes="Matched project id was missing at persistence time.",
+            )
             continue
 
         result.matched_existing_projects += 1
         _increment_match_counter(result, match_result)
+        previous_snapshot = snapshot_project_for_diff(project)
+        evidence_result = write_raw_record_evidence(
+            session,
+            raw_record=raw_record,
+            project_id=project.id,
+            collected_at=run_started_at,
+            ingest_method="scheduled_collector",
+        )
         upsert_outcome = _upsert_source_record(
             session,
             project=project,
@@ -125,15 +152,32 @@ def persist_collected_records(
             result.updated_source_records += 1
         else:
             result.unchanged_source_records += 1
-            continue
+            if not evidence_result.changed:
+                continue
 
         result.inserted_identifiers += _persist_identifiers(
             session,
             project=project,
             raw_record=raw_record,
+            identifier_owner_cache=identifier_owner_cache,
         )
 
-        diff_result = diff_project_against_record(project, raw_record)
+        resolution_result = None
+        if evidence_result.changed:
+            session.flush()
+            resolution_result = resolve_project(
+                project.id,
+                session,
+                apply=True,
+                write_resolution_log=True,
+            )
+
+        diff_result = diff_project_snapshots(
+            previous_snapshot,
+            snapshot_project_for_diff(project),
+            status_evidence_type=_status_evidence_type_from_resolution(resolution_result),
+            status_evidence_date=_status_evidence_date_from_resolution(resolution_result),
+        )
         if diff_result.has_reviewable_changes:
             source_run.updates_found += 1
             result.status_change_review_items += 1
@@ -234,21 +278,32 @@ def _upsert_source_record(
     return SourceRecordUpsertOutcome.UPDATED
 
 
-def _persist_identifiers(session: Session, *, project: Project, raw_record: RawRecord) -> int:
+def _persist_identifiers(
+    session: Session,
+    *,
+    project: Project,
+    raw_record: RawRecord,
+    identifier_owner_cache: dict[tuple[IdentifierType, str], uuid.UUID],
+) -> int:
     inserted_count = 0
     for identifier_type_name, values in raw_record.identifiers.items():
         identifier_type = _coerce_identifier_type(identifier_type_name)
         if identifier_type is None:
             continue
         for value in sorted({value for value in values if value}):
-            existing = session.execute(
-                select(ProjectIdentifier.id).where(
-                    ProjectIdentifier.project_id == project.id,
-                    ProjectIdentifier.identifier_type == identifier_type,
-                    ProjectIdentifier.value == value,
-                )
-            ).scalar_one_or_none()
-            if existing is not None:
+            cache_key = (identifier_type, value)
+            owner_project_id = identifier_owner_cache.get(cache_key)
+            if owner_project_id is None:
+                owner_project_id = session.execute(
+                    select(ProjectIdentifier.project_id).where(
+                        ProjectIdentifier.identifier_type == identifier_type,
+                        ProjectIdentifier.value == value,
+                    )
+                ).scalar_one_or_none()
+                if owner_project_id is not None:
+                    identifier_owner_cache[cache_key] = owner_project_id
+
+            if owner_project_id is not None:
                 continue
             session.add(
                 ProjectIdentifier(
@@ -257,6 +312,7 @@ def _persist_identifiers(session: Session, *, project: Project, raw_record: RawR
                     value=value,
                 )
             )
+            identifier_owner_cache[cache_key] = project.id
             inserted_count += 1
     return inserted_count
 
@@ -387,6 +443,29 @@ def _build_status_suggestion_for_unmatched_record(
         evidence_date=evidence_date,
         reason_override=reason,
     )
+
+
+def _status_evidence_type_from_resolution(resolution_result) -> str | None:
+    if resolution_result is None:
+        return None
+    status_resolution = resolution_result.field_resolutions.get("pipeline_status")
+    if status_resolution is None:
+        return None
+    metadata = status_resolution.metadata or {}
+    evidence_type = metadata.get("evidence_type")
+    if evidence_type is None:
+        return None
+    text = str(evidence_type).strip()
+    return text or None
+
+
+def _status_evidence_date_from_resolution(resolution_result) -> date | None:
+    if resolution_result is None:
+        return None
+    status_resolution = resolution_result.field_resolutions.get("pipeline_status")
+    if status_resolution is None:
+        return None
+    return status_resolution.evidence_date
 
 
 def _serialize_payload(payload: dict[str, Any]) -> dict[str, Any]:

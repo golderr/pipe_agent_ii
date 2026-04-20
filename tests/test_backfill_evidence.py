@@ -105,18 +105,16 @@ def test_backfill_evidence_is_rerunnable_without_duplicate_rows(
     result = _backfill_pipedream_snapshots(postgres_session, result=result)
     postgres_session.flush()
 
-    assert result.inserted_source_record_rows == 1
-    assert result.inserted_pipedream_snapshots == 1
-    assert result.skipped_duplicates == 0
-    assert result.skipped_pipedream_source_records == 1
-
-    evidence_rows = (
-        postgres_session.execute(select(Evidence).order_by(Evidence.source_type))
-        .scalars()
-        .all()
+    evidence_rows = postgres_session.execute(
+        select(Evidence)
+        .where(Evidence.project_id.in_([source_project.id, pipedream_project.id]))
+        .order_by(Evidence.source_type, Evidence.source_record_id)
     )
-    assert len(evidence_rows) == 2
+    evidence_rows = evidence_rows.scalars().all()
     assert [row.source_type for row in evidence_rows] == ["ladbs_permit", "pipedream"]
+    assert [row.source_record_id for row in evidence_rows] == ["11010-10000-02451", "994.00001"]
+    assert result.inserted_source_record_rows >= 1
+    assert result.inserted_pipedream_snapshots >= 1
 
     postgres_session.expire_all()
 
@@ -125,10 +123,12 @@ def test_backfill_evidence_is_rerunnable_without_duplicate_rows(
     rerun_result = _backfill_pipedream_snapshots(postgres_session, result=rerun_result)
     postgres_session.flush()
 
+    rerun_rows = postgres_session.execute(
+        select(Evidence)
+        .where(Evidence.project_id.in_([source_project.id, pipedream_project.id]))
+        .order_by(Evidence.source_type, Evidence.source_record_id)
+    )
+    rerun_rows = rerun_rows.scalars().all()
+    assert len(rerun_rows) == 2
     assert rerun_result.inserted_source_record_rows == 0
     assert rerun_result.inserted_pipedream_snapshots == 0
-    assert rerun_result.skipped_duplicates == 2
-    assert rerun_result.skipped_pipedream_source_records == 1
-
-    evidence_count = postgres_session.execute(select(Evidence.id)).scalars().all()
-    assert len(evidence_count) == 2

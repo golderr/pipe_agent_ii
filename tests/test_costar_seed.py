@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from tcg_pipeline.cli import app
 from tcg_pipeline.db.models import (
+    Evidence,
     IdentifierType,
     Project,
     ProjectIdentifier,
@@ -354,6 +355,68 @@ def test_seed_costar_command_reports_merge_counts(
     assert "Matched existing projects: 1" in result.stdout
     assert "Matched by address: 1" in result.stdout
     assert "Inserted source records: 1" in result.stdout
+
+
+def test_persist_costar_import_result_writes_costar_evidence(
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    costar_path = _build_costar_workbook(
+        tmp_path / "costar_evidence.xlsx",
+        headers=[
+            "PropertyID",
+            "Property Address",
+            "Property Name",
+            "City",
+            "State",
+            "Zip",
+            "County Name",
+            "Constr Status",
+            "Developer Name",
+            "Number Of Units",
+        ],
+        rows=[
+            {
+                "PropertyID": "CST-9901",
+                "Property Address": "8707 W Example Terrace",
+                "Property Name": "Evidence Plaza",
+                "City": "Los Angeles",
+                "State": "CA",
+                "Zip": "90018",
+                "County Name": "Los Angeles",
+                "Constr Status": "Proposed",
+                "Developer Name": "Costar Dev",
+                "Number Of Units": 42,
+            }
+        ],
+    )
+
+    import_result = ingest_costar_workbooks([costar_path], market="los_angeles")
+    persist_costar_import_result(postgres_session, import_result)
+
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.COSTAR_PROPERTY_ID,
+            ProjectIdentifier.value == "CST-9901",
+        )
+    ).scalar_one()
+    evidence_row = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.project_id == project_id,
+            Evidence.source_type == "costar",
+            Evidence.source_record_id == "CST-9901",
+        )
+    ).scalar_one()
+
+    assert evidence_row.ingest_method == "seed_import"
+    assert evidence_row.extracted_fields["pipeline_status"] == {
+        "value": "Proposed",
+        "confidence": None,
+    }
+    assert evidence_row.extracted_fields["developer"] == {
+        "value": "Costar Dev",
+        "confidence": None,
+    }
 
 
 def _build_pipedream_workbook(path: Path, rows: list[dict[str, object]]) -> Path:

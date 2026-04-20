@@ -47,6 +47,7 @@ class ProjectResolutionResult:
     applied: bool
     changed_fields: list[str] = dataclass_field(default_factory=list)
     log_entries_created: int = 0
+    field_resolutions: dict[str, FieldResolution] = dataclass_field(default_factory=dict)
     resolved_values: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
@@ -220,6 +221,7 @@ def resolve_project(
         applied=apply,
         changed_fields=changed_fields,
         log_entries_created=log_entries_created,
+        field_resolutions=field_resolutions,
         resolved_values={
             field_name: resolution.value
             for field_name, resolution in field_resolutions.items()

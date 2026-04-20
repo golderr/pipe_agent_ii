@@ -9,6 +9,9 @@ from tcg_pipeline.cli import _resolve_incremental_cursor
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.models import (
+    Evidence,
+    IdentifierType,
+    PipelineStatus,
     Project,
     ProjectIdentifier,
     ProjectSourceRecord,
@@ -101,6 +104,10 @@ def test_persist_collected_records_creates_status_change_review_item(
         }
     ]
 
+    postgres_session.refresh(project)
+    assert project.pipeline_status == PipelineStatus.APPROVED
+    assert project.total_units == 260
+
     identifier_rows = postgres_session.execute(
         select(ProjectIdentifier.value).where(ProjectIdentifier.project_id == project.id)
     ).scalars()
@@ -119,6 +126,16 @@ def test_persist_collected_records_creates_status_change_review_item(
     assert source_record.source_created_at == datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC)
     assert source_record.source_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
     assert source_record.source_row_hash == "abc123"
+
+    evidence_row = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.project_id == project.id,
+            Evidence.source_type == "ladbs_permit",
+            Evidence.source_record_id == "11010-10000-02451",
+        )
+    ).scalar_one()
+    assert evidence_row.evidence_date == date(2013, 1, 2)
+    assert evidence_row.extracted_fields["total_units"] == {"value": 260, "confidence": None}
 
 
 def test_persist_collected_records_skips_unchanged_overlap_rows(
@@ -248,6 +265,15 @@ def test_persist_collected_records_skips_unchanged_overlap_rows(
     assert source_record.last_seen_at is not None
     assert source_record.last_seen_at > original_seen_at
 
+    evidence_rows = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.project_id == project.id,
+            Evidence.source_type == "ladbs_permit",
+            Evidence.source_record_id == "11010-10000-02451",
+        )
+    ).scalars()
+    assert len(list(evidence_rows)) == 1
+
 
 def test_persist_collected_records_creates_new_candidate_review_item(
     postgres_session: Session,
@@ -342,6 +368,15 @@ def test_persist_collected_records_can_suppress_new_candidate_review_items(
         select(ReviewItem).where(ReviewItem.source_run_id == result.source_run_id)
     ).scalar_one_or_none()
     assert review_item is None
+
+    evidence_row = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.project_id.is_(None),
+            Evidence.source_type == "ladbs_permit",
+            Evidence.source_record_id == "23016-90000-16465",
+        )
+    ).scalar_one()
+    assert evidence_row.project_id is None
 
 
 def test_persist_collected_records_keeps_possible_match_review_items_when_new_candidates_suppressed(
@@ -478,6 +513,250 @@ def test_persist_collected_records_matches_existing_project_when_new_candidates_
             "priority": "medium",
         }
     ]
+
+
+def test_persist_collected_records_matches_existing_project_when_raw_address_omits_zip(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9301 NORTH TAMPA AVENUE LOS ANGELES CA 91324",
+        raw_addresses=["9301 N Tampa Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        zip="91324",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_inspections",
+        source_record_id="row-jgem~t949~4xfc",
+        raw_payload={"address": "9301 N TAMPA AVE"},
+        canonical_address="9301 NORTH TAMPA AVENUE LOS ANGELES CA",
+        mapped_fields={
+            "inspection": "Frame Inspection",
+            "inspection_date": "2026-04-11",
+            "inspection_result": "Approved",
+        },
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.records_pulled == 1
+    assert result.matched_existing_projects == 1
+    assert result.matched_by_address == 1
+    assert result.inserted_source_records == 1
+    assert result.possible_match_review_items == 0
+
+    source_record = postgres_session.execute(
+        select(ProjectSourceRecord).where(
+            ProjectSourceRecord.project_id == project.id,
+            ProjectSourceRecord.source_name == "ladbs_inspections",
+            ProjectSourceRecord.source_record_id == "row-jgem~t949~4xfc",
+        )
+    ).scalar_one()
+    assert source_record.project_id == project.id
+
+
+def test_persist_collected_records_keeps_zipless_address_matches_ambiguous(
+    postgres_session: Session,
+) -> None:
+    postgres_session.add_all(
+        [
+            Project(
+                canonical_address="100 SOUTH MAIN STREET LOS ANGELES CA 90012",
+                raw_addresses=["100 S Main St"],
+                market="los_angeles",
+                city="Los Angeles",
+                state="CA",
+                county="Los Angeles",
+                zip="90012",
+            ),
+            Project(
+                canonical_address="100 SOUTH MAIN STREET LOS ANGELES CA 90013",
+                raw_addresses=["100 S Main St"],
+                market="los_angeles",
+                city="Los Angeles",
+                state="CA",
+                county="Los Angeles",
+                zip="90013",
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_inspections",
+        source_record_id="row-ambiguous",
+        raw_payload={"address": "100 S MAIN ST"},
+        canonical_address="100 SOUTH MAIN STREET LOS ANGELES CA",
+        mapped_fields={
+            "inspection": "Final",
+            "inspection_date": "2026-04-11",
+            "inspection_result": "Approved",
+        },
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.records_pulled == 1
+    assert result.matched_existing_projects == 0
+    assert result.possible_match_review_items == 1
+    assert result.suppressed_new_candidate_records == 0
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(ReviewItem.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert review_item.item_type == ReviewItemType.POSSIBLE_MATCH
+    assert len(review_item.payload["match"]["candidate_project_ids"]) == 2
+
+
+def test_persist_collected_records_skips_identifier_insert_when_value_belongs_to_other_project(
+    postgres_session: Session,
+) -> None:
+    permit_number = "TEST-23043-10000-03939"
+    existing_identifier_project = Project(
+        canonical_address="111 WEST 1ST STREET LOS ANGELES CA 90012",
+        raw_addresses=["111 W 1st St"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+    )
+    matched_project = Project(
+        canonical_address="9301 NORTH TAMPA AVENUE LOS ANGELES CA 91324",
+        raw_addresses=["9301 N Tampa Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        zip="91324",
+    )
+    postgres_session.add_all([existing_identifier_project, matched_project])
+    postgres_session.flush()
+    postgres_session.add(
+        ProjectIdentifier(
+            project_id=existing_identifier_project.id,
+            identifier_type=IdentifierType.PERMIT_NUMBER,
+            value=permit_number,
+        )
+    )
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_inspections",
+        source_record_id="row-conflict",
+        raw_payload={"address": "9301 N TAMPA AVE"},
+        canonical_address="9301 NORTH TAMPA AVENUE LOS ANGELES CA",
+        identifiers={"permit_number": [permit_number]},
+        mapped_fields={
+            "inspection": "Frame Inspection",
+            "inspection_date": "2026-04-11",
+            "inspection_result": "Approved",
+        },
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.matched_existing_projects == 1
+    assert result.inserted_source_records == 1
+    assert result.inserted_identifiers == 0
+
+    identifier_rows = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.PERMIT_NUMBER,
+            ProjectIdentifier.value == permit_number,
+        )
+    ).scalars()
+    assert list(identifier_rows) == [existing_identifier_project.id]
+
+
+def test_persist_collected_records_inserts_permit_identifier_once_across_multiple_rows_in_same_run(
+    postgres_session: Session,
+) -> None:
+    permit_number = "TEST-23043-10000-03939"
+    project = Project(
+        canonical_address="9301 NORTH TAMPA AVENUE LOS ANGELES CA 91324",
+        raw_addresses=["9301 N Tampa Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        zip="91324",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_records = [
+        RawRecord(
+            source_name="ladbs_inspections",
+            source_record_id="row-1",
+            raw_payload={"address": "9301 N TAMPA AVE"},
+            canonical_address="9301 NORTH TAMPA AVENUE LOS ANGELES CA",
+            identifiers={"permit_number": [permit_number]},
+            mapped_fields={
+                "inspection": "Frame Inspection",
+                "inspection_date": "2026-04-11",
+                "inspection_result": "Approved",
+            },
+        ),
+        RawRecord(
+            source_name="ladbs_inspections",
+            source_record_id="row-2",
+            raw_payload={"address": "9301 N TAMPA AVE"},
+            canonical_address="9301 NORTH TAMPA AVENUE LOS ANGELES CA",
+            identifiers={"permit_number": [permit_number]},
+            mapped_fields={
+                "inspection": "Final",
+                "inspection_date": "2026-04-12",
+                "inspection_result": "Approved",
+            },
+        ),
+    ]
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        raw_records=raw_records,
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.matched_existing_projects == 2
+    assert result.inserted_source_records == 2
+    assert result.inserted_identifiers == 1
+
+    identifier_rows = postgres_session.execute(
+        select(ProjectIdentifier.value).where(
+            ProjectIdentifier.project_id == project.id,
+            ProjectIdentifier.identifier_type == IdentifierType.PERMIT_NUMBER,
+        )
+    ).scalars()
+    assert list(identifier_rows) == [permit_number]
 
 
 def test_resolve_incremental_cursor_uses_max_source_updated_at(

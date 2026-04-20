@@ -27,6 +27,14 @@ class DiffResult:
         return bool(self.field_changes or self.status_suggestion is not None)
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectDiffSnapshot:
+    pipeline_status: PipelineStatus
+    status_date: date | None
+    date_construction_start: date | None
+    total_units: int | None
+
+
 def diff_project_against_record(project: Project, raw_record: RawRecord) -> DiffResult:
     diff_result = DiffResult()
     mapped_fields = raw_record.mapped_fields
@@ -78,6 +86,79 @@ def diff_project_against_record(project: Project, raw_record: RawRecord) -> Diff
                 field="total_units",
                 old_value=project.total_units,
                 new_value=new_total_units,
+                priority=Priority.MEDIUM,
+            )
+        )
+
+    return diff_result
+
+
+def snapshot_project_for_diff(project: Project) -> ProjectDiffSnapshot:
+    return ProjectDiffSnapshot(
+        pipeline_status=project.pipeline_status,
+        status_date=project.status_date,
+        date_construction_start=project.date_construction_start,
+        total_units=project.total_units,
+    )
+
+
+def diff_project_snapshots(
+    previous: ProjectDiffSnapshot,
+    current: ProjectDiffSnapshot,
+    *,
+    status_evidence_type: str | None = None,
+    status_evidence_date: date | None = None,
+    status_reason: str | None = None,
+) -> DiffResult:
+    diff_result = DiffResult()
+    status_suggestion = build_status_suggestion(
+        current_status=previous.pipeline_status,
+        evidence_type=status_evidence_type,
+        evidence_date=status_evidence_date,
+        reason_override=status_reason,
+    )
+    if status_suggestion is not None:
+        diff_result.status_suggestion = status_suggestion
+
+    if previous.pipeline_status != current.pipeline_status and status_suggestion is None:
+        diff_result.field_changes.append(
+            DetectedChange(
+                field="pipeline_status",
+                old_value=previous.pipeline_status.value,
+                new_value=current.pipeline_status.value,
+                priority=_priority_for_status_change(current.pipeline_status),
+            )
+        )
+
+    if current.status_date is not None and current.status_date != previous.status_date:
+        diff_result.field_changes.append(
+            DetectedChange(
+                field="status_date",
+                old_value=previous.status_date,
+                new_value=current.status_date,
+                priority=Priority.MEDIUM,
+            )
+        )
+
+    if (
+        current.date_construction_start is not None
+        and current.date_construction_start != previous.date_construction_start
+    ):
+        diff_result.field_changes.append(
+            DetectedChange(
+                field="date_construction_start",
+                old_value=previous.date_construction_start,
+                new_value=current.date_construction_start,
+                priority=Priority.HIGH,
+            )
+        )
+
+    if current.total_units is not None and current.total_units != previous.total_units:
+        diff_result.field_changes.append(
+            DetectedChange(
+                field="total_units",
+                old_value=previous.total_units,
+                new_value=current.total_units,
                 priority=Priority.MEDIUM,
             )
         )

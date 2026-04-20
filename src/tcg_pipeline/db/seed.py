@@ -11,6 +11,10 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from tcg_pipeline.db.evidence import (
+    write_pipedream_snapshot_evidence,
+    write_source_record_evidence,
+)
 from tcg_pipeline.db.models import (
     AgeRestriction,
     DismissedRecord,
@@ -38,6 +42,7 @@ from tcg_pipeline.ingesters.pipedream import (
     PipedreamProjectRecord,
     StagedProjectRelationship,
 )
+from tcg_pipeline.resolution import resolve_project
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +207,22 @@ def persist_pipedream_import_results(
 
     persist_result.inserted_projects = len(projects_to_insert)
     persist_result.inserted_dismissed_records = len(dismissed_to_insert)
+    for project_record in projects_to_insert:
+        evidence_result = write_pipedream_snapshot_evidence(
+            session,
+            project=project_record.project,
+            source_record=project_record.source_record,
+            ingest_method="seed_import",
+            notes="Captured from pipedream seed import.",
+        )
+        if evidence_result.changed:
+            session.flush()
+            resolve_project(
+                project_record.project.id,
+                session,
+                apply=True,
+                write_resolution_log=True,
+            )
     _persist_staged_relationships(session, staged_relationships, persist_result)
     return persist_result
 
@@ -287,34 +308,51 @@ def persist_costar_import_results(
                 identifier_cache=identifier_cache,
                 status_history_cache=status_history_cache,
             )
-            continue
-
-        existing_project = _load_costar_project(
-            session,
-            project_id=matched_project_id,
-            project_cache=project_cache,
-        )
-        if existing_project is None:
-            logger.warning(
-                "Matched CoStar property %s to missing project id %s; skipping",
-                project_record.property_id,
-                matched_project_id,
+            target_project_id = project_record.project.id
+        else:
+            existing_project = _load_costar_project(
+                session,
+                project_id=matched_project_id,
+                project_cache=project_cache,
             )
-            continue
+            if existing_project is None:
+                logger.warning(
+                    "Matched CoStar property %s to missing project id %s; skipping",
+                    project_record.property_id,
+                    matched_project_id,
+                )
+                continue
 
-        _increment_costar_match_counter(persist_result, match_type)
-        _merge_costar_project(
+            _increment_costar_match_counter(persist_result, match_type)
+            _merge_costar_project(
+                session,
+                existing_project=existing_project,
+                project_record=project_record,
+                persist_result=persist_result,
+                source_record_map=source_record_map,
+                identifier_cache=identifier_cache,
+                status_history_cache=status_history_cache,
+                costar_property_map=costar_property_map,
+                apn_map=apn_map,
+                address_map=address_map,
+            )
+            target_project_id = existing_project.id
+
+        evidence_result = write_source_record_evidence(
             session,
-            existing_project=existing_project,
-            project_record=project_record,
-            persist_result=persist_result,
-            source_record_map=source_record_map,
-            identifier_cache=identifier_cache,
-            status_history_cache=status_history_cache,
-            costar_property_map=costar_property_map,
-            apn_map=apn_map,
-            address_map=address_map,
+            project_id=target_project_id,
+            source_record=project_record.source_record,
+            ingest_method="seed_import",
+            notes="Captured from costar seed import.",
         )
+        if evidence_result.changed:
+            session.flush()
+            resolve_project(
+                target_project_id,
+                session,
+                apply=True,
+                write_resolution_log=True,
+            )
 
     session.flush()
     return persist_result
@@ -785,7 +823,10 @@ def _merge_identifiers(
             owner_project_id = costar_property_map.get(identifier.value)
             if owner_project_id is not None and owner_project_id != project_id:
                 logger.warning(
-                    "Skipping conflicting CoStar property id %s for property %s: already attached to %s, not %s",
+                    (
+                        "Skipping conflicting CoStar property id %s for property %s: "
+                        "already attached to %s, not %s"
+                    ),
                     identifier.value,
                     property_id,
                     owner_project_id,
@@ -802,7 +843,10 @@ def _merge_identifiers(
             }
             if conflicting_owner_ids:
                 logger.warning(
-                    "Skipping conflicting APN %s for CoStar property %s: already attached to %s, not %s",
+                    (
+                        "Skipping conflicting APN %s for CoStar property %s: "
+                        "already attached to %s, not %s"
+                    ),
                     identifier.value,
                     property_id,
                     sorted(conflicting_owner_ids),

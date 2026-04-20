@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from tcg_pipeline.cli import app
-from tcg_pipeline.db.models import IdentifierType, ProjectIdentifier, ProjectRelationship
+from tcg_pipeline.db.models import Evidence, IdentifierType, ProjectIdentifier, ProjectRelationship
 from tcg_pipeline.db.seed import (
     ingest_pipedream_workbooks,
     persist_pipedream_import_results,
@@ -230,6 +230,57 @@ def test_persist_import_results_stores_harvested_permit_number_identifiers(
         )
     ).scalar_one()
     assert permit_identifier == "18010-10000-03620"
+
+
+def test_persist_import_results_writes_pipedream_snapshot_evidence(
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_evidence.xlsx",
+        [
+            {
+                "ProjectID": "997.00001",
+                "Name": "Evidence Tower",
+                "Developer": "Evidence Dev",
+                "Address": "9907 W Example Way",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "Zip": "90017",
+                "CurrStatus": "Pending",
+                "TotUnits": 120,
+                "ProdType": "Apartment",
+            }
+        ],
+    )
+
+    import_results = ingest_pipedream_workbooks([workbook_path], market="los_angeles")
+    persist_pipedream_import_results(postgres_session, import_results)
+
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value == "997.00001",
+        )
+    ).scalar_one()
+    evidence_row = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.project_id == project_id,
+            Evidence.source_type == "pipedream",
+            Evidence.source_record_id == "997.00001",
+        )
+    ).scalar_one()
+
+    assert evidence_row.ingest_method == "seed_import"
+    assert evidence_row.extracted_fields["pipeline_status"] == {
+        "value": "Pending",
+        "confidence": None,
+    }
+    assert evidence_row.extracted_fields["product_type"] == {
+        "value": "Apartment",
+        "confidence": None,
+    }
 
 
 def _build_pipedream_workbook(path: Path, rows: list[dict[str, object]]) -> Path:

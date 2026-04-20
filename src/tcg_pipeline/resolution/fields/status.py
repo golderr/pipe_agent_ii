@@ -70,6 +70,7 @@ def resolve_status(
             confidence=StatusConfidence.HIGH,
             observations=cofo_observations[:1],
             rule_applied="direct_cofo_evidence",
+            metadata={"evidence_type": "certificate_of_occupancy_issued"},
         )
 
     candidate_observations: dict[PipelineStatus, list[FieldObservation]] = {}
@@ -118,7 +119,10 @@ def resolve_status(
         confidence=confidence,
         observations=chosen_observations[:1],
         rule_applied="highest_status_wins",
-        metadata={"candidate_count": len(candidate_observations)},
+        metadata={
+            "candidate_count": len(candidate_observations),
+            "evidence_type": _extract_status_evidence_type(chosen_observations),
+        },
     )
 
 
@@ -201,3 +205,15 @@ def _coerce_pipeline_status(value: Any) -> PipelineStatus | None:
         return PipelineStatus(str(value))
     except ValueError:
         return None
+
+
+def _extract_status_evidence_type(
+    observations: list[FieldObservation],
+) -> str | None:
+    for observation in observations:
+        if observation.field_name != "status_evidence_type":
+            continue
+        value = str(observation.value).strip()
+        if value:
+            return value
+    return None
