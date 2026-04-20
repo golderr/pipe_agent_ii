@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest
 from tcg_pipeline.collectors.factory import build_collector
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.connection import get_session_factory
-from tcg_pipeline.db.models import SourceRun
+from tcg_pipeline.db.models import Project, ResolutionLog, SourceRun
 from tcg_pipeline.db.seed import (
     ingest_costar_workbooks,
     ingest_pipedream_workbooks,
@@ -22,6 +22,7 @@ from tcg_pipeline.db.seed import (
 from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
 from tcg_pipeline.market_config import get_market_config
+from tcg_pipeline.resolution import resolve_project
 from tcg_pipeline.settings import get_settings
 from tcg_pipeline.status_rules import get_status_evidence_rule
 from tcg_pipeline.utils.logging import configure_logging
@@ -347,6 +348,80 @@ def collect_source(
     )
     typer.echo(f"Status change review items: {persist_result.status_change_review_items}")
     typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
+
+
+@app.command("resolve-all")
+def resolve_all_command(
+    market: str | None = typer.Option(
+        None,
+        help="Optional market slug filter, e.g. los_angeles.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply resolved values to the project table instead of shadow-mode logging only.",
+    ),
+    clear_log: bool = typer.Option(
+        False,
+        help="Delete existing resolution_log rows before running.",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        min=1,
+        help="Optional max project count to resolve.",
+    ),
+) -> None:
+    """Resolve projects from evidence in shadow-mode or apply mode."""
+    resolve_all(
+        market=market,
+        apply=apply,
+        clear_log=clear_log,
+        limit=limit,
+    )
+
+
+def resolve_all(
+    *,
+    market: str | None = None,
+    apply: bool = False,
+    clear_log: bool = False,
+    limit: int | None = None,
+) -> None:
+    """Resolve projects from evidence in shadow-mode or apply mode."""
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        if clear_log:
+            session.execute(delete(ResolutionLog))
+
+        project_ids_query = select(Project.id).order_by(Project.id)
+        if market is not None:
+            project_ids_query = project_ids_query.where(Project.market == market)
+        if limit is not None:
+            project_ids_query = project_ids_query.limit(limit)
+        project_ids = session.execute(project_ids_query).scalars().all()
+
+        total_changed_fields = 0
+        total_log_rows = 0
+        changed_projects = 0
+        for project_id in project_ids:
+            result = resolve_project(
+                project_id,
+                session,
+                apply=apply,
+                write_resolution_log=True,
+            )
+            if result.changed_fields:
+                changed_projects += 1
+            total_changed_fields += len(result.changed_fields)
+            total_log_rows += result.log_entries_created
+
+        session.commit()
+
+    typer.echo(f"Projects resolved: {len(project_ids)}")
+    typer.echo(f"Projects with discrepancies: {changed_projects}")
+    typer.echo(f"Changed fields detected: {total_changed_fields}")
+    typer.echo(f"Resolution log rows written: {total_log_rows}")
+    typer.echo(f"Apply mode: {apply}")
 
 
 def _resolve_incremental_cursor(
