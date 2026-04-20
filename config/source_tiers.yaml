@@ -1,0 +1,24 @@
+source_tiers:
+  tier_1:
+    - ladbs_permit
+    - ladbs_cofo
+    - ladbs_inspection
+    - lahd_affordable
+    - la_case_report
+    - zimas_pdis
+    - zimas_arcgis
+    - sm_dev_tracking
+    - sm_ministerial
+    - sm_permit
+    - pipedream
+
+  tier_2:
+    - news_article
+
+  tier_3:
+    - costar
+    - developer_website
+
+  tier_4:
+    - social_media
+    - forum

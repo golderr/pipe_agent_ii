@@ -9,7 +9,6 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
-    Enum as SAEnum,
     Float,
     ForeignKey,
     Index,
@@ -19,6 +18,11 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
+    true,
+)
+from sqlalchemy import (
+    Enum as SAEnum,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -311,6 +315,17 @@ class Project(Base, TimestampMixin):
         nullable=False,
         default=StatusConfidence.LOW,
     )
+    confidence: Mapped[StatusConfidence] = mapped_column(
+        STATUS_CONFIDENCE_ENUM,
+        nullable=False,
+        default=StatusConfidence.LOW,
+        server_default=StatusConfidence.LOW.value,
+    )
+    confidence_reason: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    likelihood: Mapped[float | None] = mapped_column(Float, nullable=True)
+    likelihood_breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    delivery_year_provenance: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    last_evidence_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status_source: Mapped[str | None] = mapped_column(String(120), nullable=True)
     date_delivery: Mapped[date | None] = mapped_column(Date, nullable=True)
     date_construction_start: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -337,6 +352,19 @@ class Project(Base, TimestampMixin):
     last_edit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     last_reviewed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
     last_reviewed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    inclusion_in_analysis: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    inclusion_in_exhibit: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    inclusion_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     researcher_override: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -352,8 +380,10 @@ class Project(Base, TimestampMixin):
         foreign_keys="ProjectRelationship.related_project_id",
     )
     source_records: Mapped[list["ProjectSourceRecord"]] = relationship(back_populates="project")
+    evidence_rows: Mapped[list["Evidence"]] = relationship(back_populates="project")
     review_items: Mapped[list["ReviewItem"]] = relationship(back_populates="project")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="project")
+    resolution_logs: Mapped[list["ResolutionLog"]] = relationship(back_populates="project")
 
 
 class StatusHistory(Base):
@@ -474,6 +504,88 @@ class ProjectSourceRecord(Base):
     field_provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="source_records")
+
+
+class Evidence(Base):
+    __tablename__ = "evidence"
+    __table_args__ = (
+        Index("ix_evidence_project_id", "project_id"),
+        Index("ix_evidence_source_type", "source_type"),
+        Index("ix_evidence_evidence_date", "evidence_date"),
+        Index("ix_evidence_collected_at", "collected_at"),
+        Index(
+            "uq_evidence_source_type_source_record_id_raw_data_hash",
+            "source_type",
+            "source_record_id",
+            "raw_data_hash",
+            unique=True,
+            postgresql_where=text(
+                "source_record_id IS NOT NULL AND raw_data_hash IS NOT NULL"
+            ),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    source_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_tier: Mapped[int] = mapped_column(Integer, nullable=False)
+    ingest_method: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_record_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    evidence_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    raw_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    raw_data_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extracted_fields: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    signal_flags: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    project: Mapped[Project | None] = relationship(back_populates="evidence_rows")
+
+
+class DeveloperRegistry(Base, TimestampMixin):
+    __tablename__ = "developer_registry"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    canonical_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    is_top_tier: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    aliases: Mapped[list["DeveloperAlias"]] = relationship(back_populates="developer")
+
+
+class DeveloperAlias(Base):
+    __tablename__ = "developer_alias"
+    __table_args__ = (
+        Index("ix_developer_alias_developer_id", "developer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    developer_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("developer_registry.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    alias_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    developer: Mapped[DeveloperRegistry] = relationship(back_populates="aliases")
 
 
 class SourceRun(Base):
@@ -611,6 +723,47 @@ class ChangeLog(Base):
 
     project: Mapped[Project] = relationship(back_populates="change_log_entries")
     review_item: Mapped[ReviewItem | None] = relationship(back_populates="change_log_entries")
+
+
+class ResolutionLog(Base):
+    """Discrepancy-only audit rows for Phase 2 and ongoing resolution validation."""
+
+    __tablename__ = "resolution_log"
+    __table_args__ = (
+        Index("ix_resolution_log_project_id_created_at", "project_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    field: Mapped[str] = mapped_column(String(120), nullable=False)
+    current_value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    resolved_value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    evidence_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)),
+        nullable=True,
+    )
+    rule_applied: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    confidence: Mapped[StatusConfidence | None] = mapped_column(
+        STATUS_CONFIDENCE_ENUM,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    project: Mapped[Project] = relationship(back_populates="resolution_logs")
 
 
 class DismissedRecord(Base):
