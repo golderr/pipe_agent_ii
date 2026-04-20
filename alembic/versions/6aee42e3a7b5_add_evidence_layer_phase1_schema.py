@@ -19,7 +19,7 @@ branch_labels = None
 depends_on = None
 
 
-status_confidence_enum = sa.Enum(
+status_confidence_enum = postgresql.ENUM(
     "high",
     "medium",
     "low",
