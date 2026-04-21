@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from tcg_pipeline.db.models import DeveloperRegistry, Evidence, PipelineStatus
+from tcg_pipeline.db.models import Evidence, PipelineStatus
+from tcg_pipeline.developer.registry import canonicalize_developer_name
 
 BASE_RATES = {
     PipelineStatus.UNDER_CONSTRUCTION: 1.00,
@@ -66,15 +66,12 @@ def _no_activity_over_period(evidence_rows: list[Evidence], *, months: int) -> b
 def _is_top_tier_developer(developer_name: Any, session: Session) -> bool:
     if not developer_name:
         return False
-    return (
-        session.execute(
-            select(DeveloperRegistry.id).where(
-                DeveloperRegistry.canonical_name == str(developer_name),
-                DeveloperRegistry.is_top_tier.is_(True),
-            )
-        ).scalar_one_or_none()
-        is not None
+    canonicalization = canonicalize_developer_name(
+        session,
+        str(developer_name),
+        persist=False,
     )
+    return canonicalization.is_top_tier
 
 
 def _effective_date(evidence: Evidence) -> date:

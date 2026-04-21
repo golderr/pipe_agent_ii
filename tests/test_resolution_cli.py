@@ -52,12 +52,17 @@ def test_resolve_all_command_runs_shadow_mode(
         yield postgres_session
 
     monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+    monkeypatch.setattr("tcg_pipeline.cli._developer_registry_is_empty", lambda session: False)
 
     result = runner.invoke(app, ["resolve-all", "--clear-log", "--limit", "1"])
 
     assert result.exit_code == 0
     assert "Projects resolved: 1" in result.stdout
     assert "Apply mode: False" in result.stdout
+    assert (
+        "Shadow mode note: resolution_log stores computed canonical developer values"
+        in result.stdout
+    )
 
 
 def test_resolve_all_function_runs_shadow_mode(
@@ -99,9 +104,14 @@ def test_resolve_all_function_runs_shadow_mode(
         yield postgres_session
 
     monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+    monkeypatch.setattr("tcg_pipeline.cli._developer_registry_is_empty", lambda session: False)
 
     resolve_all(market="los_angeles", clear_log=True, limit=1)
     captured = capsys.readouterr()
 
     assert "Projects resolved: 1" in captured.out
     assert "Apply mode: False" in captured.out
+    assert (
+        "Shadow mode note: resolution_log stores computed canonical developer values"
+        in captured.out
+    )

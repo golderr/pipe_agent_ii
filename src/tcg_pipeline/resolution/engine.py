@@ -111,6 +111,8 @@ def resolve_project(
     developer_resolution = resolve_developer(
         evidence_rows,
         project,
+        session=session,
+        persist_registry=False,
         overrides=overrides,
     )
 
@@ -187,6 +189,7 @@ def resolve_project(
         total_units_resolution=total_units_resolution,
         affordable_units_resolution=affordable_units_resolution,
         market_rate_units_resolution=market_rate_units_resolution,
+        developer_resolution=developer_resolution,
     )
 
     changed_fields: list[str] = []
@@ -304,6 +307,7 @@ def _build_review_flags(
     total_units_resolution: FieldResolution,
     affordable_units_resolution: FieldResolution,
     market_rate_units_resolution: FieldResolution,
+    developer_resolution: FieldResolution,
 ) -> list[ReviewFlag]:
     review_flags: list[ReviewFlag] = []
     if (
@@ -348,5 +352,36 @@ def _build_review_flags(
                 priority=Priority.MEDIUM,
             )
         )
+
+    if developer_resolution.metadata.get("requires_review"):
+        match_type = str(developer_resolution.metadata.get("match_type") or "")
+        raw_value = developer_resolution.metadata.get("raw_value") or developer_resolution.value
+        canonical_name = (
+            developer_resolution.metadata.get("canonical_name")
+            or developer_resolution.value
+        )
+        score = developer_resolution.metadata.get("score")
+        if match_type == "fuzzy_review":
+            review_flags.append(
+                ReviewFlag(
+                    code="developer_canonicalization_review",
+                    message=(
+                        f"Developer '{raw_value}' was auto-canonicalized to "
+                        f"'{canonical_name}' with fuzzy score {score:.1f}. Review the alias."
+                    ),
+                    priority=Priority.MEDIUM,
+                )
+            )
+        elif match_type == "new_registry_entry":
+            review_flags.append(
+                ReviewFlag(
+                    code="developer_registry_new_name",
+                    message=(
+                        f"Developer '{canonical_name}' did not match the existing registry "
+                        "and was treated as a new canonical developer."
+                    ),
+                    priority=Priority.MEDIUM,
+                )
+            )
 
     return review_flags

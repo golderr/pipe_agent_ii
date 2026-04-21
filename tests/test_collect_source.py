@@ -10,6 +10,8 @@ from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.models import (
     AgeRestriction,
+    DeveloperAlias,
+    DeveloperRegistry,
     Evidence,
     IdentifierType,
     PipelineStatus,
@@ -700,6 +702,66 @@ def test_persist_collected_records_reviews_resolved_developer_change(
         "new_value": "New Dev",
         "priority": "medium",
     } in review_item.payload["changes"]
+
+
+def test_persist_collected_records_flags_fuzzy_developer_review_without_field_delta(
+    postgres_session: Session,
+) -> None:
+    postgres_session.add(DeveloperRegistry(canonical_name="CIM Group"))
+    project = Project(
+        canonical_address="8801 WEST EXAMPLE BOULEVARD LOS ANGELES CA 90036",
+        raw_addresses=["8801 W Example Blvd"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        developer="CIM Group",
+        date_delivery=date(date.today().year + 6, 7, 1),
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="costar",
+        source_record_id="CST-REVIEW-DEV-2",
+        raw_payload={"PropertyID": "CST-REVIEW-DEV-2"},
+        canonical_address="8801 WEST EXAMPLE BOULEVARD LOS ANGELES CA 90036",
+        mapped_fields={"developer": "CIM Grp"},
+        source_row_hash="developer-review-fuzzy-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="costar",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    alias_rows = postgres_session.execute(
+        select(DeveloperAlias.alias_name).order_by(DeveloperAlias.alias_name)
+    ).scalars().all()
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+        )
+    ).scalar_one()
+
+    assert project.developer == "CIM Group"
+    assert result.status_change_review_items == 1
+    assert review_item.payload["changes"] == []
+    assert {
+        "code": "developer_canonicalization_review",
+        "message": (
+            "Developer 'CIM Grp' was auto-canonicalized to 'CIM Group' "
+            "with fuzzy score 87.5. Review the alias."
+        ),
+        "priority": "medium",
+    } in review_item.payload["review_flags"]
+    assert alias_rows == []
 
 
 def test_persist_collected_records_does_not_clear_fields_when_partial_evidence_arrives(

@@ -12,13 +12,14 @@ from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest
 from tcg_pipeline.collectors.factory import build_collector
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.connection import get_session_factory
-from tcg_pipeline.db.models import Project, ResolutionLog, SourceRun
+from tcg_pipeline.db.models import DeveloperRegistry, Project, ResolutionLog, SourceRun
 from tcg_pipeline.db.seed import (
     ingest_costar_workbooks,
     ingest_pipedream_workbooks,
     persist_costar_import_result,
     persist_pipedream_import_results,
 )
+from tcg_pipeline.developer import canonicalize_project_developers
 from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
 from tcg_pipeline.market_config import get_market_config
@@ -117,6 +118,7 @@ def seed_pipedream(
 
     session_factory = get_session_factory()
     with session_factory() as session:
+        _echo_developer_registry_bootstrap_warning_if_needed(session)
         persist_result = persist_pipedream_import_results(session, import_results)
         session.commit()
 
@@ -188,6 +190,7 @@ def seed_costar(
 
     session_factory = get_session_factory()
     with session_factory() as session:
+        _echo_developer_registry_bootstrap_warning_if_needed(session)
         persist_result = persist_costar_import_result(session, import_result)
         session.commit()
 
@@ -317,6 +320,7 @@ def collect_source(
 
     session_factory = get_session_factory()
     with session_factory() as session:
+        _echo_developer_registry_bootstrap_warning_if_needed(session)
         persist_result = persist_collected_records(
             session,
             market=market,
@@ -390,6 +394,7 @@ def resolve_all(
     """Resolve projects from evidence in shadow-mode or apply mode."""
     session_factory = get_session_factory()
     with session_factory() as session:
+        _echo_developer_registry_bootstrap_warning_if_needed(session)
         if clear_log:
             session.execute(delete(ResolutionLog))
 
@@ -422,6 +427,83 @@ def resolve_all(
     typer.echo(f"Changed fields detected: {total_changed_fields}")
     typer.echo(f"Resolution log rows written: {total_log_rows}")
     typer.echo(f"Apply mode: {apply}")
+    if not apply:
+        typer.echo(
+            "Shadow mode note: resolution_log stores computed canonical developer values "
+            "even though developer registry rows and aliases are not persisted."
+        )
+
+
+@app.command("canonicalize-developers")
+def canonicalize_developers_command(
+    market: str | None = typer.Option(
+        None,
+        help="Optional market slug filter, e.g. los_angeles.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply canonical developer names, alias merges, and registry updates.",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        min=1,
+        help="Optional max project count to canonicalize.",
+    ),
+) -> None:
+    """Canonicalize developer names across the registry and project table."""
+    canonicalize_developers(
+        market=market,
+        apply=apply,
+        limit=limit,
+    )
+
+
+def canonicalize_developers(
+    *,
+    market: str | None = None,
+    apply: bool = False,
+    limit: int | None = None,
+) -> None:
+    """Canonicalize developer names across the registry and project table."""
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        initial_registry_empty = _developer_registry_is_empty(session)
+        result = canonicalize_project_developers(
+            session,
+            market=market,
+            apply=apply,
+            limit=limit,
+        )
+        session.commit()
+
+    typer.echo(f"Registry rows scanned: {result.registry_rows_scanned}")
+    typer.echo(f"Registry rows merged: {result.registry_rows_merged}")
+    typer.echo(f"Registry rows created: {result.registry_rows_created}")
+    typer.echo(f"Aliases created: {result.aliases_created}")
+    typer.echo(f"Projects scanned: {result.projects_scanned}")
+    typer.echo(f"Projects changed: {result.projects_changed}")
+    typer.echo(f"Exact matches: {result.exact_matches}")
+    typer.echo(f"Fuzzy auto matches: {result.fuzzy_auto_matches}")
+    typer.echo(f"Fuzzy review matches: {result.fuzzy_review_matches}")
+    typer.echo(f"New registry entries: {result.new_registry_entries}")
+    typer.echo(f"Apply mode: {apply}")
+    if result.registry_rows_merged > 0:
+        typer.echo(
+            "Note: registry duplicates were merged during this sweep. Review merge counts "
+            "before re-running after manual registry edits."
+        )
+    if not apply:
+        typer.echo(
+            "Shadow mode note: canonical developer targets are computed, but registry rows, "
+            "aliases, and project developer values are not persisted until --apply."
+        )
+    if initial_registry_empty and result.projects_scanned > 0:
+        typer.echo(
+            "Developer registry bootstrap note: run `python scripts/backfill_developers.py` "
+            "and then `python -m tcg_pipeline canonicalize-developers --apply` before "
+            "normal collector or seed runs."
+        )
 
 
 def _resolve_incremental_cursor(
@@ -441,6 +523,23 @@ def _resolve_incremental_cursor(
     if max_seen_updated_at is None:
         return None
     return max_seen_updated_at - timedelta(hours=overlap_hours)
+
+
+def _developer_registry_is_empty(session) -> bool:
+    return (
+        session.execute(select(DeveloperRegistry.id).limit(1)).scalar_one_or_none()
+        is None
+    )
+
+
+def _echo_developer_registry_bootstrap_warning_if_needed(session) -> None:
+    if not _developer_registry_is_empty(session):
+        return
+    typer.echo(
+        "Developer registry is empty. Bootstrap before normal collector or seed runs: "
+        "`alembic upgrade head`, `python scripts/backfill_developers.py`, then "
+        "`python -m tcg_pipeline canonicalize-developers --apply`."
+    )
 
 
 def _parse_cli_datetime(value: str) -> datetime:
