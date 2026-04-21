@@ -27,9 +27,9 @@ def resolve_age_restriction(
     if not observations:
         return build_resolution(
             "age_restriction",
-            AgeRestriction.UNKNOWN,
+            project.age_restriction or AgeRestriction.UNKNOWN,
             confidence=StatusConfidence.LOW,
-            rule_applied="no_age_restriction_evidence",
+            rule_applied="no_age_restriction_evidence_keep_current",
         )
 
     age_restriction = _coerce_age_restriction(observations[0].value) or AgeRestriction.UNKNOWN

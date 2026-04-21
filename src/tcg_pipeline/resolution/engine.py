@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 
 from tcg_pipeline.db.models import (
     Evidence,
+    Priority,
     Project,
     ResolutionLog,
     StatusHistory,
 )
+from tcg_pipeline.matching.differ import ReviewFlag
 from tcg_pipeline.resolution.confidence import compute_overall_confidence
 from tcg_pipeline.resolution.fields import FieldResolution, normalize_comparable
 from tcg_pipeline.resolution.fields.age_restriction import resolve_age_restriction
@@ -36,8 +38,12 @@ LOGGED_FIELDS = {
     "age_restriction",
     "developer",
     "confidence",
+    "confidence_reason",
     "likelihood",
+    "likelihood_breakdown",
     "last_evidence_date",
+    # status_confidence is intentionally excluded because it mirrors confidence during
+    # the dual-write transition and would only duplicate the confidence log row.
 }
 
 
@@ -48,6 +54,7 @@ class ProjectResolutionResult:
     changed_fields: list[str] = dataclass_field(default_factory=list)
     log_entries_created: int = 0
     field_resolutions: dict[str, FieldResolution] = dataclass_field(default_factory=dict)
+    review_flags: list[ReviewFlag] = dataclass_field(default_factory=list)
     resolved_values: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
@@ -174,6 +181,13 @@ def resolve_project(
         confidence=overall_confidence,
         rule_applied="latest_evidence_date",
     )
+    review_flags = _build_review_flags(
+        project,
+        status_resolution=status_resolution,
+        total_units_resolution=total_units_resolution,
+        affordable_units_resolution=affordable_units_resolution,
+        market_rate_units_resolution=market_rate_units_resolution,
+    )
 
     changed_fields: list[str] = []
     log_entries_created = 0
@@ -202,14 +216,18 @@ def resolve_project(
         for field_name, resolution in field_resolutions.items():
             setattr(project, field_name, resolution.value)
         if previous_status != project.pipeline_status:
+            status_source = status_resolution.metadata.get("source_type") or "resolution_engine"
+            evidence_type = status_resolution.metadata.get("evidence_type")
             session.add(
                 StatusHistory(
                     project_id=project.id,
                     status=project.pipeline_status,
                     status_date=status_resolution.evidence_date or date.today(),
-                    source="resolution_engine",
+                    source=str(status_source),
                     notes=(
                         "Resolved from evidence. "
+                        f"Upstream source: {status_source}. "
+                        f"Evidence type: {evidence_type or 'n/a'}. "
                         f"Rule: {status_resolution.rule_applied}. "
                         f"Confidence: {status_resolution.confidence.value}."
                     ),
@@ -222,6 +240,7 @@ def resolve_project(
         changed_fields=changed_fields,
         log_entries_created=log_entries_created,
         field_resolutions=field_resolutions,
+        review_flags=review_flags,
         resolved_values={
             field_name: resolution.value
             for field_name, resolution in field_resolutions.items()
@@ -276,3 +295,58 @@ def normalize_value_for_project(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
     return value
+
+
+def _build_review_flags(
+    project: Project,
+    *,
+    status_resolution: FieldResolution,
+    total_units_resolution: FieldResolution,
+    affordable_units_resolution: FieldResolution,
+    market_rate_units_resolution: FieldResolution,
+) -> list[ReviewFlag]:
+    review_flags: list[ReviewFlag] = []
+    if (
+        project.pipeline_status != status_resolution.value
+        and status_resolution.metadata.get("requires_review")
+    ):
+        review_flags.append(
+            ReviewFlag(
+                code="permit_issued_requires_review",
+                message=str(
+                    status_resolution.metadata.get("review_reason")
+                    or "Status change requires researcher review."
+                ),
+                priority=Priority.HIGH,
+            )
+        )
+
+    resolved_total = total_units_resolution.value
+    resolved_affordable = affordable_units_resolution.value
+    resolved_market_rate = market_rate_units_resolution.value
+    total_changed = project.total_units != resolved_total
+    split_unchanged = (
+        project.affordable_units == resolved_affordable
+        and project.market_rate_units == resolved_market_rate
+    )
+    if (
+        total_changed
+        and split_unchanged
+        and resolved_total is not None
+        and resolved_affordable is not None
+        and resolved_market_rate is not None
+        and abs((resolved_affordable + resolved_market_rate) - resolved_total) > 2
+    ):
+        review_flags.append(
+            ReviewFlag(
+                code="unit_split_mismatch",
+                message=(
+                    f"Total units updated to {resolved_total}. Affordable/market-rate split "
+                    f"({resolved_affordable}/{resolved_market_rate}) may need revision "
+                    "because the split no longer sums to total."
+                ),
+                priority=Priority.MEDIUM,
+            )
+        )
+
+    return review_flags

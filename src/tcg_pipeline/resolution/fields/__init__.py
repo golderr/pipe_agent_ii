@@ -117,9 +117,9 @@ def sort_observations(
     return sorted(
         observations,
         key=lambda observation: (
-            (source_priority or {}).get(observation.evidence.source_type, 99),
             -_sort_ordinal(observation.effective_date),
             -_sort_ordinal(observation.evidence.collected_at.date()),
+            (source_priority or {}).get(observation.evidence.source_type, 99),
             observation.evidence.source_tier,
         ),
     )

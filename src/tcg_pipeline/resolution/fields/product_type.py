@@ -27,9 +27,9 @@ def resolve_product_type(
     if not observations:
         return build_resolution(
             "product_type",
-            ProductType.UNKNOWN,
+            project.product_type or ProductType.UNKNOWN,
             confidence=StatusConfidence.LOW,
-            rule_applied="no_product_type_evidence",
+            rule_applied="no_product_type_evidence_keep_current",
         )
 
     product_type = _coerce_product_type(observations[0].value) or ProductType.UNKNOWN

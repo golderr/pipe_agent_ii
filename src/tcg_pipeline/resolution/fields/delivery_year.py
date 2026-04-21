@@ -40,11 +40,7 @@ def resolve_delivery_year(
     observations = iter_field_observations(evidence_rows, "date_delivery")
     if observations:
         resolved_date = parse_date_value(observations[0].value)
-        if resolved_date is not None and _should_keep_explicit_delivery_date(
-            resolved_date,
-            observations[0].effective_date,
-            status=resolved_status,
-        ):
+        if resolved_date is not None:
             provenance = _provenance_for_source_type(observations[0].evidence.source_type)
             return build_resolution(
                 "date_delivery",
@@ -52,8 +48,32 @@ def resolve_delivery_year(
                 confidence=infer_confidence(observations),
                 observations=observations[:1],
                 rule_applied="explicit_delivery_date",
-                metadata={"provenance": provenance},
+                metadata={
+                    "provenance": provenance,
+                    "delivery_date_type": provenance,
+                    "source_type": observations[0].evidence.source_type,
+                    "description": (
+                        f"Explicit delivery date from {observations[0].evidence.source_type} "
+                        f"evidence dated {observations[0].effective_date.isoformat()}."
+                    ),
+                },
             )
+
+    if project.date_delivery is not None:
+        return build_resolution(
+            "date_delivery",
+            project.date_delivery,
+            confidence=StatusConfidence.LOW,
+            rule_applied="no_explicit_delivery_evidence_keep_current",
+            metadata={
+                "provenance": project.delivery_year_provenance,
+                "delivery_date_type": project.delivery_year_provenance,
+                "description": (
+                    "Retained existing project delivery date because no explicit delivery "
+                    "evidence was available."
+                ),
+            },
+        )
 
     estimated_date = _estimate_delivery_date(
         status=resolved_status,
@@ -64,21 +84,19 @@ def resolve_delivery_year(
         estimated_date,
         confidence=StatusConfidence.LOW,
         rule_applied="estimated_calc",
-        metadata={"provenance": "estimated_calc"},
+        metadata={
+            "provenance": "estimated_calc",
+            "delivery_date_type": "estimated_calc",
+            "description": (
+                "Estimated delivery date derived from resolved status and unit-count "
+                "size adjustment."
+            ),
+            "estimate_inputs": {
+                "status": resolved_status.value,
+                "total_units": resolved_total_units,
+            },
+        },
     )
-
-
-def _should_keep_explicit_delivery_date(
-    resolved_date: date,
-    evidence_date: date,
-    *,
-    status: PipelineStatus,
-) -> bool:
-    if status == PipelineStatus.UNDER_CONSTRUCTION and resolved_date >= date.today():
-        return True
-    return evidence_date >= _months_ago(6)
-
-
 def _estimate_delivery_date(
     *,
     status: PipelineStatus,
@@ -100,16 +118,6 @@ def _estimate_delivery_date(
 
     estimated_year = math.ceil(date.today().year + BASE_YEARS[status] + size_adjustment)
     return date(estimated_year, 7, 1)
-
-
-def _months_ago(month_count: int) -> date:
-    today = date.today()
-    target_month = today.month - month_count
-    target_year = today.year
-    while target_month <= 0:
-        target_month += 12
-        target_year -= 1
-    return date(target_year, target_month, 1)
 
 
 def _provenance_for_source_type(source_type: str) -> str:

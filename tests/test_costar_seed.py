@@ -108,7 +108,7 @@ def test_persist_costar_import_result_merges_into_existing_project_by_apn(
             Project.canonical_address == "9902 SOUTH EXAMPLE AVENUE LOS ANGELES CA 90057"
         )
     ).scalar_one()
-    assert project.developer == "TCG Research"
+    assert project.developer == "Different Dev"
     assert project.zoning == "C2"
     assert project.owner == "Example Owner"
     assert project.costar_submarket == "Koreatown"

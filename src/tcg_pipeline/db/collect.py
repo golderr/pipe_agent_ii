@@ -26,6 +26,7 @@ from tcg_pipeline.ingesters._common import serialize_json_value
 from tcg_pipeline.matching.differ import (
     DetectedChange,
     DiffResult,
+    ReviewFlag,
     StatusSuggestion,
     diff_project_snapshots,
     snapshot_project_for_diff,
@@ -177,6 +178,8 @@ def persist_collected_records(
             snapshot_project_for_diff(project),
             status_evidence_type=_status_evidence_type_from_resolution(resolution_result),
             status_evidence_date=_status_evidence_date_from_resolution(resolution_result),
+            status_reason=_status_reason_from_resolution(resolution_result),
+            review_flags=_review_flags_from_resolution(resolution_result),
         )
         if diff_result.has_reviewable_changes:
             source_run.updates_found += 1
@@ -196,6 +199,10 @@ def persist_collected_records(
                         "mapped_fields": _serialize_payload(raw_record.mapped_fields),
                         "changes": [
                             _serialize_change(change) for change in diff_result.field_changes
+                        ],
+                        "review_flags": [
+                            _serialize_review_flag(review_flag)
+                            for review_flag in diff_result.review_flags
                         ],
                         "status_suggestion": _serialize_status_suggestion(
                             diff_result.status_suggestion
@@ -361,6 +368,8 @@ def _create_unmatched_review_item(
 
 
 def _review_priority(diff_result: DiffResult) -> Priority:
+    if any(review_flag.priority == Priority.HIGH for review_flag in diff_result.review_flags):
+        return Priority.HIGH
     if (
         diff_result.status_suggestion is not None
         and diff_result.status_suggestion.priority == Priority.HIGH
@@ -409,6 +418,14 @@ def _serialize_change(change: DetectedChange) -> dict[str, Any]:
         "old_value": serialize_json_value(change.old_value),
         "new_value": serialize_json_value(change.new_value),
         "priority": change.priority.value,
+    }
+
+
+def _serialize_review_flag(review_flag: ReviewFlag) -> dict[str, Any]:
+    return {
+        "code": review_flag.code,
+        "message": review_flag.message,
+        "priority": review_flag.priority.value,
     }
 
 
@@ -466,6 +483,25 @@ def _status_evidence_date_from_resolution(resolution_result) -> date | None:
     if status_resolution is None:
         return None
     return status_resolution.evidence_date
+
+
+def _status_reason_from_resolution(resolution_result) -> str | None:
+    if resolution_result is None:
+        return None
+    status_resolution = resolution_result.field_resolutions.get("pipeline_status")
+    if status_resolution is None:
+        return None
+    review_reason = status_resolution.metadata.get("review_reason")
+    if review_reason is None:
+        return None
+    text = str(review_reason).strip()
+    return text or None
+
+
+def _review_flags_from_resolution(resolution_result) -> list[ReviewFlag]:
+    if resolution_result is None:
+        return []
+    return list(resolution_result.review_flags)
 
 
 def _serialize_payload(payload: dict[str, Any]) -> dict[str, Any]:

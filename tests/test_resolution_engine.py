@@ -95,6 +95,8 @@ def test_resolve_project_logs_only_discrepancies_and_can_apply(
         select(ResolutionLog.field).where(ResolutionLog.project_id == project.id)
     ).scalars().all()
     assert "pipeline_status" in logged_fields
+    assert "confidence_reason" in logged_fields
+    assert "likelihood_breakdown" in logged_fields
     assert "total_units" not in logged_fields
 
     apply_result = resolve_project(
@@ -113,3 +115,59 @@ def test_resolve_project_logs_only_discrepancies_and_can_apply(
     ).scalars().all()
     assert len(status_history_rows) == 1
     assert status_history_rows[0].status == PipelineStatus.UNDER_CONSTRUCTION
+    assert status_history_rows[0].source == "ladbs_inspection"
+    assert "Evidence type: building_inspection_recorded" in (status_history_rows[0].notes or "")
+
+
+def test_resolve_project_keeps_existing_values_when_partial_evidence_arrives(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("evidence"):
+        pytest.skip("Apply the evidence layer migration before running resolution tests.")
+
+    project = Project(
+        canonical_address="815 SOUTH KINGSLEY DRIVE LOS ANGELES CA 90005",
+        raw_addresses=["815 S Kingsley Dr"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.COMPLETE,
+        product_type=ProductType.APARTMENT,
+        age_restriction=AgeRestriction.NON_AGE_RESTRICTED,
+        developer="Jamison Services",
+        date_delivery=date(2024, 9, 15),
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    postgres_session.add(
+        Evidence(
+            project_id=project.id,
+            source_type="ladbs_permit",
+            source_tier=1,
+            ingest_method="scheduled_collector",
+            collected_at=datetime(2026, 4, 5, tzinfo=UTC),
+            evidence_date=date(2021, 9, 22),
+            extracted_fields={
+                "status_evidence_type": {"value": "building_permit_issued", "confidence": None}
+            },
+        )
+    )
+    postgres_session.flush()
+
+    resolution = resolve_project(
+        project.id,
+        postgres_session,
+        apply=False,
+        write_resolution_log=False,
+    )
+
+    assert resolution.field_resolutions["pipeline_status"].value == PipelineStatus.COMPLETE
+    assert resolution.field_resolutions["product_type"].value == ProductType.APARTMENT
+    assert (
+        resolution.field_resolutions["age_restriction"].value
+        == AgeRestriction.NON_AGE_RESTRICTED
+    )
+    assert resolution.field_resolutions["developer"].value == "Jamison Services"
+    assert resolution.field_resolutions["date_delivery"].value == date(2024, 9, 15)

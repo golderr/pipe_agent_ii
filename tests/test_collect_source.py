@@ -9,9 +9,11 @@ from tcg_pipeline.cli import _resolve_incremental_cursor
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.models import (
+    AgeRestriction,
     Evidence,
     IdentifierType,
     PipelineStatus,
+    ProductType,
     Project,
     ProjectIdentifier,
     ProjectSourceRecord,
@@ -95,13 +97,33 @@ def test_persist_collected_records_creates_status_change_review_item(
     assert review_item.payload["status_suggestion"]["evidence_type"] == "building_permit_issued"
     assert review_item.payload["status_suggestion"]["rule_code"] == "building_permit_issued"
     assert review_item.payload["status_suggestion"]["proof_level"] == "supporting"
+    assert review_item.payload["status_suggestion"]["reason"] == (
+        "Permit issued alone supports Approved, but requires researcher review until "
+        "corroborating construction evidence arrives."
+    )
+    assert review_item.payload["review_flags"] == [
+        {
+            "code": "permit_issued_requires_review",
+            "message": (
+                "Permit issued alone supports Approved, but requires researcher review "
+                "until corroborating construction evidence arrives."
+            ),
+            "priority": "high",
+        }
+    ]
     assert review_item.payload["changes"] == [
         {
             "field": "total_units",
             "old_value": None,
             "new_value": 260,
             "priority": "medium",
-        }
+        },
+        {
+            "field": "date_delivery",
+            "old_value": None,
+            "new_value": date(date.today().year + 3, 7, 1).isoformat(),
+            "priority": "medium",
+        },
     ]
 
     postgres_session.refresh(project)
@@ -511,7 +533,13 @@ def test_persist_collected_records_matches_existing_project_when_new_candidates_
             "old_value": None,
             "new_value": 5,
             "priority": "medium",
-        }
+        },
+        {
+            "field": "date_delivery",
+            "old_value": None,
+            "new_value": date(date.today().year + 5, 7, 1).isoformat(),
+            "priority": "medium",
+        },
     ]
 
 
@@ -565,6 +593,179 @@ def test_persist_collected_records_matches_existing_project_when_raw_address_omi
         )
     ).scalar_one()
     assert source_record.project_id == project.id
+
+
+def test_persist_collected_records_flags_unit_split_mismatch_when_total_changes(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9500 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9500 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+        affordable_units=20,
+        market_rate_units=80,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-02593",
+        raw_payload={"pcis_permit": "12010-30000-02593"},
+        canonical_address="9500 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-02593"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 120,
+        },
+        source_row_hash="split-mismatch-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.status_change_review_items == 1
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+        )
+    ).scalar_one()
+    assert {
+        "code": "unit_split_mismatch",
+        "message": (
+            "Total units updated to 120. Affordable/market-rate split (20/80) may need "
+            "revision because the split no longer sums to total."
+        ),
+        "priority": "medium",
+    } in review_item.payload["review_flags"]
+
+
+def test_persist_collected_records_reviews_resolved_developer_change(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="8800 WEST EXAMPLE BOULEVARD LOS ANGELES CA 90036",
+        raw_addresses=["8800 W Example Blvd"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        developer="Old Dev",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="costar",
+        source_record_id="CST-REVIEW-DEV-1",
+        raw_payload={"PropertyID": "CST-REVIEW-DEV-1"},
+        canonical_address="8800 WEST EXAMPLE BOULEVARD LOS ANGELES CA 90036",
+        mapped_fields={"developer": "New Dev"},
+        source_row_hash="developer-review-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="costar",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.status_change_review_items == 1
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+        )
+    ).scalar_one()
+    assert {
+        "field": "developer",
+        "old_value": "Old Dev",
+        "new_value": "New Dev",
+        "priority": "medium",
+    } in review_item.payload["changes"]
+
+
+def test_persist_collected_records_does_not_clear_fields_when_partial_evidence_arrives(
+    postgres_session: Session,
+) -> None:
+    apn = "partial-evidence-apn-001"
+    project = Project(
+        canonical_address="111 TEST AVENUE LOS ANGELES CA 90001",
+        raw_addresses=["111 Test Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.COMPLETE,
+        product_type=ProductType.APARTMENT,
+        age_restriction=AgeRestriction.NON_AGE_RESTRICTED,
+        developer="Jamison Services",
+        date_delivery=date(2024, 9, 15),
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        ProjectIdentifier(
+            project_id=project.id,
+            identifier_type=IdentifierType.APN,
+            value=apn,
+        )
+    )
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="20010-10000-01382",
+        raw_payload={"pcis_permit": "20010-10000-01382"},
+        canonical_address="111 TEST AVENUE LOS ANGELES CA 90001",
+        identifiers={"apn": [apn], "permit_number": ["20010-10000-01382"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2021-09-22",
+        },
+        source_row_hash="partial-permit-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        collection_mode="preview",
+    )
+    postgres_session.flush()
+
+    postgres_session.refresh(project)
+    assert result.matched_existing_projects == 1
+    assert result.matched_by_identifier == 1
+    assert result.status_change_review_items == 0
+    assert project.pipeline_status == PipelineStatus.COMPLETE
+    assert project.product_type == ProductType.APARTMENT
+    assert project.age_restriction == AgeRestriction.NON_AGE_RESTRICTED
+    assert project.developer == "Jamison Services"
+    assert project.date_delivery == date(2024, 9, 15)
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(ReviewItem.source_run_id == result.source_run_id)
+    ).scalar_one_or_none()
+    assert review_item is None
 
 
 def test_persist_collected_records_keeps_zipless_address_matches_ambiguous(

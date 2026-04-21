@@ -57,6 +57,7 @@ def resolve_status(
             confidence=StatusConfidence.HIGH,
             observations=[stalled_observation],
             rule_applied="tier1_explicit_status",
+            metadata={"source_type": stalled_observation.evidence.source_type},
         )
 
     direct_signal_observations = _status_signal_observations(evidence_rows)
@@ -70,7 +71,10 @@ def resolve_status(
             confidence=StatusConfidence.HIGH,
             observations=cofo_observations[:1],
             rule_applied="direct_cofo_evidence",
-            metadata={"evidence_type": "certificate_of_occupancy_issued"},
+            metadata={
+                "evidence_type": "certificate_of_occupancy_issued",
+                "source_type": cofo_observations[0].evidence.source_type,
+            },
         )
 
     candidate_observations: dict[PipelineStatus, list[FieldObservation]] = {}
@@ -107,11 +111,36 @@ def resolve_status(
         candidate_observations.items(),
         key=lambda item: STATUS_PROGRESS_ORDER.get(item[0], -1),
     )
+    current_rank = STATUS_PROGRESS_ORDER.get(project.pipeline_status)
+    chosen_rank = STATUS_PROGRESS_ORDER.get(chosen_status)
+    if (
+        current_rank is not None
+        and chosen_rank is not None
+        and chosen_rank < current_rank
+    ):
+        return build_resolution(
+            "pipeline_status",
+            project.pipeline_status,
+            confidence=StatusConfidence.LOW,
+            observations=chosen_observations[:1],
+            rule_applied="forward_only_preserve_current",
+            metadata={
+                "candidate_status": chosen_status.value,
+                "evidence_type": _extract_status_evidence_type(chosen_observations),
+                "source_type": _extract_source_type(chosen_observations),
+                "requires_review": False,
+            },
+        )
     confidence = _status_confidence(
         chosen_status,
         chosen_observations,
         explicit_observations=explicit_observations,
         permit_observations=permit_observations,
+    )
+    review_required = _requires_review(
+        chosen_status,
+        chosen_observations,
+        inspection_observations=inspection_observations,
     )
     return build_resolution(
         "pipeline_status",
@@ -122,6 +151,14 @@ def resolve_status(
         metadata={
             "candidate_count": len(candidate_observations),
             "evidence_type": _extract_status_evidence_type(chosen_observations),
+            "source_type": _extract_source_type(chosen_observations),
+            "requires_review": review_required,
+            "review_reason": (
+                "Permit issued alone supports Approved, but requires researcher review "
+                "until corroborating construction evidence arrives."
+                if review_required
+                else None
+            ),
         },
     )
 
@@ -207,6 +244,19 @@ def _coerce_pipeline_status(value: Any) -> PipelineStatus | None:
         return None
 
 
+def _requires_review(
+    chosen_status: PipelineStatus,
+    chosen_observations: list[FieldObservation],
+    *,
+    inspection_observations: list[FieldObservation],
+) -> bool:
+    if chosen_status != PipelineStatus.APPROVED:
+        return False
+    if inspection_observations:
+        return False
+    return _extract_status_evidence_type(chosen_observations) == "building_permit_issued"
+
+
 def _extract_status_evidence_type(
     observations: list[FieldObservation],
 ) -> str | None:
@@ -216,4 +266,14 @@ def _extract_status_evidence_type(
         value = str(observation.value).strip()
         if value:
             return value
+    return None
+
+
+def _extract_source_type(
+    observations: list[FieldObservation],
+) -> str | None:
+    for observation in observations:
+        source_type = observation.evidence.source_type
+        if source_type:
+            return source_type
     return None

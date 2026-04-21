@@ -42,9 +42,9 @@ def resolve_developer(
     if not observations:
         return build_resolution(
             "developer",
-            None,
+            project.developer,
             confidence=StatusConfidence.LOW,
-            rule_applied="no_developer_evidence",
+            rule_applied="no_developer_evidence_keep_current",
         )
 
     developer_name = _coerce_text(observations[0].value)

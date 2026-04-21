@@ -15,7 +15,7 @@ from tcg_pipeline.resolution.fields.delivery_year import resolve_delivery_year
 from tcg_pipeline.resolution.fields.developer import resolve_developer
 from tcg_pipeline.resolution.fields.product_type import resolve_product_type
 from tcg_pipeline.resolution.fields.status import resolve_status
-from tcg_pipeline.resolution.fields.units import resolve_units
+from tcg_pipeline.resolution.fields.units import resolve_unit_split, resolve_units
 
 
 def _build_project() -> Project:
@@ -110,6 +110,8 @@ def test_resolve_delivery_year_estimates_midyear_when_explicit_date_missing() ->
     expected_year = date.today().year + 7
     assert resolution.value == date(expected_year, 7, 1)
     assert resolution.metadata["provenance"] == "estimated_calc"
+    assert resolution.metadata["delivery_date_type"] == "estimated_calc"
+    assert "Estimated delivery date" in resolution.metadata["description"]
 
 
 def test_resolve_developer_prefers_pipedream_when_dates_tie() -> None:
@@ -133,12 +135,77 @@ def test_resolve_developer_prefers_pipedream_when_dates_tie() -> None:
     assert resolution.value == "TCG Research"
 
 
+def test_resolve_developer_prefers_newer_evidence_over_source_priority() -> None:
+    project = _build_project()
+    older_pipedream = _build_evidence(
+        source_type="pipedream",
+        source_tier=1,
+        evidence_date=date(2020, 4, 1),
+        extracted_fields={"developer": {"value": "Old TCG Research", "confidence": None}},
+    )
+    newer_news = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 4, 1),
+        extracted_fields={"developer": {"value": "Newer News Dev", "confidence": None}},
+    )
+
+    resolution = resolve_developer([older_pipedream, newer_news], project)
+
+    assert resolution.value == "Newer News Dev"
+
+
 def test_resolve_age_restriction_defaults_to_unknown_without_explicit_evidence() -> None:
     project = _build_project()
 
     resolution = resolve_age_restriction([], project)
 
     assert resolution.value == AgeRestriction.UNKNOWN
+
+
+def test_resolve_age_restriction_keeps_current_value_without_explicit_evidence() -> None:
+    project = _build_project()
+    project.age_restriction = AgeRestriction.NON_AGE_RESTRICTED
+
+    resolution = resolve_age_restriction([], project)
+
+    assert resolution.value == AgeRestriction.NON_AGE_RESTRICTED
+    assert resolution.rule_applied == "no_age_restriction_evidence_keep_current"
+
+
+def test_resolve_status_marks_permit_alone_as_review_required() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.PROPOSED
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.value == PipelineStatus.APPROVED
+    assert resolution.metadata["requires_review"] is True
+    assert "requires researcher review" in resolution.metadata["review_reason"]
+
+
+def test_resolve_unit_split_ignores_disallowed_sources() -> None:
+    project = _build_project()
+    project.affordable_units = 18
+    costar_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2026, 4, 1),
+        extracted_fields={"affordable_units": {"value": 25, "confidence": None}},
+    )
+
+    resolution = resolve_unit_split([costar_evidence], project, "affordable_units")
+
+    assert resolution.value == 18
+    assert resolution.rule_applied == "no_allowed_split_evidence"
 
 
 def test_resolve_product_type_uses_most_recent_explicit_value() -> None:
@@ -162,3 +229,56 @@ def test_resolve_product_type_uses_most_recent_explicit_value() -> None:
     resolution = resolve_product_type([older, newer], project)
 
     assert resolution.value == ProductType.APARTMENT
+
+
+def test_resolve_product_type_keeps_current_value_without_evidence() -> None:
+    project = _build_project()
+    project.product_type = ProductType.APARTMENT
+
+    resolution = resolve_product_type([], project)
+
+    assert resolution.value == ProductType.APARTMENT
+    assert resolution.rule_applied == "no_product_type_evidence_keep_current"
+
+
+def test_resolve_developer_keeps_current_value_without_evidence() -> None:
+    project = _build_project()
+    project.developer = "Jamison Services"
+
+    resolution = resolve_developer([], project)
+
+    assert resolution.value == "Jamison Services"
+    assert resolution.rule_applied == "no_developer_evidence_keep_current"
+
+
+def test_resolve_delivery_year_keeps_existing_project_value_without_explicit_evidence() -> None:
+    project = _build_project()
+    project.date_delivery = date(2028, 6, 1)
+
+    resolution = resolve_delivery_year(
+        [],
+        project,
+        resolved_status=PipelineStatus.APPROVED,
+        resolved_total_units=400,
+    )
+
+    assert resolution.value == date(2028, 6, 1)
+    assert resolution.rule_applied == "no_explicit_delivery_evidence_keep_current"
+
+
+def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.COMPLETE
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.value == PipelineStatus.COMPLETE
+    assert resolution.rule_applied == "forward_only_preserve_current"
