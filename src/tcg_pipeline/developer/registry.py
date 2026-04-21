@@ -448,7 +448,7 @@ def _merge_registry_rows(
         if cleaned_alias is None or cleaned_alias.casefold() == target.canonical_name.casefold():
             session.delete(alias)
             continue
-        alias.developer_id = target.id
+        alias.developer = target
 
     if source.canonical_name.casefold() != target.canonical_name.casefold():
         _ensure_alias(

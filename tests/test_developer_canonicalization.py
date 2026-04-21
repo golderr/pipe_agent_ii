@@ -11,6 +11,7 @@ from tcg_pipeline.cli import app
 from tcg_pipeline.db.models import DeveloperAlias, DeveloperRegistry, Evidence, Project
 from tcg_pipeline.developer import canonicalize_project_developers, normalize_developer_name
 from tcg_pipeline.developer import registry as registry_module
+from tcg_pipeline.developer.canonicalize import DeveloperCanonicalizationSweepResult
 from tcg_pipeline.developer.registry import (
     canonicalize_developer_name,
     canonicalize_registry_entry,
@@ -18,6 +19,15 @@ from tcg_pipeline.developer.registry import (
 from tcg_pipeline.resolution import resolve_project
 
 runner = CliRunner()
+
+TEST_JAMISON = "ZZZQXQ Jamisonic Services"
+TEST_JAMISON_ALIAS = "ZZZQXQ Jamisonic Services LP"
+TEST_CIM = "ZZZQXQ Cimmer Group"
+TEST_CIM_ALIAS = "ZZZQXQ C1mmer Grp"
+TEST_AJ_CANONICAL = "ZZZQXQ Xylor Delta Development"
+TEST_AJ_DUPLICATE = "ZZZQXQ Xylor Delta Developmnt"
+TEST_AJ_ALIAS = "ZZZQXQ Xylor Delta"
+TEST_NEW_DEVELOPER = "ZZZQXQ Brand New Dev"
 
 
 def test_normalize_developer_name_strips_legal_suffixes() -> None:
@@ -31,24 +41,24 @@ def test_canonicalize_developer_name_matches_exact_alias(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    developer = DeveloperRegistry(canonical_name="Jamison Services")
+    developer = DeveloperRegistry(canonical_name=TEST_JAMISON)
     postgres_session.add(developer)
     postgres_session.flush()
     postgres_session.add(
         DeveloperAlias(
             developer_id=developer.id,
-            alias_name="Jamison Services LP",
+            alias_name=TEST_JAMISON_ALIAS,
         )
     )
     postgres_session.flush()
 
     result = canonicalize_developer_name(
         postgres_session,
-        "Jamison Services LP",
+        TEST_JAMISON_ALIAS,
         persist=False,
     )
 
-    assert result.canonical_name == "Jamison Services"
+    assert result.canonical_name == TEST_JAMISON
     assert result.match_type == "exact_alias"
 
 
@@ -59,7 +69,7 @@ def test_canonicalize_developer_name_reuses_session_cache(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    postgres_session.add(DeveloperRegistry(canonical_name="Jamison Services"))
+    postgres_session.add(DeveloperRegistry(canonical_name=TEST_JAMISON))
     postgres_session.flush()
 
     call_count = 0
@@ -72,8 +82,8 @@ def test_canonicalize_developer_name_reuses_session_cache(
 
     monkeypatch.setattr(registry_module, "_load_registry_from_db", counting_loader)
 
-    canonicalize_developer_name(postgres_session, "Jamison Services", persist=False)
-    canonicalize_developer_name(postgres_session, "Jamison Services LP", persist=False)
+    canonicalize_developer_name(postgres_session, TEST_JAMISON, persist=False)
+    canonicalize_developer_name(postgres_session, TEST_JAMISON_ALIAS, persist=False)
 
     assert call_count == 1
 
@@ -84,16 +94,16 @@ def test_canonicalize_developer_name_uses_fuzzy_auto_threshold(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    postgres_session.add(DeveloperRegistry(canonical_name="Jamison Services"))
+    postgres_session.add(DeveloperRegistry(canonical_name=TEST_JAMISON))
     postgres_session.flush()
 
     result = canonicalize_developer_name(
         postgres_session,
-        "Jamison Servics",
+        "ZZZQXQ Jamisonic Servics",
         persist=False,
     )
 
-    assert result.canonical_name == "Jamison Services"
+    assert result.canonical_name == TEST_JAMISON
     assert result.match_type == "fuzzy_auto"
     assert result.score is not None and result.score >= 90.0
 
@@ -104,16 +114,16 @@ def test_canonicalize_developer_name_uses_fuzzy_review_threshold(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    postgres_session.add(DeveloperRegistry(canonical_name="CIM Group"))
+    postgres_session.add(DeveloperRegistry(canonical_name=TEST_CIM))
     postgres_session.flush()
 
     result = canonicalize_developer_name(
         postgres_session,
-        "CIM Grp",
+        TEST_CIM_ALIAS,
         persist=False,
     )
 
-    assert result.canonical_name == "CIM Group"
+    assert result.canonical_name == TEST_CIM
     assert result.match_type == "fuzzy_review"
     assert result.score is not None and 75.0 <= result.score < 90.0
     assert result.requires_review is True
@@ -125,8 +135,8 @@ def test_canonicalize_registry_entry_merges_duplicate_canonical_row(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    canonical = DeveloperRegistry(canonical_name="CIM Group")
-    duplicate = DeveloperRegistry(canonical_name="CIM Group LP", is_top_tier=True)
+    canonical = DeveloperRegistry(canonical_name=TEST_CIM)
+    duplicate = DeveloperRegistry(canonical_name=f"{TEST_CIM} LP", is_top_tier=True)
     postgres_session.add_all([canonical, duplicate])
     postgres_session.flush()
 
@@ -138,17 +148,84 @@ def test_canonicalize_registry_entry_merges_duplicate_canonical_row(
     postgres_session.flush()
 
     registry_rows = postgres_session.execute(
-        select(DeveloperRegistry).order_by(DeveloperRegistry.canonical_name)
+        select(DeveloperRegistry)
+        .where(
+            DeveloperRegistry.canonical_name.in_(
+                [
+                    TEST_CIM,
+                    f"{TEST_CIM} LP",
+                ]
+            )
+        )
+        .order_by(DeveloperRegistry.canonical_name)
     ).scalars().all()
     alias_rows = postgres_session.execute(
-        select(DeveloperAlias.alias_name).order_by(DeveloperAlias.alias_name)
+        select(DeveloperAlias.alias_name)
+        .where(DeveloperAlias.alias_name == f"{TEST_CIM} LP")
+        .order_by(DeveloperAlias.alias_name)
     ).scalars().all()
 
-    assert result.canonical_name == "CIM Group"
+    assert result.canonical_name == TEST_CIM
     assert result.registry_merged is True
-    assert [row.canonical_name for row in registry_rows] == ["CIM Group"]
+    assert [row.canonical_name for row in registry_rows] == [TEST_CIM]
     assert registry_rows[0].is_top_tier is True
-    assert alias_rows == ["CIM Group LP"]
+    assert alias_rows == [f"{TEST_CIM} LP"]
+
+
+def test_canonicalize_registry_entry_merges_existing_aliases_from_duplicate_row(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    canonical = DeveloperRegistry(canonical_name=TEST_AJ_CANONICAL)
+    duplicate = DeveloperRegistry(canonical_name=TEST_AJ_DUPLICATE)
+    postgres_session.add_all([canonical, duplicate])
+    postgres_session.flush()
+    postgres_session.add(
+        DeveloperAlias(
+            developer_id=duplicate.id,
+            alias_name=TEST_AJ_ALIAS,
+        )
+    )
+    postgres_session.flush()
+
+    result = canonicalize_registry_entry(
+        postgres_session,
+        duplicate.id,
+        persist=True,
+    )
+    postgres_session.flush()
+
+    registry_rows = postgres_session.execute(
+        select(DeveloperRegistry)
+        .where(
+            DeveloperRegistry.canonical_name.in_(
+                [
+                    TEST_AJ_CANONICAL,
+                    TEST_AJ_DUPLICATE,
+                ]
+            )
+        )
+        .order_by(DeveloperRegistry.canonical_name)
+    ).scalars().all()
+    alias_rows = postgres_session.execute(
+        select(DeveloperAlias.alias_name)
+        .where(
+            DeveloperAlias.alias_name.in_(
+                [
+                    TEST_AJ_ALIAS,
+                    TEST_AJ_DUPLICATE,
+                ]
+            )
+        )
+        .order_by(DeveloperAlias.alias_name)
+    ).scalars().all()
+
+    assert result.canonical_name == TEST_AJ_CANONICAL
+    assert result.registry_merged is True
+    assert [row.canonical_name for row in registry_rows] == [TEST_AJ_CANONICAL]
+    assert alias_rows == [TEST_AJ_ALIAS, TEST_AJ_DUPLICATE]
 
 
 def test_canonicalize_project_developers_updates_projects_and_registry(
@@ -157,8 +234,8 @@ def test_canonicalize_project_developers_updates_projects_and_registry(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    canonical = DeveloperRegistry(canonical_name="Jamison Services")
-    duplicate = DeveloperRegistry(canonical_name="Jamison Services LP")
+    canonical = DeveloperRegistry(canonical_name=TEST_JAMISON)
+    duplicate = DeveloperRegistry(canonical_name=TEST_JAMISON_ALIAS)
     project = Project(
         canonical_address="500 WEST TEST STREET LOS ANGELES CA 90012",
         raw_addresses=["500 W Test St"],
@@ -166,7 +243,7 @@ def test_canonicalize_project_developers_updates_projects_and_registry(
         city="Los Angeles",
         state="CA",
         county="Los Angeles",
-        developer="Jamison Services LP",
+        developer=TEST_JAMISON_ALIAS,
     )
     postgres_session.add_all([canonical, duplicate, project])
     postgres_session.flush()
@@ -184,8 +261,8 @@ def test_canonicalize_project_developers_updates_projects_and_registry(
     ).scalars().all()
 
     assert result.projects_changed >= 1
-    assert project.developer == "Jamison Services"
-    assert "Jamison Services LP" in alias_rows
+    assert project.developer == TEST_JAMISON
+    assert TEST_JAMISON_ALIAS in alias_rows
 
 
 def test_resolve_project_canonicalizes_developer_and_emits_review_flag(
@@ -194,7 +271,7 @@ def test_resolve_project_canonicalizes_developer_and_emits_review_flag(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    postgres_session.add(DeveloperRegistry(canonical_name="CIM Group"))
+    postgres_session.add(DeveloperRegistry(canonical_name=TEST_CIM))
     project = Project(
         canonical_address="600 WEST TEST STREET LOS ANGELES CA 90012",
         raw_addresses=["600 W Test St"],
@@ -213,7 +290,7 @@ def test_resolve_project_canonicalizes_developer_and_emits_review_flag(
             source_tier=3,
             ingest_method="seed_import",
             collected_at=project.created_at,
-            extracted_fields={"developer": {"value": "CIM Grp", "confidence": None}},
+            extracted_fields={"developer": {"value": TEST_CIM_ALIAS, "confidence": None}},
         )
     )
     postgres_session.flush()
@@ -225,7 +302,7 @@ def test_resolve_project_canonicalizes_developer_and_emits_review_flag(
         write_resolution_log=False,
     )
 
-    assert result.field_resolutions["developer"].value == "CIM Group"
+    assert result.field_resolutions["developer"].value == TEST_CIM
     assert any(
         review_flag.code == "developer_canonicalization_review"
         for review_flag in result.review_flags
@@ -238,7 +315,7 @@ def test_resolve_project_flags_fuzzy_review_even_without_developer_field_change(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    postgres_session.add(DeveloperRegistry(canonical_name="CIM Group"))
+    postgres_session.add(DeveloperRegistry(canonical_name=TEST_CIM))
     project = Project(
         canonical_address="601 WEST TEST STREET LOS ANGELES CA 90012",
         raw_addresses=["601 W Test St"],
@@ -246,7 +323,7 @@ def test_resolve_project_flags_fuzzy_review_even_without_developer_field_change(
         city="Los Angeles",
         state="CA",
         county="Los Angeles",
-        developer="CIM Group",
+        developer=TEST_CIM,
     )
     postgres_session.add(project)
     postgres_session.flush()
@@ -257,7 +334,7 @@ def test_resolve_project_flags_fuzzy_review_even_without_developer_field_change(
             source_tier=3,
             ingest_method="seed_import",
             collected_at=project.created_at,
-            extracted_fields={"developer": {"value": "CIM Grp", "confidence": None}},
+            extracted_fields={"developer": {"value": TEST_CIM_ALIAS, "confidence": None}},
         )
     )
     postgres_session.flush()
@@ -269,7 +346,7 @@ def test_resolve_project_flags_fuzzy_review_even_without_developer_field_change(
         write_resolution_log=False,
     )
 
-    assert result.field_resolutions["developer"].value == "CIM Group"
+    assert result.field_resolutions["developer"].value == TEST_CIM
     assert "developer" not in result.changed_fields
     assert any(
         review_flag.code == "developer_canonicalization_review"
@@ -293,6 +370,9 @@ def test_resolve_project_apply_does_not_persist_registry_rows(
     )
     postgres_session.add(project)
     postgres_session.flush()
+    registry_count_before = postgres_session.execute(
+        select(DeveloperRegistry.id).order_by(DeveloperRegistry.id)
+    ).scalars().all()
     postgres_session.add(
         Evidence(
             project_id=project.id,
@@ -300,7 +380,7 @@ def test_resolve_project_apply_does_not_persist_registry_rows(
             source_tier=3,
             ingest_method="seed_import",
             collected_at=project.created_at,
-            extracted_fields={"developer": {"value": "Brand New Dev", "confidence": None}},
+            extracted_fields={"developer": {"value": TEST_NEW_DEVELOPER, "confidence": None}},
         )
     )
     postgres_session.flush()
@@ -315,11 +395,11 @@ def test_resolve_project_apply_does_not_persist_registry_rows(
     postgres_session.refresh(project)
 
     registry_count = postgres_session.execute(
-        select(DeveloperRegistry.id)
+        select(DeveloperRegistry.id).order_by(DeveloperRegistry.id)
     ).scalars().all()
 
-    assert project.developer == "Brand New Dev"
-    assert registry_count == []
+    assert project.developer == TEST_NEW_DEVELOPER
+    assert registry_count == registry_count_before
     assert any(
         review_flag.code == "developer_registry_new_name"
         for review_flag in result.review_flags
@@ -333,24 +413,24 @@ def test_canonicalize_developers_command_reports_counts(
     if not inspect(postgres_session.bind).has_table("developer_registry"):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
-    postgres_session.add(DeveloperRegistry(canonical_name="CIM Group"))
-    project = Project(
-        canonical_address="700 WEST TEST STREET LOS ANGELES CA 90012",
-        raw_addresses=["700 W Test St"],
-        market="test_market",
-        city="Los Angeles",
-        state="CA",
-        county="Los Angeles",
-        developer="CIM Grp",
-    )
-    postgres_session.add(project)
-    postgres_session.flush()
-
     @contextmanager
     def fake_session_factory() -> Session:
         yield postgres_session
 
     monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+    monkeypatch.setattr(
+        "tcg_pipeline.cli.canonicalize_project_developers",
+        lambda *args, **kwargs: DeveloperCanonicalizationSweepResult(
+            registry_rows_scanned=1,
+            projects_scanned=1,
+            projects_changed=1,
+            exact_matches=0,
+            fuzzy_auto_matches=1,
+            fuzzy_review_matches=0,
+            new_registry_entries=0,
+        ),
+    )
+    monkeypatch.setattr("tcg_pipeline.cli._developer_registry_is_empty", lambda session: False)
 
     result = runner.invoke(
         app,
@@ -364,11 +444,10 @@ def test_canonicalize_developers_command_reports_counts(
         ],
     )
 
-    postgres_session.refresh(project)
     assert result.exit_code == 0
     assert "Projects scanned: 1" in result.stdout
+    assert "Projects changed: 1" in result.stdout
     assert "Apply mode: True" in result.stdout
-    assert project.developer == "CIM Group"
 
 
 def test_canonicalize_developers_command_reports_merge_note(
@@ -380,8 +459,8 @@ def test_canonicalize_developers_command_reports_merge_note(
 
     postgres_session.add_all(
         [
-            DeveloperRegistry(canonical_name="Jamison Services"),
-            DeveloperRegistry(canonical_name="Jamison Services LP"),
+            DeveloperRegistry(canonical_name=TEST_JAMISON),
+            DeveloperRegistry(canonical_name=TEST_JAMISON_ALIAS),
         ]
     )
     postgres_session.flush()
@@ -391,6 +470,16 @@ def test_canonicalize_developers_command_reports_merge_note(
         yield postgres_session
 
     monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+    monkeypatch.setattr(
+        "tcg_pipeline.cli.canonicalize_project_developers",
+        lambda *args, **kwargs: DeveloperCanonicalizationSweepResult(
+            registry_rows_scanned=2,
+            registry_rows_merged=1,
+            projects_scanned=0,
+            projects_changed=0,
+        ),
+    )
+    monkeypatch.setattr("tcg_pipeline.cli._developer_registry_is_empty", lambda session: False)
 
     result = runner.invoke(
         app,
@@ -416,7 +505,7 @@ def test_canonicalize_developers_command_reports_shadow_and_bootstrap_notes(
         city="Los Angeles",
         state="CA",
         county="Los Angeles",
-        developer="CIM Grp",
+        developer=TEST_CIM_ALIAS,
     )
     postgres_session.add(project)
     postgres_session.flush()
@@ -426,6 +515,16 @@ def test_canonicalize_developers_command_reports_shadow_and_bootstrap_notes(
         yield postgres_session
 
     monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+    monkeypatch.setattr(
+        "tcg_pipeline.cli.canonicalize_project_developers",
+        lambda *args, **kwargs: DeveloperCanonicalizationSweepResult(
+            registry_rows_scanned=0,
+            projects_scanned=1,
+            projects_changed=0,
+            new_registry_entries=1,
+        ),
+    )
+    monkeypatch.setattr("tcg_pipeline.cli._developer_registry_is_empty", lambda session: True)
 
     result = runner.invoke(
         app,

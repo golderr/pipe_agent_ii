@@ -707,7 +707,9 @@ def test_persist_collected_records_reviews_resolved_developer_change(
 def test_persist_collected_records_flags_fuzzy_developer_review_without_field_delta(
     postgres_session: Session,
 ) -> None:
-    postgres_session.add(DeveloperRegistry(canonical_name="CIM Group"))
+    canonical_name = "ZZZQXQ Cimmer Group"
+    raw_name = "ZZZQXQ C1mmer Grp"
+    postgres_session.add(DeveloperRegistry(canonical_name=canonical_name))
     project = Project(
         canonical_address="8801 WEST EXAMPLE BOULEVARD LOS ANGELES CA 90036",
         raw_addresses=["8801 W Example Blvd"],
@@ -715,7 +717,7 @@ def test_persist_collected_records_flags_fuzzy_developer_review_without_field_de
         city="Los Angeles",
         state="CA",
         county="Los Angeles",
-        developer="CIM Group",
+        developer=canonical_name,
         date_delivery=date(date.today().year + 6, 7, 1),
     )
     postgres_session.add(project)
@@ -726,7 +728,7 @@ def test_persist_collected_records_flags_fuzzy_developer_review_without_field_de
         source_record_id="CST-REVIEW-DEV-2",
         raw_payload={"PropertyID": "CST-REVIEW-DEV-2"},
         canonical_address="8801 WEST EXAMPLE BOULEVARD LOS ANGELES CA 90036",
-        mapped_fields={"developer": "CIM Grp"},
+        mapped_fields={"developer": raw_name},
         source_row_hash="developer-review-fuzzy-hash",
     )
 
@@ -750,17 +752,21 @@ def test_persist_collected_records_flags_fuzzy_developer_review_without_field_de
         )
     ).scalar_one()
 
-    assert project.developer == "CIM Group"
+    assert project.developer == canonical_name
     assert result.status_change_review_items == 1
     assert review_item.payload["changes"] == []
-    assert {
-        "code": "developer_canonicalization_review",
-        "message": (
-            "Developer 'CIM Grp' was auto-canonicalized to 'CIM Group' "
-            "with fuzzy score 87.5. Review the alias."
+    matching_flag = next(
+        (
+            review_flag
+            for review_flag in review_item.payload["review_flags"]
+            if review_flag["code"] == "developer_canonicalization_review"
         ),
-        "priority": "medium",
-    } in review_item.payload["review_flags"]
+        None,
+    )
+    assert matching_flag is not None
+    assert matching_flag["priority"] == "medium"
+    assert raw_name in matching_flag["message"]
+    assert canonical_name in matching_flag["message"]
     assert alias_rows == []
 
 
