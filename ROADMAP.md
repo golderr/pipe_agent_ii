@@ -151,9 +151,9 @@ Source → Collector → RawRecord → match_raw_record()
 
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
-| A.1 | Run `backfill_evidence.py --dry-run` against production DB | `not_started` | Check counts: PSR evidence rows, Pipedream snapshots, skipped duplicates. Verify no errors. |
+| A.1 | Run `backfill_evidence.py --dry-run` against production DB | `done` | 2026-04-22: Dry-run succeeded on live DB. Would insert 1520 PSR evidence rows + 572 Pipedream snapshots, skip 572 Pipedream PSRs, 0 duplicate skips. Preflight found 2 existing orphan evidence rows, neither matched a current PSR. |
 | A.2 | Run `backfill_evidence.py` (commit mode) | `not_started` | Depends on A.1 passing. |
-| A.3 | Run `backfill_developers.py --dry-run` against production DB | `not_started` | Check developer registry row counts. |
+| A.3 | Run `backfill_developers.py --dry-run` against production DB | `done` | 2026-04-22: Dry-run succeeded on live DB. Would insert 1 missing registry row (`Helio / UCLA`) and skip 313 existing developer names. |
 | A.4 | Run `backfill_developers.py` (commit mode) | `not_started` | Depends on A.3 passing. |
 | A.5 | Run `resolve-all --market los_angeles` (shadow mode) | `not_started` | Compare resolution engine output to current project values. Log discrepancies. Do NOT apply yet. |
 | A.6 | Review resolution discrepancies, tune if needed | `not_started` | Manually inspect the discrepancy log. Are the resolved values more correct than current? Any systematic errors? |
