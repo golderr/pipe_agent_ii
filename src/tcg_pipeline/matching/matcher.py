@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.collectors.base import RawRecord
@@ -33,12 +33,16 @@ def match_raw_record(
     market: str,
     raw_record: RawRecord,
 ) -> MatchResult:
-    source_record_match = session.execute(
-        select(ProjectSourceRecord.project_id).where(
-            ProjectSourceRecord.source_name == raw_record.source_name,
-            ProjectSourceRecord.source_record_id == raw_record.source_record_id,
+    source_record_match = (
+        session.execute(
+            select(ProjectSourceRecord.project_id).where(
+                ProjectSourceRecord.source_name == raw_record.source_name,
+                ProjectSourceRecord.source_record_id == raw_record.source_record_id,
+            )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
     if source_record_match is not None:
         return MatchResult(
             project_id=source_record_match,
@@ -105,13 +109,54 @@ def _match_address(session: Session, *, market: str, raw_record: RawRecord) -> M
     if not raw_record.canonical_address:
         return None
 
-    matched_project_ids = session.execute(
-        select(Project.id).where(
-            Project.market == market,
-            Project.canonical_address == raw_record.canonical_address,
-        )
-    ).scalars().all()
+    exact_matches = _load_address_matches(
+        session,
+        market=market,
+        canonical_address=raw_record.canonical_address,
+    )
+    exact_result = _build_address_match_result(exact_matches)
+    if exact_result is not None:
+        return exact_result
 
+    if _canonical_address_has_postal_code(raw_record.canonical_address):
+        return None
+
+    zip_tolerant_matches = _load_address_matches(
+        session,
+        market=market,
+        canonical_address=raw_record.canonical_address,
+        allow_postal_code_suffix=True,
+    )
+    return _build_address_match_result(zip_tolerant_matches)
+
+
+def _load_address_matches(
+    session: Session,
+    *,
+    market: str,
+    canonical_address: str,
+    allow_postal_code_suffix: bool = False,
+) -> list[uuid.UUID]:
+    address_filter = Project.canonical_address == canonical_address
+    if allow_postal_code_suffix:
+        address_filter = or_(
+            address_filter,
+            Project.canonical_address.like(f"{canonical_address} %"),
+        )
+
+    return (
+        session.execute(
+            select(Project.id).where(
+                Project.market == market,
+                address_filter,
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _build_address_match_result(matched_project_ids: list[uuid.UUID]) -> MatchResult | None:
     unique_matches = sorted(set(matched_project_ids))
     if len(unique_matches) == 1:
         return MatchResult(
@@ -127,6 +172,11 @@ def _match_address(session: Session, *, market: str, raw_record: RawRecord) -> M
             candidate_project_ids=unique_matches,
         )
     return None
+
+
+def _canonical_address_has_postal_code(canonical_address: str) -> bool:
+    street_and_city, separator, suffix = canonical_address.rpartition(" ")
+    return bool(separator and street_and_city and suffix.isdigit() and len(suffix) == 5)
 
 
 def _coerce_identifier_type(identifier_type_name: str) -> IdentifierType | None:

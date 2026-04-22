@@ -21,7 +21,7 @@ def test_load_market_config_reads_ladbs_source_metadata() -> None:
     assert permits_source.jurisdiction == "city_of_los_angeles"
     assert permits_source.coverage_scope == "city"
     assert permits_source.matching_keys == ["permit_number", "apn", "canonical_address"]
-    assert permits_source.effective_where == "permit_type='Bldg-New'"
+    assert permits_source.effective_where == "permit_type = 'Bldg-New'"
 
     assert activity_source.adapter_name == "ladbs_permit_activity_pi9x_tg5x"
     assert activity_source.endpoint == "https://data.lacity.org/resource/pi9x-tg5x.json"
