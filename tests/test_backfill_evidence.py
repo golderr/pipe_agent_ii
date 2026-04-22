@@ -132,3 +132,73 @@ def test_backfill_evidence_is_rerunnable_without_duplicate_rows(
     assert len(rerun_rows) == 2
     assert rerun_result.inserted_source_record_rows == 0
     assert rerun_result.inserted_pipedream_snapshots == 0
+
+
+def test_backfill_source_record_evidence_skips_preexisting_orphan_duplicate(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("evidence"):
+        pytest.skip("Apply the evidence layer migration before running backfill persistence tests.")
+
+    project = Project(
+        canonical_address="7270 MANCHESTER AVENUE LOS ANGELES CA 90045",
+        raw_addresses=["7270 Manchester Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    source_record = ProjectSourceRecord(
+        project_id=project.id,
+        source_name="ladbs_permits",
+        source_record_id="11010-10000-02451",
+        source_created_at=datetime(2020, 5, 4, 9, 18, 9, 965000, tzinfo=UTC),
+        source_updated_at=datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC),
+        source_row_hash="abc123",
+        first_seen_at=datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC),
+        last_seen_at=datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC),
+        last_pulled_at=datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC),
+        raw_payload={"pcis_permit": "11010-10000-02451"},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2013-01-02",
+            "total_units": 260,
+        },
+    )
+    postgres_session.add(source_record)
+    postgres_session.flush()
+
+    postgres_session.add(
+        Evidence(
+            project_id=None,
+            source_type="ladbs_permit",
+            source_tier=1,
+            ingest_method="scheduled_collector",
+            source_record_id="11010-10000-02451",
+            collected_at=datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC),
+            evidence_date=date(2013, 1, 2),
+            raw_data={"pcis_permit": "11010-10000-02451"},
+            raw_data_hash="abc123",
+            extracted_fields={
+                "status_evidence_type": {
+                    "value": "building_permit_issued",
+                    "confidence": None,
+                },
+                "status_evidence_date": {"value": "2013-01-02", "confidence": None},
+                "total_units": {"value": 260, "confidence": None},
+            },
+        )
+    )
+    postgres_session.flush()
+
+    result = _backfill_source_record_evidence(postgres_session, result=BackfillEvidenceResult())
+    postgres_session.flush()
+
+    evidence_rows = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == "11010-10000-02451")
+    ).scalars().all()
+    assert len(evidence_rows) == 1
+    assert result.skipped_duplicates >= 1

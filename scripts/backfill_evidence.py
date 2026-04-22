@@ -268,7 +268,37 @@ def _evidence_exists(
     raw_data_hash: str,
 ) -> bool:
     # The partial unique index on evidence protects the common non-null source_record_id path.
-    # This existence check keeps reruns idempotent and also covers the rarer null-id cases.
+    # This existence check keeps reruns idempotent and also treats pre-existing orphan
+    # evidence as duplicates when the source row is already known.
+    if _evidence_exists_for_project(
+        session,
+        project_id=project_id,
+        source_type=source_type,
+        source_record_id=source_record_id,
+        raw_data_hash=raw_data_hash,
+    ):
+        return True
+
+    if project_id is not None and source_record_id is not None:
+        return _evidence_exists_for_project(
+            session,
+            project_id=None,
+            source_type=source_type,
+            source_record_id=source_record_id,
+            raw_data_hash=raw_data_hash,
+        )
+
+    return False
+
+
+def _evidence_exists_for_project(
+    session: Session,
+    *,
+    project_id,
+    source_type: str,
+    source_record_id: str | None,
+    raw_data_hash: str,
+) -> bool:
     with session.no_autoflush:
         statement = select(Evidence.id).where(
             Evidence.source_type == source_type,

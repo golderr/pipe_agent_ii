@@ -104,6 +104,7 @@ def apply_override(
     overrides: dict[str, Any] | None,
     *,
     transform_value=None,
+    source_priority: dict[str, int] | None = None,
 ) -> FieldResolution:
     if not overrides or field_name not in overrides:
         return candidate
@@ -115,7 +116,11 @@ def apply_override(
 
     mode = override_payload.get("mode") or "sticky"
     baseline = override_payload.get("baseline")
-    if mode == "until_newer_evidence" and _candidate_is_newer(candidate, baseline):
+    if mode == "until_newer_evidence" and _candidate_is_newer(
+        candidate,
+        baseline,
+        source_priority=source_priority,
+    ):
         candidate.metadata = dict(candidate.metadata)
         candidate.metadata.update(
             {
@@ -308,23 +313,39 @@ def _normalize_override_payload(override_payload: Any) -> dict[str, Any]:
     }
 
 
-def _candidate_is_newer(candidate: FieldResolution, baseline: Any) -> bool:
+def _candidate_is_newer(
+    candidate: FieldResolution,
+    baseline: Any,
+    *,
+    source_priority: dict[str, int] | None = None,
+) -> bool:
     if not isinstance(baseline, dict):
         return False
 
-    candidate_frontier = _normalize_frontier(candidate.metadata.get("evidence_frontier"))
-    baseline_frontier = _normalize_frontier(baseline)
+    candidate_frontier = _normalize_frontier(
+        candidate.metadata.get("evidence_frontier"),
+        source_priority=source_priority,
+    )
+    baseline_frontier = _normalize_frontier(
+        baseline,
+        source_priority=source_priority,
+    )
     if candidate_frontier is None or baseline_frontier is None:
         return False
     return candidate_frontier > baseline_frontier
 
 
-def _normalize_frontier(frontier: Any) -> tuple[int, float, int] | None:
+def _normalize_frontier(
+    frontier: Any,
+    *,
+    source_priority: dict[str, int] | None = None,
+) -> tuple[int, float, int, int] | None:
     if not isinstance(frontier, dict):
         return None
 
     evidence_date = parse_date_value(frontier.get("evidence_date"))
     collected_at = _parse_datetime_value(frontier.get("collected_at"))
+    source_type = _coerce_text(frontier.get("source_type"))
     source_tier_value = frontier.get("source_tier")
     try:
         source_tier = int(source_tier_value)
@@ -333,7 +354,13 @@ def _normalize_frontier(frontier: Any) -> tuple[int, float, int] | None:
 
     if evidence_date is None or collected_at is None:
         return None
-    return (evidence_date.toordinal(), collected_at.timestamp(), -source_tier)
+    priority = (source_priority or {}).get(source_type or "", 99)
+    return (
+        evidence_date.toordinal(),
+        collected_at.timestamp(),
+        -priority,
+        -source_tier,
+    )
 
 
 def _parse_datetime_value(value: Any) -> datetime | None:

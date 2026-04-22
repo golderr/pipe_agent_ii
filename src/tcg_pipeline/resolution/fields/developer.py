@@ -83,7 +83,13 @@ def resolve_developer(
         rule_applied=rule_applied,
         metadata=metadata,
     )
-    return apply_override("developer", candidate, overrides, transform_value=_coerce_text)
+    return apply_override(
+        "developer",
+        candidate,
+        overrides,
+        transform_value=_coerce_text,
+        source_priority=DEVELOPER_SOURCE_PRIORITY,
+    )
 
 
 def _coerce_text(value: Any) -> str | None:

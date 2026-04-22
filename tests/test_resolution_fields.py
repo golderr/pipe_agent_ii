@@ -158,6 +158,46 @@ def test_resolve_developer_prefers_newer_evidence_over_source_priority() -> None
     assert resolution.value == "Newer News Dev"
 
 
+def test_resolve_developer_override_yields_to_higher_priority_source_on_temporal_tie() -> None:
+    project = _build_project()
+    project.developer = "Current Dev"
+    tied_timestamp = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+    overrides = {
+        "developer": {
+            "value": "Reviewer Dev",
+            "set_by": "nate",
+            "set_at": "2026-04-22T10:00:00Z",
+            "note": "Manual correction.",
+            "mode": "until_newer_evidence",
+            "baseline": {
+                "evidence_date": "2026-04-01",
+                "collected_at": "2026-04-01T12:00:00+00:00",
+                "source_tier": 1,
+                "source_type": "ladbs_permit",
+                "evidence_ids": [],
+                "rule_applied": "most_recent_wins",
+            },
+        }
+    }
+    tied_news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 4, 1),
+        collected_at=tied_timestamp,
+        extracted_fields={"developer": {"value": "News Dev", "confidence": None}},
+    )
+
+    resolution = resolve_developer(
+        [tied_news_evidence],
+        project,
+        overrides=overrides,
+    )
+
+    assert resolution.value == "News Dev"
+    assert resolution.metadata["override_superseded"] is True
+    assert resolution.metadata["override_value"] == "Reviewer Dev"
+
+
 def test_sort_observations_prefers_collection_time_before_source_priority() -> None:
     same_day = date(2026, 4, 1)
     earlier_pipedream = _build_evidence(
