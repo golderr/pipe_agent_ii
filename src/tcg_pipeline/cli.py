@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
@@ -12,7 +14,18 @@ from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest
 from tcg_pipeline.collectors.factory import build_collector
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.connection import get_session_factory
-from tcg_pipeline.db.models import DeveloperRegistry, Project, ResolutionLog, SourceRun
+from tcg_pipeline.db.models import (
+    DeveloperRegistry,
+    DismissReason,
+    Project,
+    ResolutionLog,
+    SourceRun,
+)
+from tcg_pipeline.db.review_workflow import (
+    accept_review_item,
+    defer_review_item,
+    reject_review_item,
+)
 from tcg_pipeline.db.seed import (
     ingest_costar_workbooks,
     ingest_pipedream_workbooks,
@@ -354,6 +367,166 @@ def collect_source(
     typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
 
 
+@app.command("review-accept")
+def review_accept_command(
+    review_item_id: Annotated[uuid.UUID, typer.Option(help="Review item UUID.")],
+    actor: Annotated[str, typer.Option(help="Researcher or operator name.")],
+    project_id: Annotated[
+        uuid.UUID | None,
+        typer.Option(
+            help="Existing project UUID to accept into.",
+        ),
+    ] = None,
+    create_new: Annotated[
+        bool,
+        typer.Option(
+            help="Create a new project and accept the review item into it.",
+        ),
+    ] = False,
+    notes: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional decision notes.",
+        ),
+    ] = None,
+    field_overrides_json: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional JSON object to merge into project.researcher_override before resolve.",
+        ),
+    ] = None,
+    canonical_address: Annotated[
+        str | None,
+        typer.Option(
+            help="Required when --create-new and the review payload lacks canonical_address.",
+        ),
+    ] = None,
+    city: Annotated[
+        str | None,
+        typer.Option(
+            help="Required when --create-new and the review payload lacks city.",
+        ),
+    ] = None,
+    state: Annotated[
+        str | None,
+        typer.Option(
+            help="Required when --create-new and the review payload lacks state.",
+        ),
+    ] = None,
+    county: Annotated[
+        str | None,
+        typer.Option(
+            help="Required when --create-new and the review payload lacks county.",
+        ),
+    ] = None,
+    zip_code: Annotated[
+        str | None,
+        typer.Option(
+            "--zip",
+            help="Optional zip code for --create-new.",
+        ),
+    ] = None,
+    project_name: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional project name for --create-new.",
+        ),
+    ] = None,
+) -> None:
+    """Accept a discovery review item into an existing or newly created project."""
+    if create_new == (project_id is not None):
+        raise typer.BadParameter("Provide exactly one of --project-id or --create-new.")
+
+    field_overrides = _parse_json_mapping_option(
+        field_overrides_json,
+        option_name="--field-overrides-json",
+    )
+    new_project_data = {
+        "canonical_address": canonical_address,
+        "city": city,
+        "state": state,
+        "county": county,
+        "zip": zip_code,
+        "project_name": project_name,
+    }
+
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        result = accept_review_item(
+            session,
+            review_item_id=review_item_id,
+            actor=actor,
+            project_id=project_id,
+            create_new=create_new,
+            notes=notes,
+            field_overrides=field_overrides,
+            new_project_data=new_project_data,
+        )
+        session.commit()
+
+    typer.echo(f"Review item: {result.review_item_id}")
+    typer.echo(f"Action: {result.action.value}")
+    typer.echo(f"Project id: {result.project_id}")
+    typer.echo(f"Linked evidence rows: {result.linked_evidence_count}")
+    typer.echo(f"Source record created: {result.source_record_created}")
+    typer.echo(f"Source record updated: {result.source_record_updated}")
+    typer.echo(f"Identifiers inserted: {result.identifiers_inserted}")
+    typer.echo(f"Change log rows created: {result.change_log_entries_created}")
+
+
+@app.command("review-reject")
+def review_reject_command(
+    review_item_id: Annotated[uuid.UUID, typer.Option(help="Review item UUID.")],
+    actor: Annotated[str, typer.Option(help="Researcher or operator name.")],
+    notes: Annotated[
+        str | None,
+        typer.Option(help="Optional decision notes."),
+    ] = None,
+    reason: Annotated[
+        DismissReason,
+        typer.Option(help="Dismissal reason for discovery review items."),
+    ] = DismissReason.OTHER,
+) -> None:
+    """Reject a review item and dismiss future discovery resurfacing for that source record."""
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        result = reject_review_item(
+            session,
+            review_item_id=review_item_id,
+            actor=actor,
+            notes=notes,
+            reason=reason,
+        )
+        session.commit()
+
+    typer.echo(f"Review item: {result.review_item_id}")
+    typer.echo(f"Action: {result.action.value}")
+
+
+@app.command("review-defer")
+def review_defer_command(
+    review_item_id: Annotated[uuid.UUID, typer.Option(help="Review item UUID.")],
+    actor: Annotated[str, typer.Option(help="Researcher or operator name.")],
+    notes: Annotated[
+        str | None,
+        typer.Option(help="Optional decision notes."),
+    ] = None,
+) -> None:
+    """Defer a review item without linking or dismissing it."""
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        result = defer_review_item(
+            session,
+            review_item_id=review_item_id,
+            actor=actor,
+            notes=notes,
+        )
+        session.commit()
+
+    typer.echo(f"Review item: {result.review_item_id}")
+    typer.echo(f"Action: {result.action.value}")
+
+
 @app.command("resolve-all")
 def resolve_all_command(
     market: str | None = typer.Option(
@@ -552,6 +725,22 @@ def _parse_cli_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _parse_json_mapping_option(
+    value: str | None,
+    *,
+    option_name: str,
+) -> dict[str, object] | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"{option_name} must be valid JSON: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise typer.BadParameter(f"{option_name} must decode to a JSON object.")
+    return parsed
 
 
 def _echo_pipedream_import_summary(import_results: list[PipedreamImportResult]) -> None:

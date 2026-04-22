@@ -479,3 +479,36 @@ Shadow-mode canonicalization is intentional:
 - this reflects the resolver's computed output, not persisted registry / alias writes
 
 Downstream readers of `resolution_log` should treat shadow rows as "what the resolver would do," not proof that canonicalization side effects were committed.
+
+### 20. Review Decision Workflow and Evidence Relink
+
+The next backend step after Phase 4 is the review-decision workflow for discovery items.
+
+Decisions:
+
+- `NEW_CANDIDATE` and `POSSIBLE_MATCH` accept actions relink all orphan evidence rows for the same `(logical source_type, source_record_id)` where `project_id IS NULL`.
+- Acceptance can target either an existing project or a newly created project stub.
+- `POSSIBLE_MATCH` acceptance links to the reviewer-selected project only.
+- `ReviewDecision.field_overrides` are merged into `Project.researcher_override` before `resolve_project(apply=True)` so Tier 0 overrides apply on first resolve.
+- Acceptance synchronously re-runs `resolve_project()` in the same transaction.
+- Resolver-driven field writes from acceptance create `ChangeLog` rows with `change_type = RESEARCHER_CONFIRMED`.
+- Acceptance also upserts a `ProjectSourceRecord` cache row so future collector reruns can source-record-match immediately instead of reopening discovery.
+
+### 20a. Reject Semantics
+
+Reject uses `DismissedRecord`; evidence is preserved and remains immutable.
+
+Decisions:
+
+- Rejecting a discovery review item creates a `DismissedRecord` keyed by `(source_run.source_name, source_record_id)`.
+- Future collector runs still capture evidence for that source row, but they suppress new `NEW_CANDIDATE` / `POSSIBLE_MATCH` review items for dismissed keys.
+- This preserves the observation for future undismiss or audit workflows without re-cluttering active review queues.
+
+### 20b. Idempotency and Scope
+
+Decisions:
+
+- Only `OPEN` review items may mutate state.
+- Evidence relink only updates orphan rows (`project_id IS NULL`).
+- Reject is idempotent on the dismissed key; it should not create duplicate `DismissedRecord` rows.
+- This workflow pass targets discovery-item accept/reject/defer semantics. Status-change review acceptance remains a later follow-up.

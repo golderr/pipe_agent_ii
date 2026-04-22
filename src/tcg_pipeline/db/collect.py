@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.evidence import write_raw_record_evidence
 from tcg_pipeline.db.models import (
+    DismissedRecord,
     IdentifierType,
     Priority,
     Project,
@@ -333,6 +334,15 @@ def _create_unmatched_review_item(
     result: CollectPersistResult,
     create_new_candidates: bool,
 ) -> None:
+    if _is_dismissed_source_record(
+        session,
+        source_name=raw_record.source_name,
+        source_record_id=raw_record.source_record_id,
+    ):
+        if not match_result.candidate_project_ids:
+            result.suppressed_new_candidate_records += 1
+        return
+
     status_suggestion = _build_status_suggestion_for_unmatched_record(raw_record)
     if match_result.candidate_project_ids:
         item_type = ReviewItemType.POSSIBLE_MATCH
@@ -359,9 +369,14 @@ def _create_unmatched_review_item(
                 "match": _serialize_match_result(match_result),
                 "source_record_id": raw_record.source_record_id,
                 "canonical_address": raw_record.canonical_address,
+                "identifiers": _serialize_identifiers(raw_record.identifiers),
                 "mapped_fields": _serialize_payload(raw_record.mapped_fields),
                 "status_suggestion": _serialize_status_suggestion(status_suggestion),
                 "raw_payload": _serialize_payload(raw_record.raw_payload),
+                "source_row_id": raw_record.source_row_id,
+                "source_created_at": serialize_json_value(raw_record.source_created_at),
+                "source_updated_at": serialize_json_value(raw_record.source_updated_at),
+                "source_row_hash": raw_record.source_row_hash,
             },
         )
     )
@@ -418,6 +433,14 @@ def _serialize_change(change: DetectedChange) -> dict[str, Any]:
         "old_value": serialize_json_value(change.old_value),
         "new_value": serialize_json_value(change.new_value),
         "priority": change.priority.value,
+    }
+
+
+def _serialize_identifiers(identifiers: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {
+        str(key): [str(value) for value in values if value]
+        for key, values in identifiers.items()
+        if values
     }
 
 
@@ -519,6 +542,21 @@ def _source_updated_at_bounds(
     if not updated_at_values:
         return None, None
     return updated_at_values[0], updated_at_values[-1]
+
+
+def _is_dismissed_source_record(
+    session: Session,
+    *,
+    source_name: str,
+    source_record_id: str,
+) -> bool:
+    dismissed_record = session.execute(
+        select(DismissedRecord.id).where(
+            DismissedRecord.source == source_name,
+            DismissedRecord.source_record_id == source_record_id,
+        )
+    ).scalar_one_or_none()
+    return dismissed_record is not None
 
 
 def _coerce_text(value: Any) -> str | None:

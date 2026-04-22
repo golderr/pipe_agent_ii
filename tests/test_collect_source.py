@@ -743,7 +743,7 @@ def test_persist_collected_records_flags_fuzzy_developer_review_without_field_de
     postgres_session.refresh(project)
 
     alias_rows = postgres_session.execute(
-        select(DeveloperAlias.alias_name).order_by(DeveloperAlias.alias_name)
+        select(DeveloperAlias.alias_name).where(DeveloperAlias.alias_name == raw_name)
     ).scalars().all()
     review_item = postgres_session.execute(
         select(ReviewItem).where(
@@ -1031,17 +1031,19 @@ def test_persist_collected_records_inserts_permit_identifier_once_across_multipl
 def test_resolve_incremental_cursor_uses_max_source_updated_at(
     postgres_session: Session,
 ) -> None:
+    market = "cursor_test_market"
+    source_name = "ladbs_permits_cursor_test"
     postgres_session.add_all(
         [
             SourceRun(
-                market="los_angeles",
-                source_name="ladbs_permits",
+                market=market,
+                source_name=source_name,
                 run_timestamp=datetime(2026, 4, 15, 10, 0, tzinfo=UTC),
                 source_max_updated_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
             ),
             SourceRun(
-                market="los_angeles",
-                source_name="ladbs_permits",
+                market=market,
+                source_name=source_name,
                 run_timestamp=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
                 source_max_updated_at=datetime(2026, 4, 16, 9, 0, tzinfo=UTC),
             ),
@@ -1051,8 +1053,8 @@ def test_resolve_incremental_cursor_uses_max_source_updated_at(
 
     cursor = _resolve_incremental_cursor(
         postgres_session,
-        market="los_angeles",
-        source_name="ladbs_permits",
+        market=market,
+        source_name=source_name,
         overlap_hours=24,
     )
 
