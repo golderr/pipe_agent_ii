@@ -55,6 +55,7 @@ class CollectPersistResult:
     inserted_identifiers: int = 0
     new_candidate_review_items: int = 0
     suppressed_new_candidate_records: int = 0
+    dismissed_discovery_records_skipped: int = 0
     status_change_review_items: int = 0
     possible_match_review_items: int = 0
 
@@ -102,6 +103,15 @@ def persist_collected_records(
     for raw_record in raw_records:
         match_result = match_raw_record(session, market=market, raw_record=raw_record)
         if match_result.project_id is None:
+            if _is_dismissed_source_record(
+                session,
+                source_name=raw_record.source_name,
+                source_record_id=raw_record.source_record_id,
+            ):
+                result.dismissed_discovery_records_skipped += 1
+                if not match_result.candidate_project_ids:
+                    result.suppressed_new_candidate_records += 1
+                continue
             write_raw_record_evidence(
                 session,
                 raw_record=raw_record,

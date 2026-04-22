@@ -363,6 +363,10 @@ def collect_source(
         "Suppressed new candidate records: "
         f"{persist_result.suppressed_new_candidate_records}"
     )
+    typer.echo(
+        "Dismissed discovery records skipped: "
+        f"{persist_result.dismissed_discovery_records_skipped}"
+    )
     typer.echo(f"Status change review items: {persist_result.status_change_review_items}")
     typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
 
@@ -471,7 +475,15 @@ def review_accept_command(
     typer.echo(f"Source record created: {result.source_record_created}")
     typer.echo(f"Source record updated: {result.source_record_updated}")
     typer.echo(f"Identifiers inserted: {result.identifiers_inserted}")
+    typer.echo(f"Identifier conflicts: {len(result.identifier_conflicts)}")
+    for conflict in result.identifier_conflicts:
+        typer.echo(
+            "  "
+            f"{conflict.identifier_type.value}:{conflict.value} already belongs to "
+            f"{conflict.owner_project_id}"
+        )
     typer.echo(f"Change log rows created: {result.change_log_entries_created}")
+    typer.echo(f"Follow-up review items created: {result.follow_up_review_items_created}")
 
 
 @app.command("review-reject")

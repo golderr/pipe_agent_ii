@@ -205,6 +205,12 @@ def test_accept_review_item_links_all_orphan_evidence_and_upserts_source_record(
             ProjectSourceRecord.source_record_id == "permit-accept-1",
         )
     ).scalar_one()
+    follow_up_review_items = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == review_item.source_run_id,
+            ReviewItem.id != review_item.id,
+        )
+    ).scalars().all()
     review_decision = postgres_session.execute(
         select(ReviewDecision).where(ReviewDecision.review_item_id == review_item.id)
     ).scalar_one()
@@ -224,12 +230,26 @@ def test_accept_review_item_links_all_orphan_evidence_and_upserts_source_record(
     assert result.source_record_created is True
     assert result.source_record_updated is False
     assert result.identifiers_inserted == 1
+    assert result.follow_up_review_items_created == 1
+    assert result.identifier_conflicts == []
     assert review_item.status == ReviewItemStatus.ACCEPTED
     assert review_item.project_id == project.id
     assert review_decision.action == ReviewDecisionAction.ACCEPT
     assert identifier.project_id == project.id
     assert all(evidence.project_id == project.id for evidence in linked_rows)
     assert source_record.project_id == project.id
+    assert len(follow_up_review_items) == 1
+    assert follow_up_review_items[0].item_type == ReviewItemType.STATUS_CHANGE
+    assert follow_up_review_items[0].status == ReviewItemStatus.OPEN
+    assert follow_up_review_items[0].payload["origin"] == "post_accept_resolution"
+    assert {
+        "code": "permit_issued_requires_review",
+        "message": (
+            "Permit issued alone supports Approved, but requires researcher review "
+            "until corroborating construction evidence arrives."
+        ),
+        "priority": "high",
+    } in follow_up_review_items[0].payload["review_flags"]
     assert project.pipeline_status == PipelineStatus.APPROVED
     assert project.total_units == 120
     assert "pipeline_status" in change_log_fields
@@ -266,6 +286,87 @@ def test_accept_review_item_merges_field_overrides_before_resolve(
     assert project.researcher_override["total_units"]["value"] == 300
     assert project.researcher_override["total_units"]["set_by"] == "nate"
     assert project.researcher_override["total_units"]["note"] == "Researcher confirmed 300 units."
+
+
+def test_accept_review_item_raises_when_matching_evidence_belongs_to_another_project(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    target_project = _build_project("705 TARGET WAY LOS ANGELES CA 90012")
+    foreign_project = _build_project("706 FOREIGN WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([target_project, foreign_project])
+    postgres_session.flush()
+
+    _add_orphan_evidence(postgres_session, source_record_id="permit-conflict-1", count=1)
+    postgres_session.add(
+        Evidence(
+            project_id=foreign_project.id,
+            source_type="ladbs_permit",
+            source_tier=2,
+            ingest_method="scheduled_collector",
+            source_record_id="permit-conflict-1",
+            collected_at=datetime(2026, 4, 15, 12, 1, tzinfo=UTC),
+            evidence_date=date(2026, 4, 2),
+            raw_data={"pcis_permit": "permit-conflict-1", "version": "foreign"},
+            raw_data_hash="workflow-foreign-evidence-hash",
+            extracted_fields={
+                "total_units": {"value": 55, "confidence": None},
+            },
+        )
+    )
+    postgres_session.flush()
+    _, review_item = _add_discovery_review_item(
+        postgres_session,
+        source_record_id="permit-conflict-1",
+    )
+
+    with pytest.raises(ValueError, match="already linked to other project"):
+        accept_review_item(
+            postgres_session,
+            review_item_id=review_item.id,
+            actor="nate",
+            project_id=target_project.id,
+        )
+
+    orphan_rows = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.project_id.is_(None),
+            Evidence.source_record_id == "permit-conflict-1",
+        )
+    ).scalars().all()
+    assert len(orphan_rows) == 1
+
+
+def test_accept_review_item_raises_when_source_record_belongs_to_another_project(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    target_project = _build_project("707 TARGET PSR WAY LOS ANGELES CA 90012")
+    foreign_project = _build_project("708 FOREIGN PSR WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([target_project, foreign_project])
+    postgres_session.flush()
+
+    _add_orphan_evidence(postgres_session, source_record_id="permit-psr-conflict-1", count=1)
+    postgres_session.add(
+        ProjectSourceRecord(
+            project_id=foreign_project.id,
+            source_name="ladbs_permits",
+            source_record_id="permit-psr-conflict-1",
+        )
+    )
+    postgres_session.flush()
+    _, review_item = _add_discovery_review_item(
+        postgres_session,
+        source_record_id="permit-psr-conflict-1",
+    )
+
+    with pytest.raises(ValueError, match="source record ladbs_permits:permit-psr-conflict-1"):
+        accept_review_item(
+            postgres_session,
+            review_item_id=review_item.id,
+            actor="nate",
+            project_id=target_project.id,
+        )
 
 
 def test_accept_review_item_can_create_new_project_and_validate_possible_match_candidates(
@@ -312,6 +413,53 @@ def test_accept_review_item_can_create_new_project_and_validate_possible_match_c
     assert new_project.market == "los_angeles"
     assert new_project.pipeline_status == PipelineStatus.APPROVED
     assert new_project.total_units == 120
+
+
+def test_accept_review_item_surfaces_identifier_conflicts_without_failing_accept(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    existing_identifier_project = _build_project("709 EXISTING IDENTIFIER WAY LOS ANGELES CA 90012")
+    accepted_project = _build_project("710 ACCEPTED IDENTIFIER WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([existing_identifier_project, accepted_project])
+    postgres_session.flush()
+    postgres_session.add(
+        ProjectIdentifier(
+            project_id=existing_identifier_project.id,
+            identifier_type=IdentifierType.PERMIT_NUMBER,
+            value="permit-identifier-conflict-1",
+        )
+    )
+    postgres_session.flush()
+
+    _add_orphan_evidence(postgres_session, source_record_id="permit-identifier-conflict-1")
+    _, review_item = _add_discovery_review_item(
+        postgres_session,
+        source_record_id="permit-identifier-conflict-1",
+        identifiers={"permit_number": ["permit-identifier-conflict-1"]},
+    )
+
+    result = accept_review_item(
+        postgres_session,
+        review_item_id=review_item.id,
+        actor="nate",
+        project_id=accepted_project.id,
+    )
+    postgres_session.flush()
+
+    accepted_identifiers = postgres_session.execute(
+        select(ProjectIdentifier).where(
+            ProjectIdentifier.project_id == accepted_project.id,
+            ProjectIdentifier.identifier_type == IdentifierType.PERMIT_NUMBER,
+        )
+    ).scalars().all()
+
+    assert result.identifiers_inserted == 0
+    assert len(result.identifier_conflicts) == 1
+    assert result.identifier_conflicts[0].identifier_type == IdentifierType.PERMIT_NUMBER
+    assert result.identifier_conflicts[0].value == "permit-identifier-conflict-1"
+    assert result.identifier_conflicts[0].owner_project_id == existing_identifier_project.id
+    assert accepted_identifiers == []
 
 
 def test_accept_review_item_is_not_repeatable_once_resolved(
@@ -412,8 +560,9 @@ def test_reject_review_item_creates_dismissed_record_and_suppresses_future_revie
     assert persist_result.new_candidate_review_items == 0
     assert persist_result.possible_match_review_items == 0
     assert persist_result.suppressed_new_candidate_records == 1
+    assert persist_result.dismissed_discovery_records_skipped == 1
     assert follow_up_review_items == []
-    assert len(orphan_evidence) == 1
+    assert len(orphan_evidence) == 0
 
 
 def test_defer_review_item_marks_item_deferred(

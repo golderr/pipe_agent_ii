@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -27,6 +27,13 @@ from tcg_pipeline.db.models import (
     ReviewItemStatus,
     ReviewItemType,
     SourceRun,
+)
+from tcg_pipeline.ingesters._common import serialize_json_value
+from tcg_pipeline.matching.differ import (
+    DiffResult,
+    ReviewFlag,
+    diff_project_snapshots,
+    snapshot_project_for_diff,
 )
 from tcg_pipeline.resolution import ProjectResolutionResult, resolve_project
 from tcg_pipeline.resolution.engine import normalize_value_for_project
@@ -56,6 +63,19 @@ CHANGELOG_PRIORITY_BY_FIELD = {
 CHANGELOG_TRACKED_FIELDS = tuple(CHANGELOG_PRIORITY_BY_FIELD)
 
 
+@dataclass(frozen=True, slots=True)
+class IdentifierConflict:
+    identifier_type: IdentifierType
+    value: str
+    owner_project_id: uuid.UUID
+
+
+@dataclass(slots=True)
+class EvidenceLinkResult:
+    evidence_rows: list[Evidence] = field(default_factory=list)
+    linked_count: int = 0
+
+
 @dataclass(slots=True)
 class ReviewWorkflowResult:
     review_item_id: uuid.UUID
@@ -66,6 +86,8 @@ class ReviewWorkflowResult:
     source_record_updated: bool = False
     identifiers_inserted: int = 0
     change_log_entries_created: int = 0
+    follow_up_review_items_created: int = 0
+    identifier_conflicts: list[IdentifierConflict] = field(default_factory=list)
 
 
 def accept_review_item(
@@ -111,7 +133,8 @@ def accept_review_item(
         _validate_possible_match_choice(review_item, project.id)
 
     previous_values = _capture_project_values(project)
-    evidence_rows = _link_orphan_evidence(
+    previous_snapshot = snapshot_project_for_diff(project)
+    evidence_link = _link_orphan_evidence(
         session,
         project_id=project.id,
         source_type=source_type,
@@ -123,9 +146,9 @@ def accept_review_item(
         review_item=review_item,
         source_name=source_name,
         source_record_id=source_record_id,
-        evidence_rows=evidence_rows,
+        evidence_rows=evidence_link.evidence_rows,
     )
-    identifiers_inserted = _persist_review_identifiers(
+    identifiers_inserted, identifier_conflicts = _persist_review_identifiers(
         session,
         project=project,
         payload=payload,
@@ -163,6 +186,13 @@ def accept_review_item(
         resolution_result=resolution_result,
         timestamp=now,
     )
+    follow_up_review_items_created = _create_follow_up_review_item(
+        session,
+        project=project,
+        review_item=review_item,
+        previous_snapshot=previous_snapshot,
+        resolution_result=resolution_result,
+    )
 
     session.add(
         ReviewDecision(
@@ -182,11 +212,13 @@ def accept_review_item(
         review_item_id=review_item.id,
         action=ReviewDecisionAction.ACCEPT,
         project_id=project.id,
-        linked_evidence_count=len(evidence_rows),
+        linked_evidence_count=evidence_link.linked_count,
         source_record_created=source_record_created,
         source_record_updated=source_record_updated,
         identifiers_inserted=identifiers_inserted,
         change_log_entries_created=change_log_entries_created,
+        follow_up_review_items_created=follow_up_review_items_created,
+        identifier_conflicts=identifier_conflicts,
     )
 
 
@@ -383,7 +415,7 @@ def _link_orphan_evidence(
     project_id: uuid.UUID,
     source_type: str,
     source_record_id: str,
-) -> list[Evidence]:
+) -> EvidenceLinkResult:
     evidence_rows = (
         session.execute(
             select(Evidence)
@@ -396,10 +428,30 @@ def _link_orphan_evidence(
         .scalars()
         .all()
     )
+    conflicting_project_ids = sorted(
+        {
+            evidence.project_id
+            for evidence in evidence_rows
+            if evidence.project_id is not None and evidence.project_id != project_id
+        },
+        key=str,
+    )
+    if conflicting_project_ids:
+        formatted_ids = ", ".join(str(conflicting_id) for conflicting_id in conflicting_project_ids)
+        raise ValueError(
+            "Cannot accept review item because evidence for "
+            f"{source_type}:{source_record_id} is already linked to other project(s): "
+            f"{formatted_ids}."
+        )
+
+    relevant_rows: list[Evidence] = []
+    linked_count = 0
     for evidence in evidence_rows:
         if evidence.project_id is None:
             evidence.project_id = project_id
-    return evidence_rows
+            linked_count += 1
+        relevant_rows.append(evidence)
+    return EvidenceLinkResult(evidence_rows=relevant_rows, linked_count=linked_count)
 
 
 def _upsert_project_source_record(
@@ -417,6 +469,12 @@ def _upsert_project_source_record(
             ProjectSourceRecord.source_record_id == source_record_id,
         )
     ).scalar_one_or_none()
+    if source_record is not None and source_record.project_id != project.id:
+        raise ValueError(
+            "Cannot accept review item because source record "
+            f"{source_name}:{source_record_id} is already linked to project "
+            f"{source_record.project_id}."
+        )
 
     payload = _payload_mapping(review_item.payload)
     raw_payload = _payload_mapping(payload.get("raw_payload")) or _latest_raw_data(evidence_rows)
@@ -503,12 +561,13 @@ def _persist_review_identifiers(
     *,
     project: Project,
     payload: Mapping[str, Any],
-) -> int:
+) -> tuple[int, list[IdentifierConflict]]:
     identifiers = payload.get("identifiers")
     if not isinstance(identifiers, Mapping):
-        return 0
+        return 0, []
 
     inserted = 0
+    conflicts: list[IdentifierConflict] = []
     for identifier_type_name, values in identifiers.items():
         identifier_type = _coerce_identifier_type(identifier_type_name)
         if identifier_type is None or not isinstance(values, list):
@@ -524,6 +583,14 @@ def _persist_review_identifiers(
                 )
             ).scalar_one_or_none()
             if owner_project_id is not None:
+                if owner_project_id != project.id:
+                    conflicts.append(
+                        IdentifierConflict(
+                            identifier_type=identifier_type,
+                            value=value,
+                            owner_project_id=owner_project_id,
+                        )
+                    )
                 continue
             session.add(
                 ProjectIdentifier(
@@ -533,7 +600,7 @@ def _persist_review_identifiers(
                 )
             )
             inserted += 1
-    return inserted
+    return inserted, conflicts
 
 
 def _normalize_field_overrides(
@@ -609,11 +676,72 @@ def _write_accept_change_logs(
     return entries_created
 
 
+def _create_follow_up_review_item(
+    session: Session,
+    *,
+    project: Project,
+    review_item: ReviewItem,
+    previous_snapshot,
+    resolution_result: ProjectResolutionResult,
+) -> int:
+    if not resolution_result.review_flags:
+        return 0
+
+    payload = _payload_mapping(review_item.payload)
+    diff_result = diff_project_snapshots(
+        previous_snapshot,
+        snapshot_project_for_diff(project),
+        status_evidence_type=_status_evidence_type_from_resolution(resolution_result),
+        status_evidence_date=_status_evidence_date_from_resolution(resolution_result),
+        status_reason=_status_reason_from_resolution(resolution_result),
+        review_flags=list(resolution_result.review_flags),
+    )
+    if not diff_result.has_reviewable_changes:
+        return 0
+
+    session.add(
+        ReviewItem(
+            project_id=project.id,
+            source_run_id=review_item.source_run_id,
+            item_type=ReviewItemType.STATUS_CHANGE,
+            status=ReviewItemStatus.OPEN,
+            priority=_review_priority(diff_result),
+            payload={
+                "origin": "post_accept_resolution",
+                "source_review_item_id": str(review_item.id),
+                "match": payload.get("match"),
+                "source_record_id": payload.get("source_record_id"),
+                "canonical_address": payload.get("canonical_address") or project.canonical_address,
+                "mapped_fields": payload.get("mapped_fields"),
+                "changes": [_serialize_change(change) for change in diff_result.field_changes],
+                "review_flags": [
+                    _serialize_review_flag(review_flag) for review_flag in diff_result.review_flags
+                ],
+                "status_suggestion": _serialize_status_suggestion(diff_result.status_suggestion),
+            },
+        )
+    )
+    return 1
+
+
 def _capture_project_values(project: Project) -> dict[str, Any]:
     return {
         field_name: normalize_value_for_project(getattr(project, field_name))
         for field_name in CHANGELOG_TRACKED_FIELDS
     }
+
+
+def _review_priority(diff_result: DiffResult) -> Priority:
+    if any(review_flag.priority == Priority.HIGH for review_flag in diff_result.review_flags):
+        return Priority.HIGH
+    if (
+        diff_result.status_suggestion is not None
+        and diff_result.status_suggestion.priority == Priority.HIGH
+    ):
+        return Priority.HIGH
+    if any(change.priority == Priority.HIGH for change in diff_result.field_changes):
+        return Priority.HIGH
+    return Priority.MEDIUM
 
 
 def _find_dismissed_record(
@@ -655,6 +783,71 @@ def _latest_raw_data_hash(evidence_rows: list[Evidence]) -> str | None:
         if evidence.raw_data_hash:
             return evidence.raw_data_hash
     return None
+
+
+def _status_evidence_type_from_resolution(resolution_result: ProjectResolutionResult) -> str | None:
+    status_resolution = resolution_result.field_resolutions.get("pipeline_status")
+    if status_resolution is None:
+        return None
+    evidence_type = status_resolution.metadata.get("evidence_type")
+    if evidence_type is None:
+        return None
+    text = str(evidence_type).strip()
+    return text or None
+
+
+def _status_evidence_date_from_resolution(
+    resolution_result: ProjectResolutionResult,
+) -> date | None:
+    status_resolution = resolution_result.field_resolutions.get("pipeline_status")
+    if status_resolution is None:
+        return None
+    return status_resolution.evidence_date
+
+
+def _status_reason_from_resolution(resolution_result: ProjectResolutionResult) -> str | None:
+    status_resolution = resolution_result.field_resolutions.get("pipeline_status")
+    if status_resolution is None:
+        return None
+    review_reason = status_resolution.metadata.get("review_reason")
+    if review_reason is None:
+        return None
+    text = str(review_reason).strip()
+    return text or None
+
+
+def _serialize_change(change) -> dict[str, Any]:
+    return {
+        "field": change.field,
+        "old_value": serialize_json_value(change.old_value),
+        "new_value": serialize_json_value(change.new_value),
+        "priority": change.priority.value,
+    }
+
+
+def _serialize_review_flag(review_flag: ReviewFlag) -> dict[str, Any]:
+    return {
+        "code": review_flag.code,
+        "message": review_flag.message,
+        "priority": review_flag.priority.value,
+    }
+
+
+def _serialize_status_suggestion(suggestion) -> dict[str, Any] | None:
+    if suggestion is None:
+        return None
+    return {
+        "current_status": (
+            suggestion.current_status.value if suggestion.current_status is not None else None
+        ),
+        "suggested_status": suggestion.suggested_status.value,
+        "evidence_type": suggestion.evidence_type,
+        "evidence_date": serialize_json_value(suggestion.evidence_date),
+        "reason": suggestion.reason,
+        "priority": suggestion.priority.value,
+        "rule_code": suggestion.rule_code,
+        "proof_level": suggestion.proof_level,
+    }
 
 
 def _coerce_identifier_type(value: Any) -> IdentifierType | None:

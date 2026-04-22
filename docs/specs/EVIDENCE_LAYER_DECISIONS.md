@@ -512,3 +512,13 @@ Decisions:
 - Evidence relink only updates orphan rows (`project_id IS NULL`).
 - Reject is idempotent on the dismissed key; it should not create duplicate `DismissedRecord` rows.
 - This workflow pass targets discovery-item accept/reject/defer semantics. Status-change review acceptance remains a later follow-up.
+
+### 20c. Review Workflow Hardening
+
+Additional refinements after senior review:
+
+- Accept must fail fast if matching evidence rows already belong to a different project. Review acceptance may link orphan evidence into the chosen project, but it must not silently mix evidence histories across projects.
+- Accept must also fail fast if an existing `ProjectSourceRecord` for the same `(source_name, source_record_id)` already belongs to another project. Silent PSR re-parenting is not allowed.
+- Once a discovery source record is dismissed, future unmatched collector runs skip both evidence insertion and review-item creation for that source record. Dismissed discoveries should not keep accumulating orphan evidence rows over time.
+- Identifier conflicts discovered during accept are surfaced to the operator; acceptance still succeeds, but conflicting identifiers are not re-attached away from their current owning project.
+- If accept-triggered `resolve_project()` emits review flags (for example permit-issued-alone or unit-split mismatch), the workflow creates a follow-up `STATUS_CHANGE` review item so the reviewer sees that additional researcher attention is still required after acceptance.
