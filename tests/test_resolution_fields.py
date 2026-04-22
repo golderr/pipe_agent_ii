@@ -10,6 +10,7 @@ from tcg_pipeline.db.models import (
     ProductType,
     Project,
 )
+from tcg_pipeline.resolution.fields import iter_field_observations, sort_observations
 from tcg_pipeline.resolution.fields.age_restriction import resolve_age_restriction
 from tcg_pipeline.resolution.fields.delivery_year import resolve_delivery_year
 from tcg_pipeline.resolution.fields.developer import resolve_developer
@@ -35,13 +36,15 @@ def _build_evidence(
     source_tier: int,
     evidence_date: date,
     extracted_fields: dict[str, dict[str, object]],
+    collected_at: datetime | None = None,
 ) -> Evidence:
     return Evidence(
         id=uuid.uuid4(),
         source_type=source_type,
         source_tier=source_tier,
         ingest_method="seed_import",
-        collected_at=datetime.combine(evidence_date, datetime.min.time(), tzinfo=UTC),
+        collected_at=collected_at
+        or datetime.combine(evidence_date, datetime.min.time(), tzinfo=UTC),
         evidence_date=evidence_date,
         extracted_fields=extracted_fields,
     )
@@ -155,6 +158,37 @@ def test_resolve_developer_prefers_newer_evidence_over_source_priority() -> None
     assert resolution.value == "Newer News Dev"
 
 
+def test_sort_observations_prefers_collection_time_before_source_priority() -> None:
+    same_day = date(2026, 4, 1)
+    earlier_pipedream = _build_evidence(
+        source_type="pipedream",
+        source_tier=1,
+        evidence_date=same_day,
+        collected_at=datetime(2026, 4, 1, 9, 0, tzinfo=UTC),
+        extracted_fields={"developer": {"value": "Earlier Pipedream Dev", "confidence": None}},
+    )
+    later_news = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=same_day,
+        collected_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+        extracted_fields={"developer": {"value": "Later News Dev", "confidence": None}},
+    )
+
+    observations = sort_observations(
+        [
+            *iter_field_observations([earlier_pipedream], "developer"),
+            *iter_field_observations([later_news], "developer"),
+        ],
+        source_priority={
+            "pipedream": 0,
+            "news_article": 1,
+        },
+    )
+
+    assert observations[0].value == "Later News Dev"
+
+
 def test_resolve_age_restriction_defaults_to_unknown_without_explicit_evidence() -> None:
     project = _build_project()
 
@@ -266,6 +300,80 @@ def test_resolve_delivery_year_keeps_existing_project_value_without_explicit_evi
     assert resolution.rule_applied == "no_explicit_delivery_evidence_keep_current"
 
 
+def test_resolve_delivery_year_override_sets_researcher_override_provenance() -> None:
+    project = _build_project()
+    project.date_delivery = date(2028, 6, 1)
+    overrides = {
+        "date_delivery": {
+            "value": "2029-01-01",
+            "set_by": "nate",
+            "set_at": "2026-04-22T11:00:00Z",
+            "note": "Developer confirmed revised delivery.",
+            "mode": "until_newer_evidence",
+            "baseline": {
+                "evidence_date": "2026-04-01",
+                "collected_at": "2026-04-01T00:00:00+00:00",
+                "source_tier": 1,
+                "source_type": "pipedream",
+                "evidence_ids": [],
+                "rule_applied": "explicit_delivery_date",
+            },
+        }
+    }
+
+    resolution = resolve_delivery_year(
+        [],
+        project,
+        resolved_status=PipelineStatus.APPROVED,
+        resolved_total_units=400,
+        overrides=overrides,
+    )
+
+    assert resolution.value == date(2029, 1, 1)
+    assert resolution.metadata["provenance"] == "researcher_override"
+    assert resolution.metadata["delivery_date_type"] == "researcher_override"
+
+
+def test_resolve_delivery_year_override_yields_to_newer_evidence_and_restores_provenance() -> None:
+    project = _build_project()
+    overrides = {
+        "date_delivery": {
+            "value": "2029-01-01",
+            "set_by": "nate",
+            "set_at": "2026-04-22T11:00:00Z",
+            "note": "Developer confirmed revised delivery.",
+            "mode": "until_newer_evidence",
+            "baseline": {
+                "evidence_date": "2026-04-01",
+                "collected_at": "2026-04-01T00:00:00+00:00",
+                "source_tier": 2,
+                "source_type": "news_article",
+                "evidence_ids": [],
+                "rule_applied": "explicit_delivery_date",
+            },
+        }
+    }
+    newer_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 5, 1),
+        extracted_fields={"date_delivery": {"value": "2030-06-01", "confidence": None}},
+    )
+
+    resolution = resolve_delivery_year(
+        [newer_evidence],
+        project,
+        resolved_status=PipelineStatus.APPROVED,
+        resolved_total_units=400,
+        overrides=overrides,
+    )
+
+    assert resolution.value == date(2030, 6, 1)
+    assert resolution.metadata["override_superseded"] is True
+    assert resolution.metadata["provenance"] == "explicit_government"
+    assert resolution.metadata["delivery_date_type"] == "explicit_government"
+
+
 def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> None:
     project = _build_project()
     project.pipeline_status = PipelineStatus.COMPLETE
@@ -282,3 +390,89 @@ def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> 
 
     assert resolution.value == PipelineStatus.COMPLETE
     assert resolution.rule_applied == "forward_only_preserve_current"
+
+
+def test_resolve_status_override_holds_until_newer_evidence() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.APPROVED
+    project.researcher_override = {
+        "pipeline_status": {
+            "value": PipelineStatus.PROPOSED.value,
+            "set_by": "nate",
+            "set_at": "2026-04-22T10:00:00Z",
+            "note": "Reject permit-only promotion.",
+            "mode": "until_newer_evidence",
+            "baseline": {
+                "evidence_date": "2026-03-15",
+                "collected_at": "2026-03-15T00:00:00+00:00",
+                "source_tier": 1,
+                "source_type": "ladbs_permit",
+                "evidence_ids": [],
+                "rule_applied": "highest_status_wins",
+            },
+        }
+    }
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    resolution = resolve_status([permit_evidence], project, overrides=project.researcher_override)
+
+    assert resolution.value == PipelineStatus.PROPOSED
+    assert resolution.rule_applied == "researcher_override_until_newer_evidence"
+
+
+def test_resolve_status_override_yields_to_newer_evidence() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.APPROVED
+    project.researcher_override = {
+        "pipeline_status": {
+            "value": PipelineStatus.PROPOSED.value,
+            "set_by": "nate",
+            "set_at": "2026-04-22T10:00:00Z",
+            "note": "Reject permit-only promotion.",
+            "mode": "until_newer_evidence",
+            "baseline": {
+                "evidence_date": "2026-03-15",
+                "collected_at": "2026-03-15T00:00:00+00:00",
+                "source_tier": 1,
+                "source_type": "ladbs_permit",
+                "evidence_ids": [],
+                "rule_applied": "highest_status_wins",
+            },
+        }
+    }
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+    inspection_evidence = _build_evidence(
+        source_type="ladbs_inspection",
+        source_tier=1,
+        evidence_date=date(2026, 4, 10),
+        extracted_fields={
+            "status_evidence_type": {
+                "value": "building_inspection_recorded",
+                "confidence": None,
+            },
+        },
+    )
+
+    resolution = resolve_status(
+        [permit_evidence, inspection_evidence],
+        project,
+        overrides=project.researcher_override,
+    )
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    assert resolution.metadata["override_superseded"] is True
+    assert resolution.metadata["override_value"] == PipelineStatus.PROPOSED.value

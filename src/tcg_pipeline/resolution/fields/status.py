@@ -7,10 +7,10 @@ from tcg_pipeline.db.models import Evidence, PipelineStatus, Project, StatusConf
 from tcg_pipeline.resolution.fields import (
     FieldObservation,
     FieldResolution,
+    apply_override,
     build_resolution,
     infer_confidence,
     iter_field_observations,
-    resolve_override,
 )
 
 STATUS_PROGRESS_ORDER = {
@@ -35,11 +35,6 @@ def resolve_status(
     *,
     overrides: dict[str, Any] | None = None,
 ) -> FieldResolution:
-    override = resolve_override("pipeline_status", overrides)
-    if override is not None:
-        override.value = _coerce_pipeline_status(override.value) or project.pipeline_status
-        return override
-
     explicit_observations = iter_field_observations(evidence_rows, "pipeline_status")
     tier1_explicit = [
         observation
@@ -51,7 +46,7 @@ def resolve_status(
     if tier1_explicit:
         stalled_observation = tier1_explicit[0]
         status = _coerce_pipeline_status(stalled_observation.value) or project.pipeline_status
-        return build_resolution(
+        candidate = build_resolution(
             "pipeline_status",
             status,
             confidence=StatusConfidence.HIGH,
@@ -59,13 +54,19 @@ def resolve_status(
             rule_applied="tier1_explicit_status",
             metadata={"source_type": stalled_observation.evidence.source_type},
         )
+        return apply_override(
+            "pipeline_status",
+            candidate,
+            overrides,
+            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
+        )
 
     direct_signal_observations = _status_signal_observations(evidence_rows)
     permit_observations = direct_signal_observations.get("building_permit_issued", [])
     inspection_observations = direct_signal_observations.get("building_inspection_recorded", [])
     cofo_observations = direct_signal_observations.get("certificate_of_occupancy_issued", [])
     if cofo_observations:
-        return build_resolution(
+        candidate = build_resolution(
             "pipeline_status",
             PipelineStatus.COMPLETE,
             confidence=StatusConfidence.HIGH,
@@ -75,6 +76,12 @@ def resolve_status(
                 "evidence_type": "certificate_of_occupancy_issued",
                 "source_type": cofo_observations[0].evidence.source_type,
             },
+        )
+        return apply_override(
+            "pipeline_status",
+            candidate,
+            overrides,
+            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
         )
 
     candidate_observations: dict[PipelineStatus, list[FieldObservation]] = {}
@@ -100,11 +107,17 @@ def resolve_status(
         )
 
     if not candidate_observations:
-        return build_resolution(
+        candidate = build_resolution(
             "pipeline_status",
             project.pipeline_status,
             confidence=StatusConfidence.LOW,
             rule_applied="no_status_evidence",
+        )
+        return apply_override(
+            "pipeline_status",
+            candidate,
+            overrides,
+            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
         )
 
     chosen_status, chosen_observations = max(
@@ -118,7 +131,7 @@ def resolve_status(
         and chosen_rank is not None
         and chosen_rank < current_rank
     ):
-        return build_resolution(
+        candidate = build_resolution(
             "pipeline_status",
             project.pipeline_status,
             confidence=StatusConfidence.LOW,
@@ -131,6 +144,12 @@ def resolve_status(
                 "requires_review": False,
             },
         )
+        return apply_override(
+            "pipeline_status",
+            candidate,
+            overrides,
+            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
+        )
     confidence = _status_confidence(
         chosen_status,
         chosen_observations,
@@ -142,7 +161,7 @@ def resolve_status(
         chosen_observations,
         inspection_observations=inspection_observations,
     )
-    return build_resolution(
+    candidate = build_resolution(
         "pipeline_status",
         chosen_status,
         confidence=confidence,
@@ -160,6 +179,12 @@ def resolve_status(
                 else None
             ),
         },
+    )
+    return apply_override(
+        "pipeline_status",
+        candidate,
+        overrides,
+        transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
     )
 
 

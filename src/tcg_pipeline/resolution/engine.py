@@ -185,6 +185,7 @@ def resolve_project(
     )
     review_flags = _build_review_flags(
         project,
+        field_resolutions=field_resolutions,
         status_resolution=status_resolution,
         total_units_resolution=total_units_resolution,
         affordable_units_resolution=affordable_units_resolution,
@@ -218,6 +219,10 @@ def resolve_project(
         previous_status = project.pipeline_status
         for field_name, resolution in field_resolutions.items():
             setattr(project, field_name, resolution.value)
+        project.researcher_override = _prune_superseded_overrides(
+            project.researcher_override,
+            field_resolutions,
+        )
         if previous_status != project.pipeline_status:
             status_source = status_resolution.metadata.get("source_type") or "resolution_engine"
             evidence_type = status_resolution.metadata.get("evidence_type")
@@ -279,6 +284,8 @@ def _normalize_researcher_overrides(raw_override: Any) -> dict[str, dict[str, An
                 "set_by": payload.get("set_by"),
                 "set_at": payload.get("set_at"),
                 "note": payload.get("note"),
+                "mode": payload.get("mode"),
+                "baseline": payload.get("baseline"),
             }
             continue
         normalized[field_name] = {
@@ -286,6 +293,8 @@ def _normalize_researcher_overrides(raw_override: Any) -> dict[str, dict[str, An
             "set_by": "legacy",
             "set_at": None,
             "note": None,
+            "mode": "sticky",
+            "baseline": None,
         }
     return normalized
 
@@ -303,6 +312,7 @@ def normalize_value_for_project(value: Any) -> Any:
 def _build_review_flags(
     project: Project,
     *,
+    field_resolutions: dict[str, FieldResolution],
     status_resolution: FieldResolution,
     total_units_resolution: FieldResolution,
     affordable_units_resolution: FieldResolution,
@@ -310,6 +320,7 @@ def _build_review_flags(
     developer_resolution: FieldResolution,
 ) -> list[ReviewFlag]:
     review_flags: list[ReviewFlag] = []
+    review_flags.extend(_override_superseded_review_flags(field_resolutions))
     if (
         project.pipeline_status != status_resolution.value
         and status_resolution.metadata.get("requires_review")
@@ -385,3 +396,51 @@ def _build_review_flags(
             )
 
     return review_flags
+
+
+def _override_superseded_review_flags(
+    field_resolutions: dict[str, FieldResolution],
+) -> list[ReviewFlag]:
+    priorities = {
+        "pipeline_status": Priority.HIGH,
+    }
+    review_flags: list[ReviewFlag] = []
+    for field_name, resolution in field_resolutions.items():
+        if not resolution.metadata.get("override_superseded"):
+            continue
+        previous_value = resolution.metadata.get("override_value")
+        set_by = resolution.metadata.get("override_set_by") or "researcher"
+        review_flags.append(
+            ReviewFlag(
+                code="researcher_override_superseded",
+                message=(
+                    f"Newer evidence superseded the reviewer-selected {field_name} value "
+                    f"{previous_value!r} set by {set_by}."
+                ),
+                priority=priorities.get(field_name, Priority.MEDIUM),
+            )
+        )
+    return review_flags
+
+
+def _prune_superseded_overrides(
+    raw_override: Any,
+    field_resolutions: dict[str, FieldResolution],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_override, dict):
+        return raw_override
+
+    superseded_fields = {
+        field_name
+        for field_name, resolution in field_resolutions.items()
+        if resolution.metadata.get("override_superseded")
+    }
+    if not superseded_fields:
+        return raw_override
+
+    remaining = {
+        field_name: payload
+        for field_name, payload in raw_override.items()
+        if field_name not in superseded_fields
+    }
+    return remaining or None

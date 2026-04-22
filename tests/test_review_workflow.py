@@ -11,6 +11,7 @@ from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.models import (
     ChangeLog,
+    ChangeType,
     DismissedRecord,
     DismissReason,
     Evidence,
@@ -32,6 +33,7 @@ from tcg_pipeline.db.review_workflow import (
     defer_review_item,
     reject_review_item,
 )
+from tcg_pipeline.resolution import resolve_project
 
 
 def _ensure_review_tables(postgres_session: Session) -> None:
@@ -286,6 +288,8 @@ def test_accept_review_item_merges_field_overrides_before_resolve(
     assert project.researcher_override["total_units"]["value"] == 300
     assert project.researcher_override["total_units"]["set_by"] == "nate"
     assert project.researcher_override["total_units"]["note"] == "Researcher confirmed 300 units."
+    assert project.researcher_override["total_units"]["mode"] == "until_newer_evidence"
+    assert project.researcher_override["total_units"]["baseline"]["evidence_date"] == "2026-04-01"
 
 
 def test_accept_review_item_raises_when_matching_evidence_belongs_to_another_project(
@@ -590,3 +594,152 @@ def test_defer_review_item_marks_item_deferred(
     assert result.action == ReviewDecisionAction.DEFER
     assert review_item.status == ReviewItemStatus.DEFERRED
     assert review_decision.action == ReviewDecisionAction.DEFER
+
+
+def test_reject_status_change_creates_expiring_override_and_newer_evidence_supersedes_it(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    project = _build_project(
+        "711 STATUS REJECT WAY LOS ANGELES CA 90012",
+        pipeline_status=PipelineStatus.PROPOSED,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    permit_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="permit-status-reject-1",
+        raw_payload={"pcis_permit": "permit-status-reject-1"},
+        canonical_address="711 STATUS REJECT WAY LOS ANGELES CA 90012",
+        identifiers={"permit_number": ["permit-status-reject-1"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-15",
+        },
+        source_row_hash="permit-status-reject-hash",
+    )
+    collect_result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[permit_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == collect_result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+        )
+    ).scalar_one()
+    assert project.pipeline_status == PipelineStatus.APPROVED
+
+    reject_result = reject_review_item(
+        postgres_session,
+        review_item_id=review_item.id,
+        actor="nate",
+        notes="Permit-only evidence is not enough.",
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    postgres_session.refresh(review_item)
+
+    review_decision = postgres_session.execute(
+        select(ReviewDecision).where(ReviewDecision.review_item_id == review_item.id)
+    ).scalar_one()
+    rejection_change = postgres_session.execute(
+        select(ChangeLog).where(
+            ChangeLog.review_item_id == review_item.id,
+            ChangeLog.change_type == ChangeType.RESEARCHER_REJECTED,
+        )
+    ).scalar_one()
+
+    assert reject_result.action == ReviewDecisionAction.REJECT
+    assert review_item.status == ReviewItemStatus.REJECTED
+    assert project.pipeline_status == PipelineStatus.PROPOSED
+    assert project.researcher_override["pipeline_status"]["value"] == PipelineStatus.PROPOSED.value
+    assert (
+        project.researcher_override["pipeline_status"]["mode"] == "until_newer_evidence"
+    )
+    assert (
+        project.researcher_override["pipeline_status"]["baseline"]["evidence_date"]
+        == "2026-03-15"
+    )
+    assert review_decision.field_overrides["pipeline_status"]["mode"] == "until_newer_evidence"
+    assert rejection_change.old_value == PipelineStatus.APPROVED.value
+    assert rejection_change.new_value == PipelineStatus.PROPOSED.value
+
+    same_evidence_resolution = resolve_project(
+        project.id,
+        postgres_session,
+        apply=True,
+        write_resolution_log=False,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    assert project.pipeline_status == PipelineStatus.PROPOSED
+    assert (
+        same_evidence_resolution.field_resolutions["pipeline_status"].rule_applied
+        == "researcher_override_until_newer_evidence"
+    )
+
+    inspection_record = RawRecord(
+        source_name="ladbs_inspections",
+        source_record_id="inspection-status-reject-1",
+        raw_payload={"address": "711 STATUS REJECT WAY"},
+        canonical_address="711 STATUS REJECT WAY LOS ANGELES CA 90012",
+        identifiers={"permit_number": ["permit-status-reject-1"]},
+        mapped_fields={
+            "status_evidence_type": "building_inspection_recorded",
+            "status_evidence_date": "2026-04-10",
+        },
+        source_row_hash="inspection-status-reject-hash",
+    )
+    inspection_collect_result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_inspections",
+        raw_records=[inspection_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    follow_up_review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == inspection_collect_result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+        )
+    ).scalar_one()
+
+    assert project.pipeline_status == PipelineStatus.UNDER_CONSTRUCTION
+    assert "pipeline_status" not in (project.researcher_override or {})
+    assert {
+        "code": "researcher_override_superseded",
+        "message": (
+            "Newer evidence superseded the reviewer-selected pipeline_status value "
+            "'Proposed' set by nate."
+        ),
+        "priority": "high",
+    } in follow_up_review_item.payload["review_flags"]
+
+    post_supersession_resolution = resolve_project(
+        project.id,
+        postgres_session,
+        apply=True,
+        write_resolution_log=False,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    assert "pipeline_status" not in (project.researcher_override or {})
+    assert not any(
+        review_flag.code == "researcher_override_superseded"
+        for review_flag in post_supersession_resolution.review_flags
+    )

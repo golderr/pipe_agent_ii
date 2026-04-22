@@ -37,6 +37,7 @@ from tcg_pipeline.matching.differ import (
 )
 from tcg_pipeline.resolution import ProjectResolutionResult, resolve_project
 from tcg_pipeline.resolution.engine import normalize_value_for_project
+from tcg_pipeline.resolution.fields import FieldResolution
 from tcg_pipeline.source_tiers import get_logical_source_type
 
 DISCOVERY_REVIEW_ITEM_TYPES = {
@@ -153,12 +154,20 @@ def accept_review_item(
         project=project,
         payload=payload,
     )
+    session.flush()
+    pre_override_resolution = resolve_project(
+        project.id,
+        session,
+        apply=False,
+        write_resolution_log=False,
+    )
 
     normalized_overrides = _normalize_field_overrides(
         field_overrides,
         actor=actor,
         note=notes,
         now=now,
+        candidate_resolutions=pre_override_resolution.field_resolutions,
     )
     if normalized_overrides:
         project.researcher_override = _merge_researcher_overrides(
@@ -234,6 +243,7 @@ def reject_review_item(
     now = datetime.now(UTC)
     source_run = review_item.source_run
     payload = _payload_mapping(review_item.payload)
+    generated_field_overrides = None
 
     if review_item.item_type in DISCOVERY_REVIEW_ITEM_TYPES and source_run is not None:
         source_record_id = _required_payload_text(payload, "source_record_id")
@@ -253,6 +263,57 @@ def reject_review_item(
                     notes=notes,
                 )
             )
+    elif (
+        review_item.item_type == ReviewItemType.STATUS_CHANGE
+        and review_item.project_id is not None
+    ):
+        project = session.get(Project, review_item.project_id)
+        if project is not None:
+            generated_field_overrides = _build_status_rejection_override(
+                session,
+                project=project,
+                review_item=review_item,
+                actor=actor,
+                note=notes,
+                now=now,
+            )
+            if generated_field_overrides:
+                previous_status = normalize_value_for_project(project.pipeline_status)
+                project.researcher_override = _merge_researcher_overrides(
+                    project.researcher_override,
+                    generated_field_overrides,
+                )
+                project.last_reviewed_by = actor
+                project.last_reviewed_date = now.date()
+                session.flush()
+                resolution_result = resolve_project(
+                    project.id,
+                    session,
+                    apply=True,
+                    write_resolution_log=True,
+                )
+                new_status = normalize_value_for_project(
+                    resolution_result.resolved_values.get("pipeline_status")
+                )
+                if previous_status != new_status:
+                    session.add(
+                        ChangeLog(
+                            project_id=project.id,
+                            review_item_id=review_item.id,
+                            timestamp=now,
+                            source=(
+                                source_run.source_name
+                                if source_run is not None
+                                else "review_workflow"
+                            ),
+                            field="pipeline_status",
+                            old_value=previous_status,
+                            new_value=new_status,
+                            change_type=ChangeType.RESEARCHER_REJECTED,
+                            priority=Priority.HIGH,
+                            reviewed_by=actor,
+                        )
+                    )
 
     session.add(
         ReviewDecision(
@@ -260,6 +321,7 @@ def reject_review_item(
             action=ReviewDecisionAction.REJECT,
             actor=actor,
             notes=notes,
+            field_overrides=generated_field_overrides,
         )
     )
     review_item.status = ReviewItemStatus.REJECTED
@@ -609,26 +671,25 @@ def _normalize_field_overrides(
     actor: str,
     note: str | None,
     now: datetime,
+    candidate_resolutions: Mapping[str, FieldResolution] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(field_overrides, Mapping):
         return {}
 
     normalized: dict[str, dict[str, Any]] = {}
     for field_name, payload in field_overrides.items():
-        if isinstance(payload, Mapping) and "value" in payload:
-            normalized[str(field_name)] = {
-                "value": serialize_json(payload.get("value")),
-                "set_by": _coerce_text(payload.get("set_by")) or actor,
-                "set_at": _coerce_text(payload.get("set_at")) or now.isoformat(),
-                "note": _coerce_text(payload.get("note")) or note,
-            }
-            continue
-        normalized[str(field_name)] = {
-            "value": serialize_json(payload),
-            "set_by": actor,
-            "set_at": now.isoformat(),
-            "note": note,
-        }
+        resolution = (
+            candidate_resolutions.get(str(field_name))
+            if isinstance(candidate_resolutions, Mapping)
+            else None
+        )
+        normalized[str(field_name)] = _build_override_entry(
+            raw_override=payload,
+            actor=actor,
+            note=note,
+            now=now,
+            candidate_resolution=resolution if isinstance(resolution, FieldResolution) else None,
+        )
     return normalized
 
 
@@ -724,6 +785,52 @@ def _create_follow_up_review_item(
     return 1
 
 
+def _build_status_rejection_override(
+    session: Session,
+    *,
+    project: Project,
+    review_item: ReviewItem,
+    actor: str,
+    note: str | None,
+    now: datetime,
+) -> dict[str, dict[str, Any]] | None:
+    payload = _payload_mapping(review_item.payload)
+    status_payload = _payload_mapping(payload.get("status_suggestion"))
+    suggested_status = (
+        _coerce_text(status_payload.get("suggested_status"))
+        or _status_change_new_value(payload)
+    )
+    current_status = (
+        _coerce_text(status_payload.get("current_status"))
+        or _status_change_old_value(payload)
+    )
+    if suggested_status is None or current_status is None:
+        return None
+
+    resolution_result = resolve_project(
+        project.id,
+        session,
+        apply=False,
+        write_resolution_log=False,
+    )
+    current_resolution = resolution_result.field_resolutions.get("pipeline_status")
+    if current_resolution is None:
+        return None
+    current_candidate = normalize_value_for_project(current_resolution.value)
+    if current_candidate != suggested_status:
+        return None
+
+    return {
+        "pipeline_status": _build_override_entry(
+            raw_override={"value": current_status},
+            actor=actor,
+            note=note,
+            now=now,
+            candidate_resolution=current_resolution,
+        )
+    }
+
+
 def _capture_project_values(project: Project) -> dict[str, Any]:
     return {
         field_name: normalize_value_for_project(getattr(project, field_name))
@@ -756,6 +863,55 @@ def _find_dismissed_record(
             DismissedRecord.source_record_id == source_record_id,
         )
     ).scalar_one_or_none()
+
+
+def _build_override_entry(
+    *,
+    raw_override: Any,
+    actor: str,
+    note: str | None,
+    now: datetime,
+    candidate_resolution: FieldResolution | None,
+) -> dict[str, Any]:
+    if isinstance(raw_override, Mapping) and "value" in raw_override:
+        override_value = serialize_json(raw_override.get("value"))
+        mode = _coerce_text(raw_override.get("mode")) or "until_newer_evidence"
+        baseline = raw_override.get("baseline")
+        if not isinstance(baseline, Mapping):
+            baseline = _baseline_for_resolution(candidate_resolution)
+        return {
+            "value": override_value,
+            "set_by": _coerce_text(raw_override.get("set_by")) or actor,
+            "set_at": _coerce_text(raw_override.get("set_at")) or now.isoformat(),
+            "note": _coerce_text(raw_override.get("note")) or note,
+            "mode": mode,
+            "baseline": baseline,
+        }
+
+    return {
+        "value": serialize_json(raw_override),
+        "set_by": actor,
+        "set_at": now.isoformat(),
+        "note": note,
+        "mode": "until_newer_evidence",
+        "baseline": _baseline_for_resolution(candidate_resolution),
+    }
+
+
+def _baseline_for_resolution(resolution: FieldResolution | None) -> dict[str, Any] | None:
+    if resolution is None:
+        return None
+    frontier = resolution.metadata.get("evidence_frontier")
+    if not isinstance(frontier, Mapping):
+        return None
+    return {
+        "evidence_date": serialize_json_value(frontier.get("evidence_date")),
+        "collected_at": serialize_json_value(frontier.get("collected_at")),
+        "source_tier": frontier.get("source_tier"),
+        "source_type": frontier.get("source_type"),
+        "evidence_ids": [str(evidence_id) for evidence_id in resolution.evidence_ids],
+        "rule_applied": resolution.rule_applied,
+    }
 
 
 def _latest_raw_data(evidence_rows: list[Evidence]) -> dict[str, Any]:
@@ -872,6 +1028,20 @@ def _required_payload_text(payload: Mapping[str, Any], field_name: str) -> str:
 
 def _optional_payload_text(payload: Mapping[str, Any], field_name: str) -> str | None:
     return _coerce_text(payload.get(field_name))
+
+
+def _status_change_old_value(payload: Mapping[str, Any]) -> str | None:
+    for change in payload.get("changes", []):
+        if isinstance(change, Mapping) and change.get("field") == "pipeline_status":
+            return _coerce_text(change.get("old_value"))
+    return None
+
+
+def _status_change_new_value(payload: Mapping[str, Any]) -> str | None:
+    for change in payload.get("changes", []):
+        if isinstance(change, Mapping) and change.get("field") == "pipeline_status":
+            return _coerce_text(change.get("new_value"))
+    return None
 
 
 def _coerce_text(value: Any) -> str | None:

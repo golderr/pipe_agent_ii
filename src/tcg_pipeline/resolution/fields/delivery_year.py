@@ -7,11 +7,11 @@ from typing import Any
 from tcg_pipeline.db.models import Evidence, PipelineStatus, Project, StatusConfidence
 from tcg_pipeline.resolution.fields import (
     FieldResolution,
+    apply_override,
     build_resolution,
     infer_confidence,
     iter_field_observations,
     parse_date_value,
-    resolve_override,
 )
 
 BASE_YEARS = {
@@ -31,18 +31,12 @@ def resolve_delivery_year(
     resolved_total_units: int | None,
     overrides: dict[str, Any] | None = None,
 ) -> FieldResolution:
-    override = resolve_override("date_delivery", overrides)
-    if override is not None:
-        override.value = parse_date_value(override.value)
-        override.metadata.setdefault("provenance", "researcher_override")
-        return override
-
     observations = iter_field_observations(evidence_rows, "date_delivery")
     if observations:
         resolved_date = parse_date_value(observations[0].value)
         if resolved_date is not None:
             provenance = _provenance_for_source_type(observations[0].evidence.source_type)
-            return build_resolution(
+            candidate = build_resolution(
                 "date_delivery",
                 resolved_date,
                 confidence=infer_confidence(observations),
@@ -58,9 +52,10 @@ def resolve_delivery_year(
                     ),
                 },
             )
+            return _apply_delivery_override(candidate, overrides)
 
     if project.date_delivery is not None:
-        return build_resolution(
+        candidate = build_resolution(
             "date_delivery",
             project.date_delivery,
             confidence=StatusConfidence.LOW,
@@ -74,12 +69,13 @@ def resolve_delivery_year(
                 ),
             },
         )
+        return _apply_delivery_override(candidate, overrides)
 
     estimated_date = _estimate_delivery_date(
         status=resolved_status,
         total_units=resolved_total_units,
     )
-    return build_resolution(
+    candidate = build_resolution(
         "date_delivery",
         estimated_date,
         confidence=StatusConfidence.LOW,
@@ -97,6 +93,30 @@ def resolve_delivery_year(
             },
         },
     )
+    return _apply_delivery_override(candidate, overrides)
+
+
+def _apply_delivery_override(
+    candidate: FieldResolution,
+    overrides: dict[str, Any] | None,
+) -> FieldResolution:
+    resolution = apply_override(
+        "date_delivery",
+        candidate,
+        overrides,
+        transform_value=parse_date_value,
+    )
+    if resolution.rule_applied.startswith("researcher_override"):
+        resolution.metadata = dict(resolution.metadata)
+        resolution.metadata["provenance"] = "researcher_override"
+        resolution.metadata["delivery_date_type"] = "researcher_override"
+        resolution.metadata.setdefault(
+            "description",
+            "Delivery date is currently set by a researcher override.",
+        )
+    return resolution
+
+
 def _estimate_delivery_date(
     *,
     status: PipelineStatus,

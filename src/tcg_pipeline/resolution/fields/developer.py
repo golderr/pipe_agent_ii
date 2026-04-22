@@ -8,10 +8,10 @@ from tcg_pipeline.db.models import Evidence, Project, StatusConfidence
 from tcg_pipeline.developer.registry import canonicalize_developer_name
 from tcg_pipeline.resolution.fields import (
     FieldResolution,
+    apply_override,
     build_resolution,
     infer_confidence,
     iter_field_observations,
-    resolve_override,
     sort_observations,
 )
 
@@ -34,23 +34,19 @@ def resolve_developer(
     persist_registry: bool = False,
     overrides: dict[str, Any] | None = None,
 ) -> FieldResolution:
-    override = resolve_override("developer", overrides)
-    if override is not None:
-        override.value = _coerce_text(override.value)
-        return override
-
     observations = iter_field_observations(evidence_rows, "developer")
     observations = sort_observations(
         observations,
         source_priority=DEVELOPER_SOURCE_PRIORITY,
     )
     if not observations:
-        return build_resolution(
+        candidate = build_resolution(
             "developer",
             project.developer,
             confidence=StatusConfidence.LOW,
             rule_applied="no_developer_evidence_keep_current",
         )
+        return apply_override("developer", candidate, overrides, transform_value=_coerce_text)
 
     raw_developer_name = _coerce_text(observations[0].value)
     developer_name = raw_developer_name
@@ -79,7 +75,7 @@ def resolve_developer(
         if canonicalization.match_type != "exact_canonical":
             rule_applied = "most_recent_wins_canonicalized"
 
-    return build_resolution(
+    candidate = build_resolution(
         "developer",
         developer_name,
         confidence=infer_confidence(observations),
@@ -87,6 +83,7 @@ def resolve_developer(
         rule_applied=rule_applied,
         metadata=metadata,
     )
+    return apply_override("developer", candidate, overrides, transform_value=_coerce_text)
 
 
 def _coerce_text(value: Any) -> str | None:

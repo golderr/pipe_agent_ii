@@ -45,6 +45,19 @@ def build_resolution(
     notes: list[str] | None = None,
 ) -> FieldResolution:
     observations = observations or []
+    metadata_payload = dict(metadata or {})
+    if observations:
+        winner = observations[0]
+        metadata_payload.setdefault(
+            "evidence_frontier",
+            {
+                "evidence_date": winner.effective_date,
+                "collected_at": winner.evidence.collected_at,
+                "source_tier": winner.evidence.source_tier,
+                "source_type": winner.evidence.source_type,
+                "evidence_ids": [observation.evidence.id for observation in observations],
+            },
+        )
     return FieldResolution(
         field_name=field_name,
         value=value,
@@ -52,7 +65,7 @@ def build_resolution(
         evidence_ids=[observation.evidence.id for observation in observations],
         rule_applied=rule_applied,
         evidence_date=observations[0].effective_date if observations else None,
-        metadata=metadata or {},
+        metadata=metadata_payload,
         notes=notes or [],
     )
 
@@ -85,6 +98,61 @@ def resolve_override(
     )
 
 
+def apply_override(
+    field_name: str,
+    candidate: FieldResolution,
+    overrides: dict[str, Any] | None,
+    *,
+    transform_value=None,
+) -> FieldResolution:
+    if not overrides or field_name not in overrides:
+        return candidate
+
+    override_payload = _normalize_override_payload(overrides[field_name])
+    override_value = override_payload["value"]
+    if transform_value is not None:
+        override_value = transform_value(override_value)
+
+    mode = override_payload.get("mode") or "sticky"
+    baseline = override_payload.get("baseline")
+    if mode == "until_newer_evidence" and _candidate_is_newer(candidate, baseline):
+        candidate.metadata = dict(candidate.metadata)
+        candidate.metadata.update(
+            {
+                "override_superseded": True,
+                "override_value": normalize_comparable(override_value),
+                "override_set_by": override_payload.get("set_by"),
+                "override_set_at": override_payload.get("set_at"),
+                "override_note": override_payload.get("note"),
+                "override_mode": mode,
+                "override_baseline": baseline,
+            }
+        )
+        candidate.notes = list(candidate.notes)
+        candidate.notes.append(
+            "Researcher override yielded because newer evidence won for this field."
+        )
+        return candidate
+
+    return build_resolution(
+        field_name,
+        override_value,
+        confidence=StatusConfidence.HIGH,
+        rule_applied=(
+            "researcher_override_until_newer_evidence"
+            if mode == "until_newer_evidence"
+            else "researcher_override"
+        ),
+        metadata={
+            "set_by": override_payload.get("set_by"),
+            "set_at": override_payload.get("set_at"),
+            "note": override_payload.get("note"),
+            "mode": mode,
+            "baseline": baseline,
+        },
+    )
+
+
 def iter_field_observations(
     evidence_rows: list[Evidence],
     field_name: str,
@@ -114,11 +182,13 @@ def sort_observations(
     *,
     source_priority: dict[str, int] | None = None,
 ) -> list[FieldObservation]:
+    # "Most recent wins" means event date first, then collection time, with
+    # source preference only breaking remaining temporal ties.
     return sorted(
         observations,
         key=lambda observation: (
             -_sort_ordinal(observation.effective_date),
-            -_sort_ordinal(observation.evidence.collected_at.date()),
+            -int(observation.evidence.collected_at.timestamp()),
             (source_priority or {}).get(observation.evidence.source_type, 99),
             observation.evidence.source_tier,
         ),
@@ -212,3 +282,69 @@ def _is_fresh(value: date, *, freshness_days: int) -> bool:
 
 def _sort_ordinal(value: date) -> int:
     return value.toordinal()
+
+
+def _normalize_override_payload(override_payload: Any) -> dict[str, Any]:
+    if isinstance(override_payload, dict) and "value" in override_payload:
+        return {
+            "value": override_payload.get("value"),
+            "set_by": override_payload.get("set_by"),
+            "set_at": override_payload.get("set_at"),
+            "note": override_payload.get("note"),
+            "mode": override_payload.get("mode"),
+            "baseline": (
+                override_payload.get("baseline")
+                if isinstance(override_payload.get("baseline"), dict)
+                else None
+            ),
+        }
+    return {
+        "value": override_payload,
+        "set_by": "legacy",
+        "set_at": None,
+        "note": None,
+        "mode": "sticky",
+        "baseline": None,
+    }
+
+
+def _candidate_is_newer(candidate: FieldResolution, baseline: Any) -> bool:
+    if not isinstance(baseline, dict):
+        return False
+
+    candidate_frontier = _normalize_frontier(candidate.metadata.get("evidence_frontier"))
+    baseline_frontier = _normalize_frontier(baseline)
+    if candidate_frontier is None or baseline_frontier is None:
+        return False
+    return candidate_frontier > baseline_frontier
+
+
+def _normalize_frontier(frontier: Any) -> tuple[int, float, int] | None:
+    if not isinstance(frontier, dict):
+        return None
+
+    evidence_date = parse_date_value(frontier.get("evidence_date"))
+    collected_at = _parse_datetime_value(frontier.get("collected_at"))
+    source_tier_value = frontier.get("source_tier")
+    try:
+        source_tier = int(source_tier_value)
+    except (TypeError, ValueError):
+        return None
+
+    if evidence_date is None or collected_at is None:
+        return None
+    return (evidence_date.toordinal(), collected_at.timestamp(), -source_tier)
+
+
+def _parse_datetime_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None

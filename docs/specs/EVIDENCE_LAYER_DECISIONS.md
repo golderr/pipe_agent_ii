@@ -522,3 +522,64 @@ Additional refinements after senior review:
 - Once a discovery source record is dismissed, future unmatched collector runs skip both evidence insertion and review-item creation for that source record. Dismissed discoveries should not keep accumulating orphan evidence rows over time.
 - Identifier conflicts discovered during accept are surfaced to the operator; acceptance still succeeds, but conflicting identifiers are not re-attached away from their current owning project.
 - If accept-triggered `resolve_project()` emits review flags (for example permit-issued-alone or unit-split mismatch), the workflow creates a follow-up `STATUS_CHANGE` review item so the reviewer sees that additional researcher attention is still required after acceptance.
+
+### 21. Conditional Researcher Overrides
+
+Researcher-selected values should not pin a field forever by default. They should hold until genuinely newer evidence appears.
+
+This is an intentional refinement of the guide's earlier "Tier 0 never clobbered" rule. Tier 0 remains available for explicit sticky locks, but normal review-driven overrides are now conditional by default.
+
+Decisions:
+
+- Review-generated overrides use `mode = until_newer_evidence` by default.
+- Each such override stores a `baseline` copied from the field resolution that the reviewer overrode:
+  - `evidence_date`
+  - `collected_at`
+  - `source_tier`
+  - `source_type`
+  - `evidence_ids`
+  - `rule_applied`
+- During resolution, the field first computes the normal evidence winner.
+- If the current winning evidence is not newer than the override baseline, the override still wins.
+- If the current winning evidence is newer than the override baseline, the override yields and the newer evidence wins.
+- Comparison uses the same ordering tuple as field resolution:
+  1. `evidence_date`
+  2. `collected_at`
+  3. `source_tier`
+- Once an `until_newer_evidence` override loses to newer evidence during `resolve_project(apply=True)`, that field override is removed from `project.researcher_override`. It should emit a supersession flag once, not on every future resolve.
+
+Backward compatibility:
+
+- Legacy override payloads without `mode` / `baseline` are treated as sticky.
+
+### 21a. STATUS_CHANGE Rejection Semantics
+
+Rejecting a status-change review item should block the same evidence from re-applying, but it must not block genuinely newer evidence.
+
+Decisions:
+
+- Rejecting a `STATUS_CHANGE` item writes a conditional override for `pipeline_status` using the review item's prior status as the override value.
+- The override baseline is copied from the current status field resolution at reject time.
+- The workflow immediately re-runs `resolve_project()` after writing the override so the project reverts in the same transaction.
+- If the review item is stale and the current status resolution no longer matches the rejected candidate, no override is written.
+- When newer evidence later supersedes the reviewer-selected status, the resolver emits a `researcher_override_superseded` review flag so collector-driven review items can surface that change back to the researcher.
+
+### 21b. Observation Ordering Refinement
+
+The shared observation ordering now explicitly follows "most recent wins" semantics before source preference:
+
+1. `evidence_date`
+2. `collected_at`
+3. source-specific priority preference
+4. `source_tier`
+
+This closes the earlier developer-resolution bug where an older high-priority source could beat a newer lower-priority source. Re-running `resolve-all` may therefore shift some resolved developer values toward newer evidence.
+
+### 21c. Delivery-Date Override Provenance
+
+When `date_delivery` is currently supplied by a researcher override:
+
+- `project.date_delivery` still stores the override date
+- `project.delivery_year_provenance` is set to `researcher_override`
+
+If newer evidence later supersedes the override, provenance returns to the winning evidence-derived value such as `explicit_government`, `explicit_tcg`, `explicit_news`, `explicit_costar`, or `estimated_calc`.
