@@ -1,9 +1,11 @@
-# TCG Pipeline Tracker — Architecture & Build Spec
+# TCG Pipeline Tracker — Architecture & Design Reference
 
-> **Living document.** This file is the single source of truth for the project. Claude Code / Codex should read this at the start of every session, update it when the plan changes, and mark build steps complete as code is committed. Use commits as checkpoints to review the plan and evaluate if anything changed and should be recorded in this file.
+> **Important: The build plan has moved.** The active build plan, current system status, and priority ordering now live in **`ROADMAP.md`** at the repo root. This file remains the authoritative reference for the system's **design** — data model, source specifications, field inventories, matching strategy, and collection workflow. Section 7 (Build Plan) in this file is **frozen as of 2026-04-22** and no longer maintained. Always check `ROADMAP.md` for what to build next.
+>
+> Claude Code / Codex agents: **read `ROADMAP.md` first**, then consult this file for design details as needed.
 
-**Last updated:** 2026-04-16
-**Status:** Build in progress — foundation scaffolded, seed ingesters and persistence/merge paths are implemented, and the first Phase 2 LADBS/Socrata collection slice is now in place with live preview verification.
+**Last updated:** 2026-04-22 (deprecation notice added; design sections unchanged)
+**Original status as of 2026-04-16:** Build in progress — foundation scaffolded, seed ingesters and persistence/merge paths are implemented, and the first Phase 2 LADBS/Socrata collection slice is now in place with live preview verification.
 - ✅ Pipedream field mapping (81 fields)
 - ✅ CoStar field mapping (287 columns, MF + non-MF)
 - ✅ Master schema finalized
@@ -1850,6 +1852,8 @@ On each incoming record:
 ---
 
 ## 7. Build Plan
+
+> **FROZEN AS OF 2026-04-22.** This section is no longer maintained. The current build plan lives in **`ROADMAP.md`** at the repo root. The content below is preserved for historical reference only — status markers may be outdated and the phase ordering has been superseded.
 
 ### Phase 1: Foundation
 > Goal: Database schema, seeder, and first public source connected.
