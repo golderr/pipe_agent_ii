@@ -100,8 +100,15 @@ def canonicalize_developer_name(
             match_type="empty",
         )
 
-    registry_rows = _load_registry(session)
     normalized_name = normalize_developer_name(cleaned_name)
+    if _is_ignored_registry_name(normalized_name):
+        return DeveloperCanonicalizationResult(
+            raw_name=cleaned_name,
+            canonical_name=cleaned_name,
+            match_type="ignored_registry_entry",
+        )
+
+    registry_rows = _load_registry(session)
     exact_matches = _find_exact_matches(registry_rows, normalized_name)
     result = _choose_match(
         cleaned_name,
@@ -194,7 +201,11 @@ def _is_usable_registry_row(developer: DeveloperRegistry, session: Session) -> b
     if sqlalchemy_inspect(developer).deleted or developer in session.deleted:
         return False
     normalized = normalize_developer_name(developer.canonical_name)
-    return normalized not in IGNORED_REGISTRY_CANONICAL_NAMES
+    return not _is_ignored_registry_name(normalized)
+
+
+def _is_ignored_registry_name(normalized_name: str | None) -> bool:
+    return normalized_name in IGNORED_REGISTRY_CANONICAL_NAMES
 
 
 def _find_exact_matches(
@@ -391,6 +402,8 @@ def _persist_canonicalization(
 ) -> DeveloperCanonicalizationResult:
     canonical_name = _clean_name(result.canonical_name)
     if canonical_name is None:
+        return result
+    if _is_ignored_registry_name(normalize_developer_name(canonical_name)):
         return result
 
     canonical = None

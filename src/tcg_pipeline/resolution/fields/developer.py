@@ -59,6 +59,9 @@ def resolve_developer(
             persist=persist_registry,
         )
         if canonicalization.requires_review:
+            # This preserves a previously canonicalized value if it is already on the
+            # project, but it does not prove human confirmation. Phase A keeps the
+            # heuristic explicit instead of introducing new confirmation state.
             if _coerce_text(project.developer) == _coerce_text(canonicalization.canonical_name):
                 developer_name = canonicalization.canonical_name
             else:

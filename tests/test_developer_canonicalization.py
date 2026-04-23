@@ -160,6 +160,32 @@ def test_canonicalize_developer_name_ignores_generic_category_registry_row(
     assert result.match_type == "new_registry_entry"
 
 
+def test_canonicalize_developer_name_ignores_category_raw_name_and_does_not_persist(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    existing_count = postgres_session.execute(
+        select(DeveloperRegistry.id).where(DeveloperRegistry.canonical_name == "Category")
+    ).scalars().all()
+
+    result = canonicalize_developer_name(
+        postgres_session,
+        "Category",
+        persist=True,
+    )
+    postgres_session.flush()
+
+    updated_count = postgres_session.execute(
+        select(DeveloperRegistry.id).where(DeveloperRegistry.canonical_name == "Category")
+    ).scalars().all()
+
+    assert result.canonical_name == "Category"
+    assert result.match_type == "ignored_registry_entry"
+    assert updated_count == existing_count
+
+
 def test_canonicalize_registry_entry_merges_duplicate_canonical_row(
     postgres_session: Session,
 ) -> None:
@@ -294,6 +320,44 @@ def test_canonicalize_project_developers_updates_projects_and_registry(
     assert result.projects_changed >= 1
     assert project.developer == TEST_JAMISON
     assert TEST_JAMISON_ALIAS in alias_rows
+
+
+def test_canonicalize_project_developers_does_not_recreate_ignored_category_row(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    category_count_before = postgres_session.execute(
+        select(DeveloperRegistry.id).where(DeveloperRegistry.canonical_name == "Category")
+    ).scalars().all()
+    project = Project(
+        canonical_address="501 WEST TEST STREET LOS ANGELES CA 90012",
+        raw_addresses=["501 W Test St"],
+        market="test_market",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        developer="Category",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    result = canonicalize_project_developers(
+        postgres_session,
+        market="test_market",
+        apply=True,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    category_count_after = postgres_session.execute(
+        select(DeveloperRegistry.id).where(DeveloperRegistry.canonical_name == "Category")
+    ).scalars().all()
+
+    assert project.developer == "Category"
+    assert result.new_registry_entries == 0
+    assert category_count_after == category_count_before
 
 
 def test_resolve_project_canonicalizes_developer_and_emits_review_flag(
