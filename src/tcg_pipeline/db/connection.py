@@ -37,7 +37,7 @@ def _configure_postgres_session_timeouts(engine: Engine) -> None:
     def _set_postgres_timeouts(dbapi_connection, _connection_record) -> None:
         with dbapi_connection.cursor() as cursor:
             cursor.execute("SET statement_timeout = '5min'")
-            cursor.execute("SET idle_in_transaction_session_timeout = '2min'")
+            cursor.execute("SET idle_in_transaction_session_timeout = '15min'")
 
 
 @lru_cache(maxsize=1)
