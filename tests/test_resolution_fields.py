@@ -158,6 +158,28 @@ def test_resolve_developer_prefers_newer_evidence_over_source_priority() -> None
     assert resolution.value == "Newer News Dev"
 
 
+def test_resolve_developer_does_not_treat_future_projection_as_freshness() -> None:
+    project = _build_project()
+    pipedream_evidence = _build_evidence(
+        source_type="pipedream",
+        source_tier=1,
+        evidence_date=date(2026, 4, 20),
+        collected_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        extracted_fields={"developer": {"value": "Researcher Developer", "confidence": None}},
+    )
+    costar_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2029, 1, 1),
+        collected_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+        extracted_fields={"developer": {"value": "Projected Future Dev", "confidence": None}},
+    )
+
+    resolution = resolve_developer([costar_evidence, pipedream_evidence], project)
+
+    assert resolution.value == "Researcher Developer"
+
+
 def test_resolve_developer_override_yields_to_higher_priority_source_on_temporal_tie() -> None:
     project = _build_project()
     project.developer = "Current Dev"
@@ -430,6 +452,46 @@ def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> 
 
     assert resolution.value == PipelineStatus.COMPLETE
     assert resolution.rule_applied == "forward_only_preserve_current"
+
+
+def test_resolve_status_preserves_current_for_inactive_candidate() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    inactive_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2026, 4, 16),
+        extracted_fields={
+            "pipeline_status": {"value": PipelineStatus.INACTIVE.value, "confidence": None},
+        },
+    )
+
+    resolution = resolve_status([inactive_evidence], project)
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    assert resolution.rule_applied == "manual_status_review_preserve_current"
+    assert resolution.metadata["candidate_status"] == PipelineStatus.INACTIVE.value
+    assert resolution.metadata["requires_review"] is True
+
+
+def test_resolve_status_preserves_inactive_until_manual_reactivation() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.INACTIVE
+    proposed_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2026, 4, 16),
+        extracted_fields={
+            "pipeline_status": {"value": PipelineStatus.PROPOSED.value, "confidence": None},
+        },
+    )
+
+    resolution = resolve_status([proposed_evidence], project)
+
+    assert resolution.value == PipelineStatus.INACTIVE
+    assert resolution.rule_applied == "manual_status_review_preserve_current"
+    assert resolution.metadata["candidate_status"] == PipelineStatus.PROPOSED.value
+    assert resolution.metadata["requires_review"] is True
 
 
 def test_resolve_status_override_holds_until_newer_evidence() -> None:

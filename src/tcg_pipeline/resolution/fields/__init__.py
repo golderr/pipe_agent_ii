@@ -19,7 +19,7 @@ class FieldObservation:
 
     @property
     def effective_date(self) -> date:
-        return self.evidence.evidence_date or self.evidence.collected_at.date()
+        return evidence_effective_date(self.evidence)
 
 
 @dataclass(slots=True)
@@ -68,6 +68,21 @@ def build_resolution(
         metadata=metadata_payload,
         notes=notes or [],
     )
+
+
+def evidence_effective_date(evidence: Evidence) -> date:
+    """Date used for evidence ordering.
+
+    Some seed sources carry future projected event dates, especially CoStar delivery
+    dates. Those dates are field values, not proof that unrelated fields are newer
+    evidence, so future row-level evidence dates are capped at collection date.
+    """
+    collected_date = evidence.collected_at.date()
+    if evidence.evidence_date is None:
+        return collected_date
+    if evidence.evidence_date > collected_date:
+        return collected_date
+    return evidence.evidence_date
 
 
 def resolve_override(

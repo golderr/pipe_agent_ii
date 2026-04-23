@@ -27,6 +27,7 @@ STATUS_FROM_EVIDENCE_TYPE = {
     "building_inspection_recorded": PipelineStatus.UNDER_CONSTRUCTION,
     "certificate_of_occupancy_issued": PipelineStatus.COMPLETE,
 }
+MANUAL_REVIEW_STATUSES = {PipelineStatus.STALLED, PipelineStatus.INACTIVE}
 
 
 def resolve_status(
@@ -36,31 +37,6 @@ def resolve_status(
     overrides: dict[str, Any] | None = None,
 ) -> FieldResolution:
     explicit_observations = iter_field_observations(evidence_rows, "pipeline_status")
-    tier1_explicit = [
-        observation
-        for observation in explicit_observations
-        if observation.evidence.source_tier == 1
-        and _coerce_pipeline_status(observation.value)
-        in {PipelineStatus.STALLED, PipelineStatus.INACTIVE}
-    ]
-    if tier1_explicit:
-        stalled_observation = tier1_explicit[0]
-        status = _coerce_pipeline_status(stalled_observation.value) or project.pipeline_status
-        candidate = build_resolution(
-            "pipeline_status",
-            status,
-            confidence=StatusConfidence.HIGH,
-            observations=[stalled_observation],
-            rule_applied="tier1_explicit_status",
-            metadata={"source_type": stalled_observation.evidence.source_type},
-        )
-        return apply_override(
-            "pipeline_status",
-            candidate,
-            overrides,
-            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
-        )
-
     direct_signal_observations = _status_signal_observations(evidence_rows)
     permit_observations = direct_signal_observations.get("building_permit_issued", [])
     inspection_observations = direct_signal_observations.get("building_inspection_recorded", [])
@@ -124,6 +100,31 @@ def resolve_status(
         candidate_observations.items(),
         key=lambda item: STATUS_PROGRESS_ORDER.get(item[0], -1),
     )
+    if _requires_manual_status_review(project.pipeline_status, chosen_status):
+        candidate = build_resolution(
+            "pipeline_status",
+            project.pipeline_status,
+            confidence=StatusConfidence.LOW,
+            observations=chosen_observations[:1],
+            rule_applied="manual_status_review_preserve_current",
+            metadata={
+                "candidate_status": chosen_status.value,
+                "evidence_type": _extract_status_evidence_type(chosen_observations),
+                "source_type": _extract_source_type(chosen_observations),
+                "requires_review": True,
+                "review_reason": (
+                    f"Evidence suggests {chosen_status.value}, but Stalled/Inactive "
+                    "transitions are manual-review only."
+                ),
+            },
+        )
+        return apply_override(
+            "pipeline_status",
+            candidate,
+            overrides,
+            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
+        )
+
     current_rank = STATUS_PROGRESS_ORDER.get(project.pipeline_status)
     chosen_rank = STATUS_PROGRESS_ORDER.get(chosen_status)
     if (
@@ -280,6 +281,18 @@ def _requires_review(
     if inspection_observations:
         return False
     return _extract_status_evidence_type(chosen_observations) == "building_permit_issued"
+
+
+def _requires_manual_status_review(
+    current_status: PipelineStatus,
+    chosen_status: PipelineStatus,
+) -> bool:
+    if current_status == chosen_status:
+        return False
+    return (
+        current_status in MANUAL_REVIEW_STATUSES
+        or chosen_status in MANUAL_REVIEW_STATUSES
+    )
 
 
 def _extract_status_evidence_type(

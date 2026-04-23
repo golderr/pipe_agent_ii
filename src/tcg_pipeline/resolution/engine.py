@@ -18,7 +18,11 @@ from tcg_pipeline.db.models import (
 )
 from tcg_pipeline.matching.differ import ReviewFlag
 from tcg_pipeline.resolution.confidence import compute_overall_confidence
-from tcg_pipeline.resolution.fields import FieldResolution, normalize_comparable
+from tcg_pipeline.resolution.fields import (
+    FieldResolution,
+    evidence_effective_date,
+    normalize_comparable,
+)
 from tcg_pipeline.resolution.fields.age_restriction import resolve_age_restriction
 from tcg_pipeline.resolution.fields.delivery_year import resolve_delivery_year
 from tcg_pipeline.resolution.fields.developer import resolve_developer
@@ -141,7 +145,7 @@ def resolve_project(
     likelihood, likelihood_breakdown = compute_likelihood(resolved_scalars, evidence_rows, session)
     overall_confidence, confidence_reason = compute_overall_confidence(field_resolutions)
     last_evidence_date = max(
-        (evidence.evidence_date or evidence.collected_at.date() for evidence in evidence_rows),
+        (evidence_effective_date(evidence) for evidence in evidence_rows),
         default=None,
     )
 
@@ -321,13 +325,17 @@ def _build_review_flags(
 ) -> list[ReviewFlag]:
     review_flags: list[ReviewFlag] = []
     review_flags.extend(_override_superseded_review_flags(field_resolutions))
-    if (
+    if status_resolution.metadata.get("requires_review") and (
         project.pipeline_status != status_resolution.value
-        and status_resolution.metadata.get("requires_review")
+        or status_resolution.metadata.get("candidate_status") is not None
     ):
         review_flags.append(
             ReviewFlag(
-                code="permit_issued_requires_review",
+                code=(
+                    "status_transition_requires_review"
+                    if status_resolution.metadata.get("candidate_status") is not None
+                    else "permit_issued_requires_review"
+                ),
                 message=str(
                     status_resolution.metadata.get("review_reason")
                     or "Status change requires researcher review."

@@ -108,7 +108,9 @@ def test_persist_costar_import_result_merges_into_existing_project_by_apn(
             Project.canonical_address == "9902 SOUTH EXAMPLE AVENUE LOS ANGELES CA 90057"
         )
     ).scalar_one()
-    assert project.developer == "Different Dev"
+    # CoStar construction dates are future projections, not developer freshness.
+    # Keep the Pipedream researcher value when source timing does not beat it.
+    assert project.developer == "TCG Research"
     assert project.zoning == "C2"
     assert project.owner == "Example Owner"
     assert project.costar_submarket == "Koreatown"

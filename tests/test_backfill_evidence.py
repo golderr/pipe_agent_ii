@@ -10,6 +10,7 @@ from scripts.backfill_evidence import (
     BackfillEvidenceResult,
     _backfill_pipedream_snapshots,
     _backfill_source_record_evidence,
+    _derive_source_record_evidence_date,
 )
 from tcg_pipeline.db.models import (
     Evidence,
@@ -202,3 +203,20 @@ def test_backfill_source_record_evidence_skips_preexisting_orphan_duplicate(
     ).scalars().all()
     assert len(evidence_rows) == 1
     assert result.skipped_duplicates >= 1
+
+
+def test_source_record_evidence_date_ignores_future_delivery_projection() -> None:
+    source_record = ProjectSourceRecord(
+        source_name="costar",
+        source_record_id="costar-123",
+        first_seen_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+        last_seen_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+        last_pulled_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+        mapped_fields={
+            "pipeline_status": "Proposed",
+            "date_delivery": "2029-01-01",
+            "developer": "Example Developer",
+        },
+    )
+
+    assert _derive_source_record_evidence_date(source_record) == date(2026, 4, 16)

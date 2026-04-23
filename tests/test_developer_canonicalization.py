@@ -129,6 +129,37 @@ def test_canonicalize_developer_name_uses_fuzzy_review_threshold(
     assert result.requires_review is True
 
 
+def test_canonicalize_developer_name_ignores_generic_category_registry_row(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    category = postgres_session.execute(
+        select(DeveloperRegistry).where(DeveloperRegistry.canonical_name == "Category")
+    ).scalar_one_or_none()
+    if category is None:
+        category = DeveloperRegistry(canonical_name="Category")
+        postgres_session.add(category)
+        postgres_session.flush()
+    postgres_session.add(
+        DeveloperAlias(
+            developer_id=category.id,
+            alias_name="ZZZQXQ Nimbleroot",
+        )
+    )
+    postgres_session.flush()
+
+    result = canonicalize_developer_name(
+        postgres_session,
+        "ZZZQXQ Nimbleroot LLC",
+        persist=False,
+    )
+
+    assert result.canonical_name == "ZZZQXQ Nimbleroot LLC"
+    assert result.match_type == "new_registry_entry"
+
+
 def test_canonicalize_registry_entry_merges_duplicate_canonical_row(
     postgres_session: Session,
 ) -> None:

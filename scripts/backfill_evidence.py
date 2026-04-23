@@ -82,9 +82,11 @@ FIELD_DATE_KEYS = (
     "cofo_issue_date",
     "inspection_date",
     "status_date",
-    "date_delivery",
     "date_construction_start",
 )
+# date_delivery is intentionally excluded from row-level evidence dates. It is often
+# a future projection in CoStar; using it as evidence freshness makes unrelated
+# fields (status, developer, units) appear newer than they are.
 
 
 @dataclass(slots=True)

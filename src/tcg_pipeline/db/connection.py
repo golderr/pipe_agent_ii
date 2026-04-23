@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,12 +22,22 @@ def redact_database_url(database_url: str) -> str:
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
     settings = get_settings()
-    return create_engine(
+    engine = create_engine(
         settings.require_database_url(),
         echo=settings.sql_echo,
         future=True,
         pool_pre_ping=True,
     )
+    _configure_postgres_session_timeouts(engine)
+    return engine
+
+
+def _configure_postgres_session_timeouts(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _set_postgres_timeouts(dbapi_connection, _connection_record) -> None:
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute("SET statement_timeout = '5min'")
+            cursor.execute("SET idle_in_transaction_session_timeout = '2min'")
 
 
 @lru_cache(maxsize=1)

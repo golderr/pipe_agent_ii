@@ -30,6 +30,11 @@ LEGAL_SUFFIX_TOKENS = {
     "PLC",
 }
 NON_ALPHANUMERIC_PATTERN = re.compile(r"[^A-Z0-9]+")
+IGNORED_REGISTRY_CANONICAL_NAMES = {
+    # Data-quality guard: a polluted production registry row named "Category"
+    # accumulated unrelated aliases and should never be a canonicalization target.
+    "CATEGORY",
+}
 
 
 @dataclass(slots=True)
@@ -134,6 +139,14 @@ def canonicalize_registry_entry(
             canonical_name=None,
             match_type="missing_registry_entry",
         )
+    if not _is_usable_registry_row(developer, session):
+        return DeveloperCanonicalizationResult(
+            raw_name=developer.canonical_name,
+            canonical_name=developer.canonical_name,
+            canonical_developer_id=developer.id,
+            match_type="ignored_registry_entry",
+            is_top_tier=developer.is_top_tier,
+        )
     return canonicalize_developer_name(
         session,
         developer.canonical_name,
@@ -148,7 +161,7 @@ def _load_registry(session: Session) -> list[DeveloperRegistry]:
         return [
             row
             for row in cached_rows
-            if not sqlalchemy_inspect(row).deleted and row not in session.deleted
+            if _is_usable_registry_row(row, session)
         ]
 
     registry_rows = _load_registry_from_db(session)
@@ -169,12 +182,19 @@ def _load_registry_from_db(session: Session) -> list[DeveloperRegistry]:
     return [
         row
         for row in registry_rows
-        if not sqlalchemy_inspect(row).deleted and row not in session.deleted
+        if _is_usable_registry_row(row, session)
     ]
 
 
 def invalidate_registry_cache(session: Session) -> None:
     session.info.pop(REGISTRY_CACHE_KEY, None)
+
+
+def _is_usable_registry_row(developer: DeveloperRegistry, session: Session) -> bool:
+    if sqlalchemy_inspect(developer).deleted or developer in session.deleted:
+        return False
+    normalized = normalize_developer_name(developer.canonical_name)
+    return normalized not in IGNORED_REGISTRY_CANONICAL_NAMES
 
 
 def _find_exact_matches(

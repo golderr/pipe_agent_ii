@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
@@ -37,6 +38,7 @@ from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
 from tcg_pipeline.market_config import get_market_config
 from tcg_pipeline.resolution import resolve_project
+from tcg_pipeline.resolution.engine import LOGGED_FIELDS
 from tcg_pipeline.settings import get_settings
 from tcg_pipeline.status_rules import get_status_evidence_rule
 from tcg_pipeline.utils.logging import configure_logging
@@ -559,6 +561,15 @@ def resolve_all_command(
         min=1,
         help="Optional max project count to resolve.",
     ),
+    batch_size: int = typer.Option(
+        100,
+        min=1,
+        help="Projects to resolve per transaction.",
+    ),
+    start_after: uuid.UUID | None = typer.Option(
+        None,
+        help="Resume after this Project.id using keyset pagination.",
+    ),
 ) -> None:
     """Resolve projects from evidence in shadow-mode or apply mode."""
     resolve_all(
@@ -566,6 +577,8 @@ def resolve_all_command(
         apply=apply,
         clear_log=clear_log,
         limit=limit,
+        batch_size=batch_size,
+        start_after=start_after,
     )
 
 
@@ -575,48 +588,152 @@ def resolve_all(
     apply: bool = False,
     clear_log: bool = False,
     limit: int | None = None,
+    batch_size: int = 100,
+    start_after: uuid.UUID | None = None,
 ) -> None:
     """Resolve projects from evidence in shadow-mode or apply mode."""
     session_factory = get_session_factory()
     with session_factory() as session:
         _echo_developer_registry_bootstrap_warning_if_needed(session)
         if clear_log:
-            session.execute(delete(ResolutionLog))
-
-        project_ids_query = select(Project.id).order_by(Project.id)
-        if market is not None:
-            project_ids_query = project_ids_query.where(Project.market == market)
-        if limit is not None:
-            project_ids_query = project_ids_query.limit(limit)
-        project_ids = session.execute(project_ids_query).scalars().all()
-
-        total_changed_fields = 0
-        total_log_rows = 0
-        changed_projects = 0
-        for project_id in project_ids:
-            result = resolve_project(
-                project_id,
-                session,
-                apply=apply,
-                write_resolution_log=True,
-            )
-            if result.changed_fields:
-                changed_projects += 1
-            total_changed_fields += len(result.changed_fields)
-            total_log_rows += result.log_entries_created
-
+            _clear_resolution_log(session, market=market)
         session.commit()
 
-    typer.echo(f"Projects resolved: {len(project_ids)}")
+    total_projects = 0
+    total_changed_fields = 0
+    total_log_rows = 0
+    changed_projects = 0
+    field_counts: Counter[str] = Counter()
+    resolution_confidence_counts: Counter[str] = Counter()
+    project_confidence_counts: Counter[str] = Counter()
+    last_project_id = start_after
+    batch_number = 0
+
+    while limit is None or total_projects < limit:
+        remaining = None if limit is None else limit - total_projects
+        if remaining is not None and remaining <= 0:
+            break
+
+        with session_factory() as session:
+            project_ids = _fetch_project_id_batch(
+                session,
+                market=market,
+                after_project_id=last_project_id,
+                batch_size=min(batch_size, remaining) if remaining is not None else batch_size,
+            )
+            if not project_ids:
+                break
+
+            batch_number += 1
+            batch_changed_projects = 0
+            batch_changed_fields = 0
+            batch_log_rows = 0
+            project_confidence_by_id = dict(
+                session.execute(
+                    select(Project.id, Project.confidence).where(Project.id.in_(project_ids))
+                ).all()
+            )
+
+            try:
+                for project_id in project_ids:
+                    session.execute(
+                        delete(ResolutionLog).where(ResolutionLog.project_id == project_id)
+                    )
+                    result = resolve_project(
+                        project_id,
+                        session,
+                        apply=apply,
+                        write_resolution_log=True,
+                    )
+                    if result.changed_fields:
+                        changed_projects += 1
+                        batch_changed_projects += 1
+                        project_confidence = project_confidence_by_id.get(project_id)
+                        project_confidence_counts[
+                            _confidence_label(project_confidence)
+                        ] += 1
+
+                    total_changed_fields += len(result.changed_fields)
+                    batch_changed_fields += len(result.changed_fields)
+                    total_log_rows += result.log_entries_created
+                    batch_log_rows += result.log_entries_created
+                    for field_name in result.changed_fields:
+                        if field_name not in LOGGED_FIELDS:
+                            continue
+                        field_counts[field_name] += 1
+                        resolution = result.field_resolutions[field_name]
+                        resolution_confidence_counts[
+                            _confidence_label(resolution.confidence)
+                        ] += 1
+
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+
+            total_projects += len(project_ids)
+            last_project_id = project_ids[-1]
+            typer.echo(
+                f"Batch {batch_number}: projects={len(project_ids)} "
+                f"discrepancies={batch_changed_projects} "
+                f"changed_fields={batch_changed_fields} "
+                f"log_rows={batch_log_rows} "
+                f"last_project_id={last_project_id}"
+            )
+
+    typer.echo(f"Projects resolved: {total_projects}")
     typer.echo(f"Projects with discrepancies: {changed_projects}")
     typer.echo(f"Changed fields detected: {total_changed_fields}")
     typer.echo(f"Resolution log rows written: {total_log_rows}")
+    typer.echo(f"Last project id: {last_project_id or 'n/a'}")
+    _echo_counter("Changed field counts", field_counts)
+    _echo_counter("Resolution confidence counts", resolution_confidence_counts)
+    _echo_counter("Current project confidence counts", project_confidence_counts)
     typer.echo(f"Apply mode: {apply}")
     if not apply:
         typer.echo(
             "Shadow mode note: resolution_log stores computed canonical developer values "
             "even though developer registry rows and aliases are not persisted."
         )
+
+
+def _clear_resolution_log(session, *, market: str | None) -> None:
+    if market is None:
+        session.execute(delete(ResolutionLog))
+        return
+
+    project_ids = select(Project.id).where(Project.market == market)
+    session.execute(delete(ResolutionLog).where(ResolutionLog.project_id.in_(project_ids)))
+
+
+def _fetch_project_id_batch(
+    session,
+    *,
+    market: str | None,
+    after_project_id: uuid.UUID | None,
+    batch_size: int,
+) -> list[uuid.UUID]:
+    statement = select(Project.id).order_by(Project.id).limit(batch_size)
+    if market is not None:
+        statement = statement.where(Project.market == market)
+    if after_project_id is not None:
+        statement = statement.where(Project.id > after_project_id)
+    return list(session.execute(statement).scalars().all())
+
+
+def _confidence_label(value) -> str:
+    if value is None:
+        return "unknown"
+    return getattr(value, "value", str(value))
+
+
+def _echo_counter(title: str, counts: Counter[str]) -> None:
+    if not counts:
+        typer.echo(f"{title}: none")
+        return
+    typer.echo(f"{title}:")
+    for key, count in sorted(counts.items()):
+        typer.echo(f"  {key}: {count}")
 
 
 @app.command("canonicalize-developers")

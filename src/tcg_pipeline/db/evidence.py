@@ -68,9 +68,10 @@ FIELD_DATE_KEYS = (
     "cofo_issue_date",
     "inspection_date",
     "status_date",
-    "date_delivery",
     "date_construction_start",
 )
+# date_delivery is often a future projection. It remains an extracted field value,
+# but it should not make unrelated fields look like future-dated evidence.
 
 
 @dataclass(slots=True)
