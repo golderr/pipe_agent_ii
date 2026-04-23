@@ -333,7 +333,8 @@ def test_resolve_project_canonicalizes_developer_and_emits_review_flag(
         write_resolution_log=False,
     )
 
-    assert result.field_resolutions["developer"].value == TEST_CIM
+    assert result.field_resolutions["developer"].value == TEST_CIM_ALIAS
+    assert result.field_resolutions["developer"].metadata["canonical_name"] == TEST_CIM
     assert any(
         review_flag.code == "developer_canonicalization_review"
         for review_flag in result.review_flags

@@ -58,7 +58,14 @@ def resolve_developer(
             developer_name,
             persist=persist_registry,
         )
-        developer_name = canonicalization.canonical_name
+        if canonicalization.requires_review:
+            if _coerce_text(project.developer) == _coerce_text(canonicalization.canonical_name):
+                developer_name = canonicalization.canonical_name
+            else:
+                developer_name = raw_developer_name
+            rule_applied = "most_recent_wins_canonicalization_review_required"
+        else:
+            developer_name = canonicalization.canonical_name
         metadata.update(
             {
                 "raw_value": raw_developer_name,
@@ -72,7 +79,10 @@ def resolve_developer(
                 "is_top_tier": canonicalization.is_top_tier,
             }
         )
-        if canonicalization.match_type != "exact_canonical":
+        if (
+            canonicalization.match_type != "exact_canonical"
+            and not canonicalization.requires_review
+        ):
             rule_applied = "most_recent_wins_canonicalized"
 
     candidate = build_resolution(
