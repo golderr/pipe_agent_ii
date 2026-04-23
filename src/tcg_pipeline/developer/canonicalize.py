@@ -71,6 +71,7 @@ def canonicalize_project_developers(
         _accumulate_result(result, canonicalization)
         if (
             apply
+            and canonicalization.match_type != "fuzzy_review"
             and canonicalization.canonical_name is not None
             and canonicalization.canonical_name != project.developer
         ):

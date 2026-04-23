@@ -124,7 +124,7 @@ def canonicalize_developer_name(
         canonical_developer_id=result.canonical_developer_id,
     )
     result.source_registry_id = source_registry_id
-    if persist:
+    if persist and result.match_type != "fuzzy_review":
         result = _persist_canonicalization(session, result)
     return result
 

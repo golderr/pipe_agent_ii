@@ -229,6 +229,43 @@ def test_canonicalize_registry_entry_merges_duplicate_canonical_row(
     assert alias_rows == [f"{TEST_CIM} LP"]
 
 
+def test_canonicalize_registry_entry_does_not_auto_merge_fuzzy_review_match(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    canonical = DeveloperRegistry(canonical_name=TEST_CIM)
+    fuzzy_duplicate = DeveloperRegistry(canonical_name=TEST_CIM_ALIAS)
+    postgres_session.add_all([canonical, fuzzy_duplicate])
+    postgres_session.flush()
+
+    result = canonicalize_registry_entry(
+        postgres_session,
+        fuzzy_duplicate.id,
+        persist=True,
+    )
+    postgres_session.flush()
+
+    registry_rows = postgres_session.execute(
+        select(DeveloperRegistry)
+        .where(
+            DeveloperRegistry.canonical_name.in_(
+                [
+                    TEST_CIM,
+                    TEST_CIM_ALIAS,
+                ]
+            )
+        )
+        .order_by(DeveloperRegistry.canonical_name)
+    ).scalars().all()
+
+    assert result.match_type == "fuzzy_review"
+    assert result.canonical_name == TEST_CIM
+    assert result.registry_merged is False
+    assert [row.canonical_name for row in registry_rows] == [TEST_CIM_ALIAS, TEST_CIM]
+
+
 def test_canonicalize_registry_entry_merges_existing_aliases_from_duplicate_row(
     postgres_session: Session,
 ) -> None:
@@ -320,6 +357,38 @@ def test_canonicalize_project_developers_updates_projects_and_registry(
     assert result.projects_changed >= 1
     assert project.developer == TEST_JAMISON
     assert TEST_JAMISON_ALIAS in alias_rows
+
+
+def test_canonicalize_project_developers_does_not_apply_fuzzy_review_match(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    postgres_session.add(DeveloperRegistry(canonical_name=TEST_CIM))
+    project = Project(
+        canonical_address="500 WEST REVIEW STREET LOS ANGELES CA 90012",
+        raw_addresses=["500 W Review St"],
+        market="test_market",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        developer=TEST_CIM_ALIAS,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    result = canonicalize_project_developers(
+        postgres_session,
+        market="test_market",
+        apply=True,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    assert result.fuzzy_review_matches >= 1
+    assert result.projects_changed == 0
+    assert project.developer == TEST_CIM_ALIAS
 
 
 def test_canonicalize_project_developers_does_not_recreate_ignored_category_row(
