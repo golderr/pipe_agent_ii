@@ -525,6 +525,8 @@ Additional refinements after senior review:
 
 ### 21. Conditional Researcher Overrides
 
+**Superseded by §22 for Phase B/C UI behavior.** This section remains as historical context for Phase A behavior and any code paths not yet migrated to review-protected overrides.
+
 Researcher-selected values should not pin a field forever by default. They should hold until genuinely newer evidence appears.
 
 This is an intentional refinement of the guide's earlier "Tier 0 never clobbered" rule. Tier 0 remains available for explicit sticky locks, but normal review-driven overrides are now conditional by default.
@@ -650,3 +652,98 @@ Rationale:
 
 - Project-level developer overrides are part of the evidence-layer review workflow and must not be bypassed by registry-maintenance sweeps.
 - Registry cleanup and project-field mutation are related but distinct responsibilities.
+
+### 22. Review-Protected Overrides (Supersedes §21 conditional-override model)
+
+**Date:** 2026-04-23
+
+During the Phase B/C UI design sessions, a cleaner override model emerged that supersedes the earlier sticky / `until_newer_evidence` split in §21. The new rule is referred to throughout `docs/specs/ui_requirements.md` and the UI design as **review-protected**.
+
+#### 22.1 The rule
+
+Researcher inputs are **review-protected, not sticky, and not silently-replaceable**.
+
+- A researcher override (inline field edit, review-queue Keep-old decision, Custom-value decision, or any other mechanism that records a human-set value for a field) writes a value that becomes the project's current value.
+- The override **does not auto-expire.**
+- The override **does not silently yield to newer evidence.**
+- When newly arriving evidence contradicts the override, a review item is generated at minimum MEDIUM priority.
+- Until that review item is decided, the override's value remains displayed as current.
+
+This supersedes both prior modes:
+
+- `sticky` (old "Tier 0 never clobbered") — too rigid; human inputs rotted silently without recheck.
+- `until_newer_evidence` (§21) — too permissive; newer evidence silently superseded without the researcher knowing.
+
+The new model makes every human decision a standing watch: the decision holds, but the system proactively surfaces contradictions instead of either ignoring or hiding them.
+
+#### 22.2 What counts as contradiction
+
+The contradiction threshold varies by field to avoid spurious review items for insignificant differences.
+
+| Field | Contradiction definition |
+|---|---|
+| `pipeline_status` | Any evidence implying a different resolved status value. |
+| `total_units` | Any evidence with a different value AND `abs(delta) > 5`. Deltas ≤ 5 do not contradict (per §21e small-delta policy). |
+| `affordable_units`, `market_rate_units` | Same threshold as `total_units` (`abs(delta) > 5`). |
+| `developer` | Any evidence with a different string after canonicalization. Identical canonicals do not contradict. |
+| `product_type` | Explicit disagreement. |
+| `age_restriction` | Explicit disagreement. |
+| `date_delivery` | Any explicit date more than 30 days different, OR any article within 6 months (per §21f) suggesting a different delivery. |
+
+For other fields without explicit thresholds above, contradiction = any explicit disagreement.
+
+#### 22.3 Priority escalation
+
+The priority of the contradiction review item reflects the strength of the contradicting evidence:
+
+- **HIGH** — Strong Tier 1 evidence (government source with real dates and substantive content), multi-source agreement (≥2 sources converge on a different value), or delta exceeds a large magnitude threshold (e.g., unit delta > 50).
+- **MEDIUM** (minimum) — Single source, any tier, contradicting an existing override. Never LOW: contradicting a human decision is never low-priority, even if the evidence is weak.
+
+#### 22.4 Display
+
+- Fields with active overrides are displayed normally with their override value as the current value.
+- The field's source badge reflects the overrider (`You` / `NG` / etc.).
+- Hovering the field reveals override metadata: set-by, set-at, note.
+- When a contradiction review item is pending for a field, the field gets the "in current review batch" highlight (see `ui_requirements.md` §6.4).
+
+#### 22.5 Clearing an override
+
+- Researchers can clear an override explicitly via the Project Detail → Overrides tab, or via the field-hover controls.
+- Clearing triggers a resolution re-run for the project.
+- The cleared override is logged in ChangeLog.
+- An override cleared by the researcher who set it, or by another TCG researcher, produces the same audit trail — attribution is preserved.
+
+#### 22.6 Interaction with the Review Queue
+
+- When new evidence contradicts an existing override, a review item is inserted into the Review Queue like any other change. The row is rendered with the `⚠ contradicts your override [set-date]` inline warning.
+- The researcher has the standard options: Accept new, Keep old (re-affirms the override with a new baseline timestamp), Defer, or Custom.
+- Accepting new evidence clears the override automatically; the accepted value becomes the resolved (non-override) value.
+- Keep-old re-affirms the override. Its set-at timestamp updates to reflect the re-affirmation.
+
+#### 22.7 Backward compatibility
+
+- Existing overrides with `mode = sticky` are treated as review-protected (equivalent to the new default). Their baselines, if any, are preserved but no longer used as "yield thresholds."
+- Existing overrides with `mode = until_newer_evidence` are treated as review-protected. Their baselines are preserved for audit but are no longer the mechanism by which new evidence wins — new contradicting evidence now always generates a review item regardless of baseline comparison.
+- No data migration is required to adopt this behavior while overrides remain in the existing `Project.researcher_override` JSONB payload.
+- Phase C may still promote overrides into a `researcher_overrides` table for auditability and per-field indexing. That is a storage migration, not a prerequisite for the review-protected override semantics.
+- The `mode` field may continue to exist in override payloads for audit purposes but no longer determines resolution outcomes.
+
+#### 22.8 Interaction with STATUS_CHANGE rejection (§21a)
+
+§21a remains valid in its mechanics — rejecting a STATUS_CHANGE writes a `pipeline_status` researcher override. Under §22, that override is review-protected:
+
+- It blocks the rejected evidence from re-applying.
+- It does not block newer evidence from generating future review items.
+- Instead of emitting a one-shot `researcher_override_superseded` flag when newer evidence wins, the resolution engine now always emits a review item for the contradiction, allowing the researcher to re-affirm or accept.
+
+#### 22.9 Rationale
+
+- Pipedream's historical pattern (sticky human inputs) had a silent-rot failure mode: inputs from 2023 stayed authoritative even when reality changed.
+- The §21 conditional model fixed the silent-rot problem but introduced a silent-overwrite problem: newer evidence won without the researcher knowing their input had been superseded.
+- §22 eliminates both silent failures by surfacing every override-contradiction as an explicit review decision. The researcher maintains authority, and the system maintains audit visibility.
+
+#### 22.10 Implementation scope
+
+- Contradiction detection becomes a first-class service invoked during resolution and on new evidence ingest. See `docs/specs/data_model_changes.md` for the `contradiction_flags` / `ReviewItem` extension.
+- `review_workflow.py` must be updated to emit contradiction review items. The existing `researcher_override_superseded` flag path is replaced by the new review-item emission.
+- UI surfaces the review items as normal queue entries with the `⚠ contradicts your override` warning.
