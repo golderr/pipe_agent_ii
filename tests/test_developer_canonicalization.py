@@ -129,6 +129,46 @@ def test_canonicalize_developer_name_uses_fuzzy_review_threshold(
     assert result.requires_review is True
 
 
+def test_canonicalize_developer_name_blocks_generic_token_fuzzy_match(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    canonical_name = "ZZZSAFE Nimbleroot Capital"
+    raw_name = "ZZZPAC Vellum Capital"
+    postgres_session.add(DeveloperRegistry(canonical_name=canonical_name))
+    postgres_session.flush()
+
+    result = canonicalize_developer_name(
+        postgres_session,
+        raw_name,
+        persist=False,
+    )
+
+    assert result.canonical_name == raw_name
+    assert result.match_type == "new_registry_entry"
+
+
+def test_canonicalize_developer_name_still_allows_meaningful_token_fuzzy_match(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    postgres_session.add(DeveloperRegistry(canonical_name=TEST_CIM))
+    postgres_session.flush()
+
+    result = canonicalize_developer_name(
+        postgres_session,
+        TEST_CIM_ALIAS,
+        persist=False,
+    )
+
+    assert result.canonical_name == TEST_CIM
+    assert result.match_type == "fuzzy_review"
+
+
 def test_canonicalize_developer_name_ignores_generic_category_registry_row(
     postgres_session: Session,
 ) -> None:
@@ -389,6 +429,52 @@ def test_canonicalize_project_developers_does_not_apply_fuzzy_review_match(
     assert result.fuzzy_review_matches >= 1
     assert result.projects_changed == 0
     assert project.developer == TEST_CIM_ALIAS
+
+
+def test_canonicalize_project_developers_preserves_researcher_override_value(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    canonical = DeveloperRegistry(canonical_name=TEST_JAMISON)
+    postgres_session.add(canonical)
+    postgres_session.flush()
+    postgres_session.add(
+        DeveloperAlias(
+            developer_id=canonical.id,
+            alias_name=TEST_JAMISON_ALIAS,
+        )
+    )
+    project = Project(
+        canonical_address="502 WEST OVERRIDE STREET LOS ANGELES CA 90012",
+        raw_addresses=["502 W Override St"],
+        market="test_market",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        developer=TEST_JAMISON_ALIAS,
+        researcher_override={
+            "developer": {
+                "value": TEST_JAMISON_ALIAS,
+                "mode": "until_newer_evidence",
+                "note": "Keep researcher-selected raw developer value.",
+            }
+        },
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    result = canonicalize_project_developers(
+        postgres_session,
+        market="test_market",
+        apply=True,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+
+    assert result.projects_changed == 0
+    assert project.developer == TEST_JAMISON_ALIAS
 
 
 def test_canonicalize_project_developers_does_not_recreate_ignored_category_row(

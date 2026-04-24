@@ -583,3 +583,70 @@ When `date_delivery` is currently supplied by a researcher override:
 - `project.delivery_year_provenance` is set to `researcher_override`
 
 If newer evidence later supersedes the override, provenance returns to the winning evidence-derived value such as `explicit_government`, `explicit_tcg`, `explicit_news`, `explicit_costar`, or `estimated_calc`.
+
+### 21d. Delivery-Estimate Fill Policy
+
+**Date:** 2026-04-23
+
+Phase A validation accepted `estimated_calc` as a valid blank-filler for `date_delivery` when the project is in `Proposed`, `Pending`, or `Approved` and no explicit date is available.
+
+Decisions:
+
+- `estimated_calc` may populate a previously null `project.date_delivery`.
+- The resolved date remains explicitly tagged by `project.delivery_year_provenance = estimated_calc`.
+- Downstream consumers may filter, down-weight, or visually flag these dates based on provenance without changing the core resolution rule.
+
+Rationale:
+
+- The Phase A review packet spot-checked 10 representative null-to-estimate rows and found the formula sane enough to accept the full 218-row bucket.
+- Carrying a low-confidence estimate is more useful than leaving the field blank, as long as provenance stays explicit.
+
+### 21e. Small-Delta Units Policy
+
+**Date:** 2026-04-23
+
+Phase A validation accepted small `total_units` changes automatically and held larger deltas for researcher review.
+
+Decisions:
+
+- Any source may overwrite `project.total_units` when `abs(resolved_value - current_value) <= 5`.
+- Larger deltas require researcher review before apply.
+- The preferred hold primitive is a `researcher_override` in `until_newer_evidence` mode so genuinely newer evidence can still supersede the reviewer-held value.
+
+Rationale:
+
+- Small unit-count differences usually behave like measurement or source-format noise.
+- Larger changes often signal project-identity ambiguity, phase splits, or different source scoping.
+
+### 21f. Article Evidence Priority For Delivery Dates
+
+**Date:** 2026-04-23
+
+This is a forward-looking rule for the Phase D article collector.
+
+Decisions:
+
+- When article evidence exists for `date_delivery` and the article is dated within the last 6 months, that article evidence outranks CoStar for the `date_delivery` field.
+- This is a field-specific source-priority override for `date_delivery` only.
+- It does **not** change the general source-tier hierarchy for other fields.
+
+Rationale:
+
+- Articles often capture operator-stated timeline updates before automated source refreshes catch up.
+- Treating this as a delivery-date-specific override preserves the general evidence model while still reflecting how timeline updates appear in practice.
+
+### 21g. Developer Override Protection During Canonicalization Apply
+
+**Date:** 2026-04-23
+
+Phase A apply surfaced a case where `canonicalize-developers --apply` rewrote a project developer value that was already protected by a researcher override.
+
+Decisions:
+
+- `canonicalize-developers --apply` may continue to manage registry rows and aliases, but it must not rewrite `project.developer` when `project.researcher_override` contains a `developer` entry.
+- If the project later needs to reconcile that field, the resolution engine remains the source of truth because it understands override semantics and supersession.
+
+Rationale:
+
+- Project-level developer overrides are part of the evidence-layer review workflow and must not be bypassed by registry-maintenance sweeps.
+- Registry cleanup and project-field mutation are related but distinct responsibilities.

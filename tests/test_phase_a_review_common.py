@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from scripts.export_phase_a_reviews import _is_developer_canonical_cleanup_row
 from scripts.phase_a_review_common import (
     HELIO_CLUSTER_KEY,
     classify_delta_shape,
@@ -90,3 +91,33 @@ def test_delivery_estimate_spotcheck_is_stable() -> None:
 
     assert first == second
     assert len(first) == 5
+
+
+def test_developer_canonical_cleanup_row_captures_exact_alias_cleanup() -> None:
+    assert _is_developer_canonical_cleanup_row(
+        {
+            "current_value": "Jamison Services",
+            "resolved_value": "Jamison Properties",
+            "canonical_name": "Jamison Properties",
+            "match_type": "exact_alias",
+        }
+    )
+
+
+def test_developer_canonical_cleanup_row_excludes_substantive_review_rows() -> None:
+    assert not _is_developer_canonical_cleanup_row(
+        {
+            "current_value": "Helio / UCLA",
+            "resolved_value": "Beach City Capital LLC",
+            "canonical_name": "Beach City Capital LLC",
+            "match_type": "new_registry_entry",
+        }
+    )
+    assert not _is_developer_canonical_cleanup_row(
+        {
+            "current_value": "Walter J. Samson",
+            "resolved_value": "Walter J. Samson",
+            "canonical_name": "Walter J. Samson",
+            "match_type": "exact_canonical",
+        }
+    )

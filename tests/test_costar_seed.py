@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,23 @@ runner = CliRunner()
 def test_persist_costar_import_result_merges_into_existing_project_by_apn(
     postgres_session: Session,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pipedream_collected_at = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
+    costar_collected_at = datetime(2026, 1, 9, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        "tcg_pipeline.db.evidence.derive_pipedream_collected_at",
+        lambda project, source_record: pipedream_collected_at,
+    )
+    monkeypatch.setattr(
+        "tcg_pipeline.db.evidence.derive_pipedream_evidence_date",
+        lambda project, source_record: pipedream_collected_at.date(),
+    )
+    monkeypatch.setattr(
+        "tcg_pipeline.db.evidence.derive_source_record_collected_at",
+        lambda source_record: costar_collected_at,
+    )
+
     pipedream_path = _build_pipedream_workbook(
         tmp_path / "pipedream_apn.xlsx",
         [
@@ -108,8 +125,9 @@ def test_persist_costar_import_result_merges_into_existing_project_by_apn(
             Project.canonical_address == "9902 SOUTH EXAMPLE AVENUE LOS ANGELES CA 90057"
         )
     ).scalar_one()
-    # CoStar construction dates are future projections, not developer freshness.
-    # Keep the Pipedream researcher value when source timing does not beat it.
+    # CoStar construction dates are future projections, so they do not make the row
+    # artificially newer on their own. Pipedream still wins here because its snapshot
+    # is newer once the projected CoStar date is capped back to collection time.
     assert project.developer == "TCG Research"
     assert project.zoning == "C2"
     assert project.owner == "Example Owner"

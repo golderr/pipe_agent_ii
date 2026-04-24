@@ -436,6 +436,56 @@ def test_resolve_delivery_year_override_yields_to_newer_evidence_and_restores_pr
     assert resolution.metadata["delivery_date_type"] == "explicit_government"
 
 
+def test_resolve_delivery_year_for_complete_rejects_future_explicit_date_and_keeps_prior_explicit() -> None:
+    project = _build_project()
+    project.date_delivery = date(2026, 3, 20)
+    project.delivery_year_provenance = "explicit_costar"
+    future_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2026, 4, 20),
+        extracted_fields={"date_delivery": {"value": "2028-03-01", "confidence": None}},
+    )
+
+    resolution = resolve_delivery_year(
+        [future_evidence],
+        project,
+        resolved_status=PipelineStatus.COMPLETE,
+        resolved_total_units=250,
+    )
+
+    assert resolution.value == date(2026, 3, 20)
+    assert resolution.rule_applied == "complete_reject_future_delivery_keep_current"
+    assert resolution.metadata["provenance"] == "explicit_costar"
+
+
+def test_resolve_delivery_year_for_complete_prefers_non_future_explicit_evidence() -> None:
+    project = _build_project()
+    future_costar = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2026, 4, 20),
+        extracted_fields={"date_delivery": {"value": "2028-03-01", "confidence": None}},
+    )
+    past_government = _build_evidence(
+        source_type="ladbs_cofo",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={"date_delivery": {"value": "2026-03-15", "confidence": None}},
+    )
+
+    resolution = resolve_delivery_year(
+        [future_costar, past_government],
+        project,
+        resolved_status=PipelineStatus.COMPLETE,
+        resolved_total_units=250,
+    )
+
+    assert resolution.value == date(2026, 3, 15)
+    assert resolution.rule_applied == "explicit_delivery_date"
+    assert resolution.metadata["provenance"] == "explicit_government"
+
+
 def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> None:
     project = _build_project()
     project.pipeline_status = PipelineStatus.COMPLETE

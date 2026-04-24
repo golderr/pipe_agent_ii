@@ -609,21 +609,19 @@ def resolve_all(
     last_project_id = start_after
     batch_number = 0
 
-    while limit is None or total_projects < limit:
-        remaining = None if limit is None else limit - total_projects
-        if remaining is not None and remaining <= 0:
+    with session_factory() as session:
+        project_ids_to_process = _fetch_project_ids(
+            session,
+            market=market,
+            after_project_id=start_after,
+            limit=limit,
+        )
+
+    for start_index in range(0, len(project_ids_to_process), batch_size):
+        project_ids = project_ids_to_process[start_index : start_index + batch_size]
+        if not project_ids:
             break
-
         with session_factory() as session:
-            project_ids = _fetch_project_id_batch(
-                session,
-                market=market,
-                after_project_id=last_project_id,
-                batch_size=min(batch_size, remaining) if remaining is not None else batch_size,
-            )
-            if not project_ids:
-                break
-
             batch_number += 1
             batch_changed_projects = 0
             batch_changed_fields = 0
@@ -706,18 +704,20 @@ def _clear_resolution_log(session, *, market: str | None) -> None:
     session.execute(delete(ResolutionLog).where(ResolutionLog.project_id.in_(project_ids)))
 
 
-def _fetch_project_id_batch(
+def _fetch_project_ids(
     session,
     *,
     market: str | None,
     after_project_id: uuid.UUID | None,
-    batch_size: int,
+    limit: int | None,
 ) -> list[uuid.UUID]:
-    statement = select(Project.id).order_by(Project.id).limit(batch_size)
+    statement = select(Project.id).order_by(Project.id)
     if market is not None:
         statement = statement.where(Project.market == market)
     if after_project_id is not None:
         statement = statement.where(Project.id > after_project_id)
+    if limit is not None:
+        statement = statement.limit(limit)
     return list(session.execute(statement).scalars().all())
 
 

@@ -32,29 +32,54 @@ def resolve_delivery_year(
     overrides: dict[str, Any] | None = None,
 ) -> FieldResolution:
     observations = iter_field_observations(evidence_rows, "date_delivery")
-    if observations:
-        resolved_date = parse_date_value(observations[0].value)
+    explicit_observation = _select_explicit_delivery_observation(
+        observations,
+        resolved_status=resolved_status,
+    )
+    if explicit_observation is not None:
+        resolved_date = parse_date_value(explicit_observation.value)
         if resolved_date is not None:
-            provenance = _provenance_for_source_type(observations[0].evidence.source_type)
+            provenance = _provenance_for_source_type(explicit_observation.evidence.source_type)
             candidate = build_resolution(
                 "date_delivery",
                 resolved_date,
                 confidence=infer_confidence(observations),
-                observations=observations[:1],
+                observations=[explicit_observation],
                 rule_applied="explicit_delivery_date",
                 metadata={
                     "provenance": provenance,
                     "delivery_date_type": provenance,
-                    "source_type": observations[0].evidence.source_type,
+                    "source_type": explicit_observation.evidence.source_type,
                     "description": (
-                        f"Explicit delivery date from {observations[0].evidence.source_type} "
-                        f"evidence dated {observations[0].effective_date.isoformat()}."
+                        f"Explicit delivery date from {explicit_observation.evidence.source_type} "
+                        f"evidence dated {explicit_observation.effective_date.isoformat()}."
                     ),
                 },
             )
             return _apply_delivery_override(candidate, overrides)
 
-    if project.date_delivery is not None:
+    if resolved_status == PipelineStatus.COMPLETE:
+        prior_explicit_date = _current_explicit_project_delivery(project)
+        if prior_explicit_date is not None:
+            candidate = build_resolution(
+                "date_delivery",
+                prior_explicit_date,
+                confidence=StatusConfidence.LOW,
+                rule_applied="complete_reject_future_delivery_keep_current",
+                metadata={
+                    "provenance": project.delivery_year_provenance,
+                    "delivery_date_type": project.delivery_year_provenance,
+                    "description": (
+                        "Ignored future delivery-date evidence because the resolved status "
+                        "is Complete; retained the existing non-future explicit project date."
+                    ),
+                },
+            )
+            return _apply_delivery_override(candidate, overrides)
+
+    if project.date_delivery is not None and not (
+        resolved_status == PipelineStatus.COMPLETE and project.date_delivery > date.today()
+    ):
         candidate = build_resolution(
             "date_delivery",
             project.date_delivery,
@@ -148,3 +173,32 @@ def _provenance_for_source_type(source_type: str) -> str:
     if source_type == "news_article":
         return "explicit_news"
     return "explicit_government"
+
+
+def _select_explicit_delivery_observation(
+    observations,
+    *,
+    resolved_status: PipelineStatus,
+):
+    if resolved_status != PipelineStatus.COMPLETE:
+        return observations[0] if observations else None
+
+    today = date.today()
+    for observation in observations:
+        resolved_date = parse_date_value(observation.value)
+        if resolved_date is None:
+            continue
+        if resolved_date <= today:
+            return observation
+    return None
+
+
+def _current_explicit_project_delivery(project: Project) -> date | None:
+    if project.date_delivery is None:
+        return None
+    if project.date_delivery > date.today():
+        return None
+    provenance = str(project.delivery_year_provenance or "")
+    if not provenance.startswith("explicit_"):
+        return None
+    return project.date_delivery

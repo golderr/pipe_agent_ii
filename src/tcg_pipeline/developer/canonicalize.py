@@ -74,11 +74,17 @@ def canonicalize_project_developers(
             and canonicalization.match_type != "fuzzy_review"
             and canonicalization.canonical_name is not None
             and canonicalization.canonical_name != project.developer
+            and not _project_has_field_override(project, "developer")
         ):
             project.developer = canonicalization.canonical_name
             result.projects_changed += 1
 
     return result
+
+
+def _project_has_field_override(project: Project, field_name: str) -> bool:
+    override_payload = project.researcher_override
+    return isinstance(override_payload, dict) and field_name in override_payload
 
 
 def _accumulate_result(

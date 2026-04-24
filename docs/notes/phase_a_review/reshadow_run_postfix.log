@@ -1,0 +1,36 @@
+Batch 1: projects=100 discrepancies=100 changed_fields=650 log_rows=562 last_project_id=124775f3-9cdf-403c-8754-cedfa8a5004d
+Batch 2: projects=100 discrepancies=100 changed_fields=647 log_rows=571 last_project_id=274225a4-9964-4d74-bc17-3211dd589681
+Batch 3: projects=100 discrepancies=100 changed_fields=641 log_rows=563 last_project_id=39da628a-15e2-464b-907a-819cc70a51c9
+Batch 4: projects=100 discrepancies=100 changed_fields=651 log_rows=572 last_project_id=4e6da917-6f4a-43f0-9577-70ab1599f421
+Batch 5: projects=100 discrepancies=100 changed_fields=642 log_rows=565 last_project_id=6111bbe0-9e7d-4f9e-8e95-781ec8588240
+Batch 6: projects=100 discrepancies=100 changed_fields=655 log_rows=573 last_project_id=723df75e-8a39-4980-b078-8a6959e1cf52
+Batch 7: projects=100 discrepancies=100 changed_fields=641 log_rows=557 last_project_id=8336a001-9623-4dcc-9eb4-e69a43bd0572
+Batch 8: projects=100 discrepancies=100 changed_fields=637 log_rows=560 last_project_id=964b74f0-db08-40e6-ad10-7d35c98b46af
+Batch 9: projects=100 discrepancies=100 changed_fields=638 log_rows=561 last_project_id=a98a05a7-d67b-4205-8e8a-edeac0f5f8ab
+Batch 10: projects=100 discrepancies=100 changed_fields=638 log_rows=557 last_project_id=bb072505-5200-465c-b6bd-01d29075b306
+Batch 11: projects=100 discrepancies=100 changed_fields=648 log_rows=570 last_project_id=cf6390a9-ed0b-49c2-8553-c9261832ea91
+Batch 12: projects=100 discrepancies=100 changed_fields=647 log_rows=568 last_project_id=ddf48e83-f435-465a-bb2a-b69637dfdb9b
+Batch 13: projects=100 discrepancies=100 changed_fields=642 log_rows=558 last_project_id=f3013556-d6d1-4f6b-a141-bd7dfab6f0b1
+Batch 14: projects=62 discrepancies=62 changed_fields=402 log_rows=357 last_project_id=ff57c21f-047b-497a-a3d1-aa44a5993bec
+Projects resolved: 1362
+Projects with discrepancies: 1362
+Changed fields detected: 8779
+Resolution log rows written: 7694
+Changed field counts:
+  confidence: 292
+  confidence_reason: 1362
+  date_delivery: 252
+  delivery_year_provenance: 1362
+  developer: 304
+  last_evidence_date: 1362
+  likelihood: 1362
+  likelihood_breakdown: 1362
+  pipeline_status: 9
+  total_units: 27
+Resolution confidence counts:
+  high: 1840
+  low: 5201
+  medium: 653
+Current project confidence counts:
+  low: 1362
+Apply mode: False

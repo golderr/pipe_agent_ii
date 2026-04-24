@@ -29,6 +29,45 @@ LEGAL_SUFFIX_TOKENS = {
     "LIMITED",
     "PLC",
 }
+GENERIC_DEVELOPER_TOKENS = {
+    "ADVISOR",
+    "ADVISORS",
+    "AND",
+    "ASSOCIATE",
+    "ASSOCIATES",
+    "CAPITAL",
+    "COMMUNITIES",
+    "COMMUNITY",
+    "CONSTRUCTION",
+    "DEVELOPMENT",
+    "DEVELOPMENTS",
+    "ESTATE",
+    "FUND",
+    "FUNDS",
+    "GROUP",
+    "GROUPS",
+    "HOLDING",
+    "HOLDINGS",
+    "HOME",
+    "HOMES",
+    "HOUSING",
+    "INVESTMENT",
+    "INVESTMENTS",
+    "MANAGEMENT",
+    "PARTNER",
+    "PARTNERS",
+    "PROPERTIES",
+    "PROPERTY",
+    "REAL",
+    "REALTY",
+    "RESIDENTIAL",
+    "SERVICE",
+    "SERVICES",
+    "TRUST",
+    "VENTURE",
+    "VENTURES",
+}
+MEANINGFUL_TOKEN_SIMILARITY_THRESHOLD = 80.0
 NON_ALPHANUMERIC_PATTERN = re.compile(r"[^A-Z0-9]+")
 IGNORED_REGISTRY_CANONICAL_NAMES = {
     # Data-quality guard: a polluted production registry row named "Category"
@@ -306,6 +345,8 @@ def _best_fuzzy_match(
             normalized_candidate = normalize_developer_name(matched_name)
             if normalized_candidate is None:
                 continue
+            if not _has_meaningful_name_overlap(normalized_name, normalized_candidate):
+                continue
             score = fuzz.token_set_ratio(normalized_name, normalized_candidate)
             existing = best_match_by_developer.get(developer.id)
             if existing is None or (existing.score or 0.0) < score:
@@ -358,6 +399,35 @@ def _suffix_count(name: str) -> int:
         count += 1
         tokens.pop()
     return count
+
+
+def _meaningful_tokens(name: str | None) -> set[str]:
+    normalized = normalize_developer_name(name)
+    if normalized is None:
+        return set()
+    return {
+        token
+        for token in normalized.split()
+        if token and token not in GENERIC_DEVELOPER_TOKENS
+    }
+
+
+def _has_meaningful_name_overlap(left: str | None, right: str | None) -> bool:
+    left_tokens = _meaningful_tokens(left)
+    right_tokens = _meaningful_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens & right_tokens:
+        return True
+    for left_token in left_tokens:
+        if len(left_token) < 4:
+            continue
+        for right_token in right_tokens:
+            if len(right_token) < 4:
+                continue
+            if fuzz.ratio(left_token, right_token) >= MEANINGFUL_TOKEN_SIMILARITY_THRESHOLD:
+                return True
+    return False
 
 
 def _build_result(

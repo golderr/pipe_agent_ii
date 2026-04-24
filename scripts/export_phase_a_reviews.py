@@ -171,6 +171,24 @@ DEVELOPER_CATEGORY_HEADERS = [
     "match_score",
     "requires_review",
 ]
+DEVELOPER_CANONICAL_CLEANUP_HEADERS = [
+    "project_id",
+    "project_name",
+    "canonical_address",
+    "field",
+    "current_value",
+    "resolved_value",
+    "rule_applied",
+    "resolution_confidence",
+    "project_confidence",
+    "last_evidence_date",
+    "evidence_count",
+    "raw_value",
+    "canonical_name",
+    "match_type",
+    "match_score",
+    "requires_review",
+]
 DEVELOPER_ALIAS_HEADERS = [
     "alias_name",
     "canonical_name",
@@ -248,8 +266,16 @@ def export_phase_a_reviews(
         for row in developer_rows
         if row["current_value"] == "Category"
     ]
+    developer_canonical_cleanup_rows = [
+        _drop_review_columns(row, drop_decision_columns=True)
+        for row in developer_rows
+        if _is_developer_canonical_cleanup_row(row)
+    ]
     developer_review_rows = [
-        row for row in developer_rows if row["current_value"] != "Category"
+        row
+        for row in developer_rows
+        if row["current_value"] != "Category"
+        and not _is_developer_canonical_cleanup_row(row)
     ]
     developer_review_rows.sort(key=developer_review_sort_key)
     developer_helio_rows = [
@@ -303,6 +329,11 @@ def export_phase_a_reviews(
         rows=developer_category_cleanup_rows,
     )
     write_csv(
+        output_dir / "developer_canonical_cleanup.csv",
+        fieldnames=DEVELOPER_CANONICAL_CLEANUP_HEADERS,
+        rows=developer_canonical_cleanup_rows,
+    )
+    write_csv(
         output_dir / "developer_helio_ucla_cluster.csv",
         fieldnames=[header for header in DEVELOPER_HEADERS if header not in {"decision", "notes"}],
         rows=developer_helio_rows,
@@ -321,6 +352,7 @@ def export_phase_a_reviews(
         "delivery_estimated_fill_rows": len(estimated_delivery_rows),
         "developer_review_rows": len(developer_review_rows),
         "developer_category_cleanup_rows": len(developer_category_cleanup_rows),
+        "developer_canonical_cleanup_rows": len(developer_canonical_cleanup_rows),
         "developer_helio_ucla_cluster_rows": len(developer_helio_rows),
         "developer_alias_candidate_rows": len(developer_alias_rows),
     }
@@ -527,6 +559,20 @@ def _build_alias_candidate_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
             }
         )
     return alias_rows
+
+
+def _is_developer_canonical_cleanup_row(row: dict[str, Any]) -> bool:
+    match_type = str(row.get("match_type") or "")
+    current_value = row.get("current_value")
+    resolved_value = row.get("resolved_value")
+    canonical_name = row.get("canonical_name")
+    if match_type not in {"exact_alias", "exact_canonical"}:
+        return False
+    if current_value in {None, ""} or resolved_value in {None, ""}:
+        return False
+    if current_value == resolved_value:
+        return False
+    return resolved_value == canonical_name
 
 
 def _drop_review_columns(

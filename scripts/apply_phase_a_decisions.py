@@ -25,6 +25,20 @@ REVIEW_INPUT_FILENAMES = (
     "delivery_review.csv",
     "developer_review.csv",
 )
+PHASE_A_BUCKET_INPUT_FILENAMES = (
+    "status_review.csv",
+    "units_review.csv",
+    "delivery_review.csv",
+    "delivery_estimate_spotcheck.csv",
+    "developer_review.csv",
+    "developer_category_cleanup.csv",
+    "developer_canonical_cleanup.csv",
+)
+PHASE_A_BUCKET_PROFILE = "phase_a_2026_04_23"
+ARCHITECTURE_FIRM_RAW_VALUES = {
+    "MVE + Partners",
+    "Three 6Ixty",
+}
 VALID_DECISIONS = {"accept", "override", "defer", "bug", ""}
 
 
@@ -39,6 +53,7 @@ class DecisionRow:
     decision: str
     notes: str
     raw_row: dict[str, str]
+    override_source: str | None = None
 
 
 def main() -> None:
@@ -67,6 +82,12 @@ def main() -> None:
         help="Actor value stored on generated overrides.",
     )
     parser.add_argument(
+        "--decision-profile",
+        choices=[PHASE_A_BUCKET_PROFILE],
+        default=None,
+        help="Optional named bucket-level decision profile.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate and summarize decisions without writing overrides.",
@@ -76,11 +97,13 @@ def main() -> None:
     input_paths = _resolve_input_paths(
         input_dir=Path(args.input_dir),
         explicit_paths=[Path(path) for path in args.input_file],
+        decision_profile=args.decision_profile,
     )
     result = apply_phase_a_decisions(
         input_paths=input_paths,
         actor=args.actor,
         dry_run=args.dry_run,
+        decision_profile=args.decision_profile,
     )
     for line in result:
         print(line)
@@ -91,14 +114,30 @@ def apply_phase_a_decisions(
     input_paths: list[Path],
     actor: str,
     dry_run: bool,
+    decision_profile: str | None,
 ) -> list[str]:
-    decision_rows = _load_decision_rows(input_paths)
+    decision_rows = _load_decision_rows(
+        input_paths,
+        decision_profile=decision_profile,
+    )
     decision_counts = Counter(row.decision or "pending" for row in decision_rows)
+    file_decision_counts = Counter(
+        f"{row.source_file.name}:{row.decision or 'pending'}" for row in decision_rows
+    )
     output_lines = [
         f"Loaded CSV rows: {len(decision_rows)}",
+        *(
+            [f"Decision profile: {decision_profile}"]
+            if decision_profile is not None
+            else []
+        ),
         *[
             f"{decision}: {count}"
             for decision, count in sorted(decision_counts.items())
+        ],
+        *[
+            f"{label}: {count}"
+            for label, count in sorted(file_decision_counts.items())
         ],
     ]
 
@@ -120,6 +159,11 @@ def apply_phase_a_decisions(
     override_rows = [row for row in decision_rows if row.decision in {"override", "defer"}]
     if dry_run:
         output_lines.append(f"Would write overrides: {len(override_rows)}")
+        override_breakdown = Counter(
+            f"{row.source_file.name}:{row.override_source or 'current'}" for row in override_rows
+        )
+        for label, count in sorted(override_breakdown.items()):
+            output_lines.append(f"{label}: {count}")
         return output_lines
 
     session_factory = get_session_factory()
@@ -143,10 +187,10 @@ def apply_phase_a_decisions(
             )
             incoming_overrides: dict[str, dict[str, Any]] = {}
             for row in project_rows:
-                current_serialized = serialize_csv_value(
+                current_serialized = _serialize_for_csv_compare(
                     getattr(project, row.field_name)
                 )
-                resolved_serialized = serialize_csv_value(
+                resolved_serialized = _serialize_for_csv_compare(
                     resolution_result.field_resolutions[row.field_name].value
                 )
                 if current_serialized != row.current_value:
@@ -166,9 +210,10 @@ def apply_phase_a_decisions(
                 if row.decision == "defer":
                     note = f"Phase A defer: {note}"
 
+                override_value = _override_value_for_row(project, row)
                 incoming_overrides[row.field_name] = _build_override_entry(
                     raw_override={
-                        "value": getattr(project, row.field_name),
+                        "value": override_value,
                         "mode": "until_newer_evidence",
                         "note": note,
                     },
@@ -193,23 +238,41 @@ def _resolve_input_paths(
     *,
     input_dir: Path,
     explicit_paths: list[Path],
+    decision_profile: str | None,
 ) -> list[Path]:
     if explicit_paths:
         return explicit_paths
-    return [input_dir / name for name in REVIEW_INPUT_FILENAMES]
+    filenames = (
+        PHASE_A_BUCKET_INPUT_FILENAMES
+        if decision_profile == PHASE_A_BUCKET_PROFILE
+        else REVIEW_INPUT_FILENAMES
+    )
+    return [input_dir / name for name in filenames]
 
 
-def _load_decision_rows(paths: list[Path]) -> list[DecisionRow]:
+def _load_decision_rows(
+    paths: list[Path],
+    *,
+    decision_profile: str | None,
+) -> list[DecisionRow]:
     rows: list[DecisionRow] = []
     for path in paths:
         with path.open("r", newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row_number, raw_row in enumerate(reader, start=2):
-                decision = (raw_row.get("decision") or "").strip().lower()
-                if decision not in VALID_DECISIONS:
-                    raise ValueError(
-                        f"Invalid decision '{decision}' in {path}:{row_number}"
+                if decision_profile == PHASE_A_BUCKET_PROFILE:
+                    decision, notes, override_source = _phase_a_bucket_decision(
+                        path.name,
+                        raw_row,
                     )
+                else:
+                    decision = (raw_row.get("decision") or "").strip().lower()
+                    notes = (raw_row.get("notes") or "").strip()
+                    override_source = None
+                    if decision not in VALID_DECISIONS:
+                        raise ValueError(
+                            f"Invalid decision '{decision}' in {path}:{row_number}"
+                        )
                 rows.append(
                     DecisionRow(
                         source_file=path,
@@ -219,11 +282,89 @@ def _load_decision_rows(paths: list[Path]) -> list[DecisionRow]:
                         current_value=(raw_row.get("current_value") or "").strip(),
                         resolved_value=(raw_row.get("resolved_value") or "").strip(),
                         decision=decision,
-                        notes=(raw_row.get("notes") or "").strip(),
+                        notes=notes,
                         raw_row=dict(raw_row),
+                        override_source=override_source,
                     )
                 )
     return rows
+
+
+def _phase_a_bucket_decision(
+    source_filename: str,
+    raw_row: dict[str, str],
+) -> tuple[str, str, str | None]:
+    if source_filename == "status_review.csv":
+        return ("accept", "Phase A bucket policy: accept all status deltas.", None)
+
+    if source_filename == "units_review.csv":
+        delta_abs_text = (raw_row.get("delta_abs") or "").strip()
+        delta_abs = int(delta_abs_text) if delta_abs_text else None
+        if delta_abs is not None and delta_abs <= 5:
+            return (
+                "accept",
+                f"Phase A bucket policy: accept total_units delta <= 5 (delta={delta_abs}).",
+                None,
+            )
+        return (
+            "defer",
+            "Phase A bucket policy: keep current total_units when delta > 5.",
+            "current",
+        )
+
+    if source_filename == "delivery_review.csv":
+        return ("accept", "Phase A bucket policy: accept explicit delivery-date overwrites.", None)
+
+    if source_filename == "delivery_estimate_spotcheck.csv":
+        return (
+            "accept",
+            "Phase A bucket policy: accept estimated_calc delivery fills for blank dates.",
+            None,
+        )
+
+    if source_filename in {"developer_category_cleanup.csv", "developer_canonical_cleanup.csv"}:
+        return (
+            "accept",
+            "Phase A bucket policy: accept developer cleanup rows as data hygiene.",
+            None,
+        )
+
+    if source_filename == "developer_review.csv":
+        raw_value = (raw_row.get("raw_value") or "").strip()
+        resolved_value = (raw_row.get("resolved_value") or "").strip()
+        if raw_value in ARCHITECTURE_FIRM_RAW_VALUES:
+            return (
+                "override",
+                f"Phase A architecture-firm exception: keep current developer instead of '{raw_value}'.",
+                "current",
+            )
+        if raw_value and raw_value != resolved_value:
+            return (
+                "override",
+                f"Phase A bucket policy: accept raw developer value '{raw_value}'.",
+                "raw",
+            )
+        return (
+            "accept",
+            "Phase A bucket policy: accept developer row as resolved.",
+            None,
+        )
+
+    raise ValueError(f"Unsupported CSV for {PHASE_A_BUCKET_PROFILE}: {source_filename}")
+
+
+def _override_value_for_row(project: Project, row: DecisionRow) -> Any:
+    if row.override_source == "raw":
+        raw_value = (row.raw_row.get("raw_value") or "").strip()
+        return raw_value or None
+    return getattr(project, row.field_name)
+
+
+def _serialize_for_csv_compare(value: Any) -> str:
+    serialized = serialize_csv_value(value)
+    if serialized is None:
+        return ""
+    return str(serialized)
 
 
 if __name__ == "__main__":
