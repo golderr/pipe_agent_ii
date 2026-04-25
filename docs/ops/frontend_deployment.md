@@ -11,6 +11,7 @@ Current production deployment:
 - Production URL: `https://tcg-pipeline.vercel.app`
 - Latest production deployment: `https://tcg-pipeline-qh534998v-the-concord-group.vercel.app`
 - Production env vars set: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAILS`, `NEXT_PUBLIC_SITE_URL`
+- Optional map tile env vars: `NEXT_PUBLIC_MAP_TILE_URL`, `NEXT_PUBLIC_MAP_TILE_ATTRIBUTION`. If unset, Pipeline uses OpenStreetMap public raster tiles as a short-term internal fallback. Pick a licensed or self-hosted tile provider before broader routine usage.
 - Preview env vars are not set yet; the Vercel CLI required branch-scoped Preview vars in this session. Set them from the dashboard before relying on preview deployments.
 - Production smoke completed:
   - `/login` returns 200 and renders the magic-link form.
@@ -19,7 +20,7 @@ Current production deployment:
   - Disallowed email submit returns 303 to `/login?error=not_allowed`.
   - Allowed email submit for `ng@theconcordgroup.com` returns 303 to `/login?sent=1`.
   - Real inbox magic-link click lands on authenticated `/coverage` with jurisdiction rows visible.
-  - After the 2026-04-25 MapLibre switch, authenticated `/pipeline` map visual smoke still needs a real-user browser check: table loads, Map tab renders CARTO tiles, clusters/pins are visible, and project popup opens.
+  - After the 2026-04-25 MapLibre switch, authenticated `/pipeline` map visual smoke still needs a real-user browser check: table loads, Map tab renders basemap tiles, clusters/pins are visible, and project popup opens.
 
 Required Vercel environment variables:
 

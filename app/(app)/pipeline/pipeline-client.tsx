@@ -65,6 +65,8 @@ type ProjectFeatureProperties = {
 const FILTER_STORAGE_KEY = "pipeline:filters";
 const VIEW_MODE_STORAGE_KEY = "pipeline:viewMode";
 const SAVED_VIEWS_STORAGE_KEY = "pipeline:savedViews";
+const MAP_TILE_URL = process.env.NEXT_PUBLIC_MAP_TILE_URL ?? "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const MAP_TILE_ATTRIBUTION = process.env.NEXT_PUBLIC_MAP_TILE_ATTRIBUTION ?? "(C) OpenStreetMap contributors";
 
 const DEFAULT_FILTERS: PipelineFilters = {
   search: "",
@@ -93,18 +95,18 @@ const STATUS_STYLES: Record<string, { className: string; color: string }> = {
 const MAP_STYLE: StyleSpecification = {
   version: 8,
   sources: {
-    carto: {
+    basemap: {
       type: "raster",
-      tiles: ["https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
+      tiles: [MAP_TILE_URL],
       tileSize: 256,
-      attribution: "(C) OpenStreetMap contributors (C) CARTO"
+      attribution: MAP_TILE_ATTRIBUTION
     }
   },
   layers: [
     {
-      id: "carto",
+      id: "basemap",
       type: "raster",
-      source: "carto"
+      source: "basemap"
     }
   ]
 };
