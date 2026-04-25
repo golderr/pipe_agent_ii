@@ -18,6 +18,22 @@ export type EvidenceSummary = {
   teaser: string | null;
 };
 
+export type ProjectEvidenceRow = EvidenceSummary & {
+  sourceTier: number;
+  ingestMethod: string;
+  sourceRecordId: string | null;
+  sourceUrl: string | null;
+  sourceBadge: SourceBadge;
+  rawData: Record<string, unknown> | null;
+  extractedFields: Record<string, unknown> | null;
+  signalFlags: Record<string, unknown> | null;
+};
+
+export type ProjectEvidenceFilters = {
+  fields: string[];
+  sources: string[];
+};
+
 export type FieldProvenance = {
   sourceBadge: SourceBadge;
   rule: string | null;
@@ -59,4 +75,6 @@ export type ProjectDetailData = {
     openReviewCount: number;
   };
   sections: ProjectDetailSection[];
+  evidenceRows: ProjectEvidenceRow[];
+  evidenceFilters: ProjectEvidenceFilters;
 };

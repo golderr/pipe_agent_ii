@@ -4,6 +4,7 @@ import type {
   FieldClass,
   FieldProvenance,
   ProjectDetailData,
+  ProjectEvidenceRow,
   ProjectDetailSection,
   ProjectField,
   SourceBadge
@@ -45,10 +46,21 @@ type RawIdentifier = {
 type RawEvidence = {
   id: string;
   source_type: string;
+  source_tier: number;
+  ingest_method: string;
+  source_record_id: string | null;
   collected_at: string;
   evidence_date: string | null;
+  raw_data: Record<string, unknown> | null;
   extracted_fields: Record<string, unknown> | null;
+  signal_flags: Record<string, unknown> | null;
   notes: string | null;
+};
+
+type RawProjectSourceRecord = {
+  source_name: string;
+  source_record_id: string;
+  source_url: string | null;
 };
 
 type RawFieldResolution = {
@@ -322,6 +334,10 @@ function evidenceTeaser(evidence: RawEvidence) {
   return fields.length > 0 ? fields.join(" | ") : null;
 }
 
+function uniqueSorted(values: Array<string | null | undefined>) {
+  return [...new Set(values.filter(Boolean) as string[])].sort((a, b) => a.localeCompare(b));
+}
+
 function toEvidenceSummary(evidence: RawEvidence): EvidenceSummary {
   return {
     id: evidence.id,
@@ -331,6 +347,38 @@ function toEvidenceSummary(evidence: RawEvidence): EvidenceSummary {
     notes: evidence.notes,
     fields: evidenceFields(evidence),
     teaser: evidenceTeaser(evidence)
+  };
+}
+
+function sourceRecordUrlForEvidence(
+  evidence: RawEvidence,
+  sourceRecordUrls: Map<string, string | null>
+) {
+  if (!evidence.source_record_id) {
+    return null;
+  }
+
+  return (
+    sourceRecordUrls.get(`${evidence.source_type}:${evidence.source_record_id}`) ??
+    sourceRecordUrls.get(evidence.source_record_id) ??
+    null
+  );
+}
+
+function toProjectEvidenceRow(
+  evidence: RawEvidence,
+  sourceRecordUrls: Map<string, string | null>
+): ProjectEvidenceRow {
+  return {
+    ...toEvidenceSummary(evidence),
+    sourceTier: evidence.source_tier,
+    ingestMethod: evidence.ingest_method,
+    sourceRecordId: evidence.source_record_id,
+    sourceUrl: sourceRecordUrlForEvidence(evidence, sourceRecordUrls),
+    sourceBadge: sourceBadgeFromEvidence(evidence),
+    rawData: evidence.raw_data,
+    extractedFields: evidence.extracted_fields,
+    signalFlags: evidence.signal_flags
   };
 }
 
@@ -560,6 +608,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     jurisdiction,
     identifiers,
     evidenceRows,
+    sourceRecords,
     resolutions,
     reviewItems,
     relationships,
@@ -582,7 +631,13 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     fetchProjectRows<RawEvidence>(
       supabase,
       "evidence",
-      "id, source_type, collected_at, evidence_date, extracted_fields, notes",
+      "id, source_type, source_tier, ingest_method, source_record_id, collected_at, evidence_date, raw_data, extracted_fields, signal_flags, notes",
+      projectId
+    ),
+    fetchProjectRows<RawProjectSourceRecord>(
+      supabase,
+      "project_source_records",
+      "source_name, source_record_id, source_url",
       projectId
     ),
     fetchProjectRows<RawFieldResolution>(
@@ -614,6 +669,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     jurisdiction.error?.message ??
     identifiers.error ??
     evidenceRows.error ??
+    sourceRecords.error ??
     resolutions.error ??
     reviewItems.error ??
     relationships.error ??
@@ -627,6 +683,22 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
   const sortedEvidenceRows = evidenceRows.data.sort((a, b) =>
     String(b.evidence_date ?? b.collected_at).localeCompare(String(a.evidence_date ?? a.collected_at))
   );
+  const sourceRecordUrls = new Map<string, string | null>();
+  const sourceRecordIdCounts = new Map<string, number>();
+  for (const sourceRecord of sourceRecords.data) {
+    sourceRecordUrls.set(`${sourceRecord.source_name}:${sourceRecord.source_record_id}`, sourceRecord.source_url);
+    sourceRecordIdCounts.set(
+      sourceRecord.source_record_id,
+      (sourceRecordIdCounts.get(sourceRecord.source_record_id) ?? 0) + 1
+    );
+  }
+  for (const sourceRecord of sourceRecords.data) {
+    if (sourceRecordIdCounts.get(sourceRecord.source_record_id) === 1) {
+      sourceRecordUrls.set(sourceRecord.source_record_id, sourceRecord.source_url);
+    }
+  }
+
+  const projectEvidenceRows = sortedEvidenceRows.map((evidence) => toProjectEvidenceRow(evidence, sourceRecordUrls));
   const evidenceById = new Map(sortedEvidenceRows.map((evidence) => [evidence.id, evidence]));
   const resolutionByField = new Map(resolutions.data.map((resolution) => [resolution.field, resolution]));
   const openReviewItems = reviewItems.data.filter((item) => item.status === "open");
@@ -731,7 +803,12 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         evidenceCount: sortedEvidenceRows.length,
         openReviewCount: openReviewItems.length
       },
-      sections
+      sections,
+      evidenceRows: projectEvidenceRows,
+      evidenceFilters: {
+        fields: uniqueSorted(projectEvidenceRows.flatMap((row) => row.fields)),
+        sources: uniqueSorted(projectEvidenceRows.map((row) => row.sourceType))
+      }
     },
     error: null
   };

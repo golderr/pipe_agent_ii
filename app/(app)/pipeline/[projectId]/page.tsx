@@ -1,15 +1,38 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AlertCircle, ArrowLeft, Circle, Clock, MapPin } from "lucide-react";
+import { AlertCircle, ArrowLeft, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
 import { getProjectDetailData } from "@/lib/project-detail/data";
 import { compactStatus, statusStyle } from "@/lib/status";
-import type { EvidenceSummary, FieldClass, ProjectField, SourceBadge } from "@/lib/project-detail/types";
+import type {
+  EvidenceSummary,
+  FieldClass,
+  ProjectDetailSection,
+  ProjectEvidenceFilters,
+  ProjectEvidenceRow,
+  ProjectField,
+  SourceBadge
+} from "@/lib/project-detail/types";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
 type ProjectDetailPageProps = {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{
+    tab?: string;
+    field?: string;
+    source?: string;
+    from?: string;
+    to?: string;
+  }>;
+};
+
+type ProjectDetailTab = "snapshot" | "evidence";
+type EvidenceQuery = {
+  field: string | null;
+  source: string | null;
+  from: string | null;
+  to: string | null;
 };
 
 const SOURCE_TONES: Record<SourceBadge["tone"], string> = {
@@ -58,8 +81,100 @@ function sourceBadgeTitle(badge: SourceBadge) {
     .join(" | ");
 }
 
-export default async function ProjectDetailPage({ params }: ProjectDetailPageProps) {
+function normalizeTab(value: string | undefined): ProjectDetailTab {
+  return value === "evidence" ? "evidence" : "snapshot";
+}
+
+function normalizeQueryValue(value: string | undefined) {
+  return value && value.trim() ? value.trim() : null;
+}
+
+function evidenceDateKey(evidence: ProjectEvidenceRow) {
+  return String(evidence.evidenceDate ?? evidence.collectedAt).slice(0, 10);
+}
+
+function evidenceMonthLabel(evidence: ProjectEvidenceRow) {
+  const value = evidence.evidenceDate ?? evidence.collectedAt;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    year: "numeric"
+  }).format(new Date(value));
+}
+
+function filterEvidenceRows(
+  evidenceRows: ProjectEvidenceRow[],
+  filters: EvidenceQuery
+) {
+  return evidenceRows.filter((evidence) => {
+    if (filters.field && !evidence.fields.includes(filters.field)) {
+      return false;
+    }
+    if (filters.source && evidence.sourceType !== filters.source) {
+      return false;
+    }
+    const dateKey = evidenceDateKey(evidence);
+    if (filters.from && dateKey < filters.from) {
+      return false;
+    }
+    if (filters.to && dateKey > filters.to) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function groupEvidenceByMonth(evidenceRows: ProjectEvidenceRow[]) {
+  const groups: Array<{ month: string; rows: ProjectEvidenceRow[] }> = [];
+
+  for (const evidence of evidenceRows) {
+    const month = evidenceMonthLabel(evidence);
+    const last = groups.at(-1);
+    if (last?.month === month) {
+      last.rows.push(evidence);
+    } else {
+      groups.push({ month, rows: [evidence] });
+    }
+  }
+
+  return groups;
+}
+
+function safeExternalUrl(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function prettyJson(value: Record<string, unknown> | null) {
+  return value ? JSON.stringify(value, null, 2) : "{}";
+}
+
+function displayEvidenceFieldValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  if (typeof value === "object" && !Array.isArray(value) && "value" in (value as Record<string, unknown>)) {
+    return displayEvidenceFieldValue((value as Record<string, unknown>).value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => displayEvidenceFieldValue(item)).join(", ");
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+export default async function ProjectDetailPage({ params, searchParams }: ProjectDetailPageProps) {
   const { projectId } = await params;
+  const query = await searchParams;
   const result = await getProjectDetailData(projectId);
 
   if (result.notFound) {
@@ -80,7 +195,15 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
     );
   }
 
-  const { project, sections } = result.data;
+  const { project, sections, evidenceRows, evidenceFilters } = result.data;
+  const activeTab = normalizeTab(query.tab);
+  const evidenceQuery = {
+    field: normalizeQueryValue(query.field),
+    source: normalizeQueryValue(query.source),
+    from: normalizeQueryValue(query.from),
+    to: normalizeQueryValue(query.to)
+  };
+  const filteredEvidenceRows = filterEvidenceRows(evidenceRows, evidenceQuery);
 
   return (
     <main className="px-5 py-5">
@@ -122,15 +245,9 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200 pt-3" role="tablist" aria-label="Project detail tabs">
-          <button
-            aria-selected="true"
-            className="rounded-md bg-teal-700 px-3 py-1.5 text-sm font-medium text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
-            role="tab"
-            type="button"
-          >
-            Snapshot
-          </button>
-          {["Evidence", "Resolution", "Changes", "Overrides"].map((tab) => (
+          <DetailTabLink active={activeTab === "snapshot"} href={`/pipeline/${project.id}`} label="Snapshot" />
+          <DetailTabLink active={activeTab === "evidence"} href={`/pipeline/${project.id}?tab=evidence`} label="Evidence" />
+          {["Resolution", "Changes", "Overrides"].map((tab) => (
             <button
               aria-disabled="true"
               aria-selected="false"
@@ -146,43 +263,296 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
         </div>
       </div>
 
-      <div className="mt-5 grid gap-5 2xl:grid-cols-[minmax(0,1fr)_22rem]">
-        <div className="space-y-5">
-          {sections.map((section) => (
-            <section className="rounded-md border border-slate-200 bg-white" key={section.id}>
-              <div className="border-b border-slate-200 px-4 py-3">
-                <h2 className="text-sm font-semibold text-slate-950">{section.title}</h2>
-                <p className="mt-0.5 text-xs text-slate-500">{section.description}</p>
-              </div>
-              <div className="divide-y divide-slate-100">
-                {section.fields.map((field) => (
-                  <FieldRow field={field} key={field.key} />
-                ))}
-              </div>
-            </section>
-          ))}
-        </div>
+      {activeTab === "evidence" ? (
+        <EvidenceTab
+          evidenceFilters={evidenceFilters}
+          evidenceQuery={evidenceQuery}
+          evidenceRows={filteredEvidenceRows}
+          projectId={project.id}
+          totalEvidenceRows={evidenceRows.length}
+        />
+      ) : (
+        <SnapshotTab projectId={project.id} sections={sections} />
+      )}
+    </main>
+  );
+}
 
-        <aside className="h-fit rounded-md border border-slate-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-slate-950">Snapshot Legend</h2>
-          <div className="mt-3 space-y-3 text-sm">
-            <LegendItem className="bg-amber-50 text-amber-900" label="In review batch" />
-            <LegendItem className="bg-white text-slate-700" label="Unchanged" />
-            <LegendItem className="bg-slate-50 text-slate-700" label="Read-only in Phase B" />
-          </div>
-          <div className="mt-4 border-t border-slate-200 pt-3">
-            <p className="text-xs font-medium uppercase text-slate-500">Source badges</p>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {(["gov", "news", "costar", "pipedream", "user", "system"] as SourceBadge["tone"][]).map((tone) => (
-                <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[tone])} key={tone}>
-                  {tone}
-                </span>
+function DetailTabLink({ active, href, label }: { active: boolean; href: string; label: string }) {
+  return (
+    <Link
+      aria-selected={active}
+      className={cn(
+        "rounded-md px-3 py-1.5 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700",
+        active
+          ? "bg-teal-700 text-white"
+          : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"
+      )}
+      href={href}
+      role="tab"
+    >
+      {label}
+    </Link>
+  );
+}
+
+function SnapshotTab({ projectId, sections }: { projectId: string; sections: ProjectDetailSection[] }) {
+  return (
+    <div className="mt-5 grid gap-5 2xl:grid-cols-[minmax(0,1fr)_22rem]">
+      <div className="space-y-5">
+        {sections.map((section) => (
+          <section className="rounded-md border border-slate-200 bg-white" key={section.id}>
+            <div className="border-b border-slate-200 px-4 py-3">
+              <h2 className="text-sm font-semibold text-slate-950">{section.title}</h2>
+              <p className="mt-0.5 text-xs text-slate-500">{section.description}</p>
+            </div>
+            <div className="divide-y divide-slate-100">
+              {section.fields.map((field) => (
+                <FieldRow field={field} key={field.key} projectId={projectId} />
               ))}
             </div>
-          </div>
-        </aside>
+          </section>
+        ))}
       </div>
-    </main>
+
+      <aside className="h-fit rounded-md border border-slate-200 bg-white p-4">
+        <h2 className="text-sm font-semibold text-slate-950">Snapshot Legend</h2>
+        <div className="mt-3 space-y-3 text-sm">
+          <LegendItem className="bg-amber-50 text-amber-900" label="In review batch" />
+          <LegendItem className="bg-white text-slate-700" label="Unchanged" />
+          <LegendItem className="bg-slate-50 text-slate-700" label="Read-only in Phase B" />
+        </div>
+        <div className="mt-4 border-t border-slate-200 pt-3">
+          <p className="text-xs font-medium uppercase text-slate-500">Source badges</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {(["gov", "news", "costar", "pipedream", "user", "system"] as SourceBadge["tone"][]).map((tone) => (
+              <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[tone])} key={tone}>
+                {tone}
+              </span>
+            ))}
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function EvidenceTab({
+  evidenceFilters,
+  evidenceQuery,
+  evidenceRows,
+  projectId,
+  totalEvidenceRows
+}: {
+  evidenceFilters: ProjectEvidenceFilters;
+  evidenceQuery: EvidenceQuery;
+  evidenceRows: ProjectEvidenceRow[];
+  projectId: string;
+  totalEvidenceRows: number;
+}) {
+  const groupedRows = groupEvidenceByMonth(evidenceRows);
+  const hasActiveFilter = Boolean(evidenceQuery.field || evidenceQuery.source || evidenceQuery.from || evidenceQuery.to);
+
+  return (
+    <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <section className="rounded-md border border-slate-200 bg-white">
+        <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-950">Evidence</h2>
+            <p className="mt-0.5 text-xs text-slate-500">
+              {evidenceRows.length} of {totalEvidenceRows} rows shown. Rows are sorted by evidence date, then collection time.
+            </p>
+          </div>
+          <Link
+            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"
+            href={`/pipeline/${projectId}?tab=evidence`}
+          >
+            Clear filters
+          </Link>
+        </div>
+
+        {groupedRows.length ? (
+          <div className="divide-y divide-slate-200">
+            {groupedRows.map((group) => (
+              <div key={group.month}>
+                <div className="bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-normal text-slate-500">
+                  {group.month}
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {group.rows.map((evidence) => (
+                    <EvidenceTimelineRow evidence={evidence} key={evidence.id} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="px-4 py-10 text-center text-sm text-slate-500">
+            {hasActiveFilter ? "No evidence rows match these filters." : "No evidence rows are linked to this project yet."}
+          </div>
+        )}
+      </section>
+
+      <aside className="h-fit rounded-md border border-slate-200 bg-white p-4">
+        <div className="flex items-center gap-2">
+          <Filter className="size-4 text-slate-500" aria-hidden="true" />
+          <h2 className="text-sm font-semibold text-slate-950">Filters</h2>
+        </div>
+        <form action={`/pipeline/${projectId}`} className="mt-4 space-y-3">
+          <input name="tab" type="hidden" value="evidence" />
+          <FilterSelect label="Field" name="field" options={evidenceFilters.fields} value={evidenceQuery.field} />
+          <FilterSelect label="Source" name="source" options={evidenceFilters.sources} value={evidenceQuery.source} />
+          <label className="block">
+            <span className="text-xs font-medium text-slate-600">From</span>
+            <input
+              className="mt-1 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+              defaultValue={evidenceQuery.from ?? ""}
+              name="from"
+              type="date"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-slate-600">To</span>
+            <input
+              className="mt-1 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+              defaultValue={evidenceQuery.to ?? ""}
+              name="to"
+              type="date"
+            />
+          </label>
+          <button
+            className="w-full rounded-md bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+            type="submit"
+          >
+            Apply
+          </button>
+        </form>
+        <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500">
+          B.5 uses a generic snippet renderer. Source-specific snippets and suspect-row writes are scheduled after the read-only tabs.
+        </p>
+      </aside>
+    </div>
+  );
+}
+
+function FilterSelect({
+  label,
+  name,
+  options,
+  value
+}: {
+  label: string;
+  name: string;
+  options: string[];
+  value: string | null;
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-slate-600">{label}</span>
+      <select
+        className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+        defaultValue={value ?? ""}
+        name={name}
+      >
+        <option value="">Any</option>
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function EvidenceTimelineRow({ evidence }: { evidence: ProjectEvidenceRow }) {
+  const sourceUrl = safeExternalUrl(evidence.sourceUrl);
+  const fieldSummary = evidence.fields.length ? evidence.fields.slice(0, 5).join(" · ") : "raw observation";
+  const extraFieldCount = Math.max(0, evidence.fields.length - 5);
+
+  return (
+    <details className="group px-4 py-3">
+      <summary className="grid cursor-pointer list-none gap-3 text-sm md:grid-cols-[5rem_8rem_minmax(0,1fr)_auto] md:items-start">
+        <span className="font-medium text-slate-700">{formatDate(evidence.evidenceDate ?? evidence.collectedAt)}</span>
+        <span className={cn("w-fit rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[evidence.sourceBadge.tone])}>
+          {evidence.sourceBadge.label}
+        </span>
+        <span className="min-w-0">
+          <span className="block font-medium text-slate-950">
+            {fieldSummary}
+            {extraFieldCount ? ` +${extraFieldCount}` : ""}
+          </span>
+          <span className="mt-0.5 block truncate text-slate-500">
+            {evidence.teaser ?? evidence.sourceRecordId ?? evidence.sourceType}
+          </span>
+        </span>
+        <span className="text-xs text-slate-400 group-open:hidden">Expand</span>
+        <span className="hidden text-xs text-slate-400 group-open:block">Collapse</span>
+      </summary>
+
+      <div className="mt-3 grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
+        <div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <span>{evidence.sourceType}</span>
+            <span>Tier {evidence.sourceTier}</span>
+            <span>{evidence.ingestMethod}</span>
+            {evidence.sourceRecordId ? <span>Record {evidence.sourceRecordId}</span> : null}
+          </div>
+          <p className="mt-2 text-sm text-slate-700">{evidence.teaser ?? "No text snippet available yet."}</p>
+          {sourceUrl ? (
+            <a
+              className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-teal-700 hover:text-teal-900"
+              href={sourceUrl}
+              rel="noreferrer"
+              target="_blank"
+            >
+              Source URL
+              <ExternalLink className="size-3" aria-hidden="true" />
+            </a>
+          ) : null}
+        </div>
+
+        <div className="rounded-md border border-slate-200 bg-white p-3">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-normal text-slate-500">
+            <FileJson className="size-3.5" aria-hidden="true" />
+            Extracted fields
+          </div>
+          <dl className="mt-2 space-y-1.5 text-xs">
+            {Object.entries(evidence.extractedFields ?? {}).length ? (
+              Object.entries(evidence.extractedFields ?? {})
+                .slice(0, 12)
+                .map(([key, value]) => (
+                  <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2" key={key}>
+                    <dt className="truncate text-slate-500">{key}</dt>
+                    <dd className="break-words font-medium text-slate-800">{displayEvidenceFieldValue(value)}</dd>
+                  </div>
+                ))
+            ) : (
+              <p className="text-slate-500">No extracted fields.</p>
+            )}
+          </dl>
+        </div>
+
+        <details className="lg:col-span-2">
+          <summary className="cursor-pointer text-xs font-medium text-slate-600">Raw JSON</summary>
+          <div className="mt-2 grid gap-3 lg:grid-cols-2">
+            <JsonBlock label="raw_data" value={evidence.rawData} />
+            <JsonBlock label="signal_flags" value={evidence.signalFlags} />
+          </div>
+        </details>
+      </div>
+    </details>
+  );
+}
+
+function JsonBlock({ label, value }: { label: string; value: Record<string, unknown> | null }) {
+  return (
+    <div>
+      <p className="mb-1 text-xs font-medium text-slate-500">{label}</p>
+      <pre className="max-h-80 overflow-auto rounded-md border border-slate-200 bg-white p-3 text-[11px] leading-relaxed text-slate-700">
+        {prettyJson(value)}
+      </pre>
+    </div>
   );
 }
 
@@ -195,7 +565,16 @@ function HeaderMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function FieldRow({ field }: { field: ProjectField }) {
+function FieldRow({ field, projectId }: { field: ProjectField; projectId: string }) {
+  const sourceBadge = (
+    <span
+      className={cn("rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[field.provenance.sourceBadge.tone])}
+      title={sourceBadgeTitle(field.provenance.sourceBadge)}
+    >
+      {field.provenance.sourceBadge.label}
+    </span>
+  );
+
   return (
     <div
       className={cn(
@@ -219,12 +598,16 @@ function FieldRow({ field }: { field: ProjectField }) {
         <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", CLASS_TONES[field.fieldClass])}>
           {CLASS_LABELS[field.fieldClass]}
         </span>
-        <span
-          className={cn("rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[field.provenance.sourceBadge.tone])}
-          title={sourceBadgeTitle(field.provenance.sourceBadge)}
-        >
-          {field.provenance.sourceBadge.label}
-        </span>
+        {field.fieldClass === "evidence" || field.fieldClass === "source" ? (
+          <Link
+            className="rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+            href={`/pipeline/${projectId}?tab=evidence&field=${encodeURIComponent(field.key)}`}
+          >
+            {sourceBadge}
+          </Link>
+        ) : (
+          sourceBadge
+        )}
       </div>
       <EvidencePopover field={field} />
     </div>
