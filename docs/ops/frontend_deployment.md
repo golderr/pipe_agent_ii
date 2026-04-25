@@ -9,7 +9,7 @@ Current production deployment:
 - Vercel team: `the-concord-group`
 - Project: `tcg-pipeline`
 - Production URL: `https://tcg-pipeline.vercel.app`
-- Latest production deployment: `https://tcg-pipeline-p54fvp48e-the-concord-group.vercel.app`
+- Latest production deployments are aliased to the production URL above; use the Vercel dashboard for immutable deployment URLs.
 - Production env vars set: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAILS`, `NEXT_PUBLIC_SITE_URL`
 - Optional map tile env vars: `NEXT_PUBLIC_MAP_TILE_URL`, `NEXT_PUBLIC_MAP_TILE_ATTRIBUTION`. If unset, Pipeline uses OpenStreetMap public raster tiles as a short-term internal fallback. Pick a licensed or self-hosted tile provider before broader routine usage.
 - Preview env vars are not set yet; the Vercel CLI required branch-scoped Preview vars in this session. Set them from the dashboard before relying on preview deployments.

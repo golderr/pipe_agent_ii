@@ -65,8 +65,8 @@ type ProjectFeatureProperties = {
 const FILTER_STORAGE_KEY = "pipeline:filters";
 const VIEW_MODE_STORAGE_KEY = "pipeline:viewMode";
 const SAVED_VIEWS_STORAGE_KEY = "pipeline:savedViews";
-const MAP_TILE_URL = process.env.NEXT_PUBLIC_MAP_TILE_URL ?? "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-const MAP_TILE_ATTRIBUTION = process.env.NEXT_PUBLIC_MAP_TILE_ATTRIBUTION ?? "(C) OpenStreetMap contributors";
+const MAP_TILE_URL = process.env.NEXT_PUBLIC_MAP_TILE_URL?.trim() || "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const MAP_TILE_ATTRIBUTION = process.env.NEXT_PUBLIC_MAP_TILE_ATTRIBUTION?.trim() || "(C) OpenStreetMap contributors";
 
 const DEFAULT_FILTERS: PipelineFilters = {
   search: "",
