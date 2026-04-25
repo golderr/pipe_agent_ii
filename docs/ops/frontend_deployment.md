@@ -9,15 +9,17 @@ Current production deployment:
 - Vercel team: `the-concord-group`
 - Project: `tcg-pipeline`
 - Production URL: `https://tcg-pipeline.vercel.app`
-- Latest verified deployment: `https://tcg-pipeline-f9mxw9rnm-the-concord-group.vercel.app`
+- Latest production deployment: `https://tcg-pipeline-qh534998v-the-concord-group.vercel.app`
 - Production env vars set: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAILS`, `NEXT_PUBLIC_SITE_URL`
 - Preview env vars are not set yet; the Vercel CLI required branch-scoped Preview vars in this session. Set them from the dashboard before relying on preview deployments.
 - Production smoke completed:
   - `/login` returns 200 and renders the magic-link form.
   - Logged-out `/coverage` returns 307 to `/login?next=%2Fcoverage`.
+  - Logged-out `/pipeline` returns 307 to `/login?next=%2Fpipeline`.
   - Disallowed email submit returns 303 to `/login?error=not_allowed`.
   - Allowed email submit for `ng@theconcordgroup.com` returns 303 to `/login?sent=1`.
   - Real inbox magic-link click lands on authenticated `/coverage` with jurisdiction rows visible.
+  - After the 2026-04-25 MapLibre switch, authenticated `/pipeline` map visual smoke still needs a real-user browser check: table loads, Map tab renders CARTO tiles, clusters/pins are visible, and project popup opens.
 
 Required Vercel environment variables:
 
