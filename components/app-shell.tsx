@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { BarChart3, ClipboardList, Database, MapPinned } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -14,6 +17,8 @@ type AppShellProps = {
 };
 
 export function AppShell({ children }: AppShellProps) {
+  const pathname = usePathname();
+
   return (
     <div className="min-h-dvh bg-slate-50 text-slate-950">
       <aside className="fixed inset-y-0 left-0 hidden w-56 border-r border-slate-200 bg-white px-3 py-4 md:block">
@@ -25,7 +30,8 @@ export function AppShell({ children }: AppShellProps) {
           {navItems.map((item) => (
             <Link
               className={cn(
-                "flex items-center gap-2 rounded-md px-2 py-2 text-sm text-slate-700 hover:bg-slate-100"
+                "flex items-center gap-2 rounded-md px-2 py-2 text-sm text-slate-700 hover:bg-slate-100",
+                pathname.startsWith(item.href) && "bg-slate-100 font-medium text-slate-950"
               )}
               href={item.href}
               key={item.href}
