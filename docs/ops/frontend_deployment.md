@@ -12,6 +12,12 @@ Current production deployment:
 - Latest verified deployment: `https://tcg-pipeline-f9mxw9rnm-the-concord-group.vercel.app`
 - Production env vars set: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAILS`, `NEXT_PUBLIC_SITE_URL`
 - Preview env vars are not set yet; the Vercel CLI required branch-scoped Preview vars in this session. Set them from the dashboard before relying on preview deployments.
+- Production smoke completed:
+  - `/login` returns 200 and renders the magic-link form.
+  - Logged-out `/coverage` returns 307 to `/login?next=%2Fcoverage`.
+  - Disallowed email submit returns 303 to `/login?error=not_allowed`.
+  - Allowed email submit for `ng@theconcordgroup.com` returns 303 to `/login?sent=1`.
+- Remaining smoke: click the real magic link from the inbox and confirm `/coverage` renders jurisdiction rows.
 
 Required Vercel environment variables:
 
