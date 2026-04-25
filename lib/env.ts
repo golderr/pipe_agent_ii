@@ -7,13 +7,18 @@ export function getSupabaseAnonKey() {
 }
 
 export function getSiteUrl() {
-  const configuredUrl =
-    process.env.NEXT_PUBLIC_SITE_URL ?? process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  const vercelDeploymentUrl = process.env.VERCEL_URL;
+  const vercelProjectProductionUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  const vercelUrl =
+    process.env.VERCEL_ENV === "preview"
+      ? (vercelDeploymentUrl ?? vercelProjectProductionUrl)
+      : (vercelProjectProductionUrl ?? vercelDeploymentUrl);
+  const configuredUrl = process.env.NEXT_PUBLIC_SITE_URL ?? vercelUrl;
 
   if (!configuredUrl) {
     if (process.env.NODE_ENV === "production") {
       throw new Error(
-        "Site URL missing. Set NEXT_PUBLIC_SITE_URL or VERCEL_PROJECT_PRODUCTION_URL before sending magic links."
+        "Site URL missing. Set NEXT_PUBLIC_SITE_URL or enable Vercel system environment variables before sending magic links."
       );
     }
 

@@ -13,7 +13,27 @@ Required Vercel environment variables:
 
 Optional fallback:
 
-- `VERCEL_PROJECT_PRODUCTION_URL` can provide the production host, but `NEXT_PUBLIC_SITE_URL` is preferred because magic-link redirects should be explicit and stable.
+- Enable Vercel's System Environment Variables so the app can read `VERCEL_ENV`, `VERCEL_URL`, and `VERCEL_PROJECT_PRODUCTION_URL`.
+- `NEXT_PUBLIC_SITE_URL` is preferred for production because magic-link redirects should be explicit and stable.
+- Preview deployments use `VERCEL_URL` when `VERCEL_ENV=preview`, so preview auth smoke tests return to the preview deployment instead of the production URL.
+
+CLI setup, if deploying from this workspace:
+
+```powershell
+npm install -g vercel
+vercel login
+vercel link
+vercel env pull .env.vercel
+vercel deploy
+vercel deploy --prod
+```
+
+The project should use the default Next.js framework preset:
+
+- Install command: `npm install`
+- Build command: `npm run build`
+- Output directory: Vercel auto-detects Next.js
+- Root directory: repository root
 
 Smoke test before marking B.1 done:
 
