@@ -4,6 +4,15 @@
 
 B.1 is not complete until the deployed app has passed a real browser auth smoke test.
 
+Current production deployment:
+
+- Vercel team: `the-concord-group`
+- Project: `tcg-pipeline`
+- Production URL: `https://tcg-pipeline.vercel.app`
+- Latest verified deployment: `https://tcg-pipeline-f9mxw9rnm-the-concord-group.vercel.app`
+- Production env vars set: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAILS`, `NEXT_PUBLIC_SITE_URL`
+- Preview env vars are not set yet; the Vercel CLI required branch-scoped Preview vars in this session. Set them from the dashboard before relying on preview deployments.
+
 Required Vercel environment variables:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
@@ -41,6 +50,13 @@ Smoke test before marking B.1 done:
 2. Submit an allowed email, open the magic link, and confirm redirect to `/coverage`.
 3. Confirm `/coverage` renders at least one jurisdiction row.
 4. Submit a disallowed email and confirm the app does not send a magic link.
+
+Supabase Auth redirect URLs required before the magic-link smoke:
+
+- `https://tcg-pipeline.vercel.app/**`
+- `https://tcg-pipeline-the-concord-group.vercel.app/**`
+- `https://*-the-concord-group.vercel.app/**`
+- `http://localhost:3000/**`
 
 ## Preview Environment Policy
 
