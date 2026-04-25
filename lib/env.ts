@@ -7,11 +7,20 @@ export function getSupabaseAnonKey() {
 }
 
 export function getSiteUrl() {
-  const rawUrl = (
-    process.env.NEXT_PUBLIC_SITE_URL ??
-    process.env.VERCEL_PROJECT_PRODUCTION_URL ??
-    "http://localhost:3000"
-  ).replace(/\/$/, "");
+  const configuredUrl =
+    process.env.NEXT_PUBLIC_SITE_URL ?? process.env.VERCEL_PROJECT_PRODUCTION_URL;
+
+  if (!configuredUrl) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "Site URL missing. Set NEXT_PUBLIC_SITE_URL or VERCEL_PROJECT_PRODUCTION_URL before sending magic links."
+      );
+    }
+
+    return "http://localhost:3000";
+  }
+
+  const rawUrl = configuredUrl.replace(/\/$/, "");
 
   if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
     return rawUrl;
