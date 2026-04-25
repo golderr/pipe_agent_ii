@@ -91,7 +91,6 @@ type FieldDefinition = {
   key: string;
   label: string;
   className: FieldClass;
-  aliases?: string[];
   note?: string;
 };
 
@@ -180,15 +179,15 @@ const PROJECT_SELECT = [
 ].join(", ");
 
 const CORE_FIELDS: FieldDefinition[] = [
-  { key: "pipeline_status", label: "Status", className: "evidence", aliases: ["status", "status_evidence_type"] },
-  { key: "status_date", label: "Status date", className: "evidence", aliases: ["status_evidence_date"] },
-  { key: "total_units", label: "Total units", className: "evidence", aliases: ["units", "tot_units"] },
+  { key: "pipeline_status", label: "Status", className: "evidence" },
+  { key: "status_date", label: "Status date", className: "computed" },
+  { key: "total_units", label: "Total units", className: "evidence" },
   { key: "affordable_units", label: "Affordable units", className: "evidence" },
   { key: "market_rate_units", label: "Market-rate units", className: "evidence" },
   { key: "developer", label: "Developer", className: "evidence" },
   { key: "product_type", label: "Product type", className: "evidence" },
   { key: "age_restriction", label: "Age restriction", className: "evidence" },
-  { key: "date_delivery", label: "Delivery", className: "evidence", aliases: ["delivery_date"] }
+  { key: "date_delivery", label: "Delivery", className: "evidence" }
 ];
 
 const SOURCE_FACT_FIELDS: FieldDefinition[] = [
@@ -337,7 +336,7 @@ function toEvidenceSummary(evidence: RawEvidence): EvidenceSummary {
 
 function sourceBadgeFromEvidence(evidence: RawEvidence | null): SourceBadge {
   if (!evidence) {
-    return { label: "-", tone: "none", sourceType: null, date: null };
+    return { label: "Unlinked", tone: "none", sourceType: null, date: null };
   }
 
   const sourceType = evidence.source_type;
@@ -373,20 +372,10 @@ function userBadge(): SourceBadge {
   return { label: "TCG", tone: "user", sourceType: null, date: null };
 }
 
-function evidenceContainsField(evidence: RawEvidence, field: FieldDefinition) {
-  const keys = new Set([field.key, ...(field.aliases ?? [])]);
-  return Object.keys(evidence.extracted_fields ?? {}).some((key) => keys.has(key));
-}
-
-function findLatestFieldEvidence(field: FieldDefinition, evidenceRows: RawEvidence[]) {
-  return evidenceRows.find((evidence) => evidenceContainsField(evidence, field)) ?? null;
-}
-
 function buildFieldProvenance(
   field: FieldDefinition,
   resolutionByField: Map<string, RawFieldResolution>,
-  evidenceById: Map<string, RawEvidence>,
-  evidenceRows: RawEvidence[]
+  evidenceById: Map<string, RawEvidence>
 ): FieldProvenance {
   const resolution = resolutionByField.get(field.key);
   const evidence = (resolution?.evidence_ids ?? [])
@@ -403,12 +392,13 @@ function buildFieldProvenance(
   }
 
   if (field.className === "source" || field.className === "evidence") {
-    const latestEvidence = findLatestFieldEvidence(field, evidenceRows);
+    // Snapshot provenance is intentionally limited to evidence explicitly linked by
+    // the latest resolution log row. Avoid guessing from source-native extracted keys.
     return {
-      sourceBadge: sourceBadgeFromEvidence(latestEvidence),
+      sourceBadge: sourceBadgeFromEvidence(null),
       rule: resolution?.rule_applied ?? null,
       confidence: resolution?.confidence ?? null,
-      evidence: latestEvidence ? [toEvidenceSummary(latestEvidence)] : []
+      evidence: []
     };
   }
 
@@ -482,8 +472,7 @@ function buildFields(
   jurisdictionName: string | null,
   pendingFields: Set<string>,
   resolutionByField: Map<string, RawFieldResolution>,
-  evidenceById: Map<string, RawEvidence>,
-  evidenceRows: RawEvidence[]
+  evidenceById: Map<string, RawEvidence>
 ): ProjectField[] {
   return definitions.map((definition) => ({
     key: definition.key,
@@ -492,7 +481,7 @@ function buildFields(
     fieldClass: definition.className,
     state: pendingFields.has(definition.key) ? "review" : "default",
     note: definition.note ?? null,
-    provenance: buildFieldProvenance(definition, resolutionByField, evidenceById, evidenceRows)
+    provenance: buildFieldProvenance(definition, resolutionByField, evidenceById)
   }));
 }
 
@@ -537,13 +526,6 @@ function makeRelationshipField(key: string, label: string, value: string): Proje
       confidence: null,
       evidence: []
     }
-  };
-}
-
-function compactNonEmpty(section: ProjectDetailSection): ProjectDetailSection {
-  return {
-    ...section,
-    fields: section.fields.filter((field) => field.value !== "-" || field.state !== "default")
   };
 }
 
@@ -654,7 +636,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     : rawProject.jurisdiction_id;
 
   const sections: ProjectDetailSection[] = [
-    compactNonEmpty({
+    {
       id: "core",
       title: "Core",
       description: "Evidence-derived fields owned by the resolution engine.",
@@ -664,11 +646,10 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById,
-        sortedEvidenceRows
+        evidenceById
       )
-    }),
-    compactNonEmpty({
+    },
+    {
       id: "source-facts",
       title: "Source Facts",
       description: "Source-populated direct fields are read-only for MVP.",
@@ -678,10 +659,9 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById,
-        sortedEvidenceRows
+        evidenceById
       )
-    }),
+    },
     {
       id: "identity",
       title: "Identity",
@@ -692,11 +672,10 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById,
-        sortedEvidenceRows
+        evidenceById
       )
     },
-    compactNonEmpty({
+    {
       id: "notes",
       title: "Notes",
       description: "Researcher notes and workflow flags.",
@@ -706,10 +685,9 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById,
-        sortedEvidenceRows
+        evidenceById
       )
-    }),
+    },
     {
       id: "relationships",
       title: "Relationships",
@@ -721,7 +699,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         statusHistory.data
       )
     },
-    compactNonEmpty({
+    {
       id: "computed",
       title: "Computed",
       description: "System-generated fields used for audit and filtering.",
@@ -731,10 +709,9 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById,
-        sortedEvidenceRows
+        evidenceById
       )
-    })
+    }
   ].filter((section) => section.fields.length > 0);
 
   return {

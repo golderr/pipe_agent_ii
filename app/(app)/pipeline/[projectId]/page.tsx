@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AlertCircle, ArrowLeft, Circle, Clock, MapPin } from "lucide-react";
 import { getProjectDetailData } from "@/lib/project-detail/data";
+import { compactStatus, statusStyle } from "@/lib/status";
 import type { EvidenceSummary, FieldClass, ProjectField, SourceBadge } from "@/lib/project-detail/types";
 import { cn } from "@/lib/utils";
 
@@ -51,12 +52,10 @@ function formatDate(value: string | null) {
   }).format(new Date(value));
 }
 
-function compactStatus(status: string) {
-  return status === "Under Construction" ? "U/C" : status;
-}
-
 function sourceBadgeTitle(badge: SourceBadge) {
-  return [badge.sourceType, badge.date ? formatDate(badge.date) : null].filter(Boolean).join(" | ");
+  return [badge.sourceType ?? (badge.label === "Unlinked" ? "No linked resolution evidence yet" : null), badge.date ? formatDate(badge.date) : null]
+    .filter(Boolean)
+    .join(" | ");
 }
 
 export default async function ProjectDetailPage({ params }: ProjectDetailPageProps) {
@@ -100,7 +99,7 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-semibold tracking-normal text-slate-950">{project.name}</h1>
-              <span className="inline-flex rounded border border-slate-200 bg-white px-1.5 py-0.5 text-xs text-slate-700">
+              <span className={cn("inline-flex rounded border px-1.5 py-0.5 text-xs", statusStyle(project.status).className)}>
                 {compactStatus(project.status)}
               </span>
             </div>
@@ -122,16 +121,27 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
           </div>
         </div>
 
-        <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200 pt-3">
-          <span className="rounded-md bg-teal-700 px-3 py-1.5 text-sm font-medium text-white">Snapshot</span>
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200 pt-3" role="tablist" aria-label="Project detail tabs">
+          <button
+            aria-selected="true"
+            className="rounded-md bg-teal-700 px-3 py-1.5 text-sm font-medium text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+            role="tab"
+            type="button"
+          >
+            Snapshot
+          </button>
           {["Evidence", "Resolution", "Changes", "Overrides"].map((tab) => (
-            <span
-              className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-400"
+            <button
+              aria-disabled="true"
+              aria-selected="false"
+              className="cursor-not-allowed rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-400"
               key={tab}
+              role="tab"
               title={`${tab} tab is scheduled later in Phase B.`}
+              type="button"
             >
               {tab}
-            </span>
+            </button>
           ))}
         </div>
       </div>
@@ -189,9 +199,10 @@ function FieldRow({ field }: { field: ProjectField }) {
   return (
     <div
       className={cn(
-        "group relative grid gap-2 px-4 py-3 text-sm md:grid-cols-[12rem_minmax(0,1fr)_auto]",
+        "group relative grid gap-2 px-4 py-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-teal-700 md:grid-cols-[12rem_minmax(0,1fr)_auto]",
         field.state === "review" && "bg-amber-50/70"
       )}
+      tabIndex={0}
     >
       <div className="flex min-w-0 items-center gap-2">
         {field.state === "review" ? (
@@ -233,6 +244,7 @@ function EvidencePopover({ field }: { field: ProjectField }) {
         </span>
       </div>
       <div className="mt-3 space-y-1 text-slate-600">
+        {field.note ? <p>{field.note}</p> : null}
         {field.provenance.rule ? <p>Rule: {field.provenance.rule}</p> : null}
         {field.provenance.confidence ? <p>Confidence: {field.provenance.confidence}</p> : null}
         <p>Supporting: {field.provenance.evidence.length} evidence rows</p>

@@ -267,6 +267,8 @@ ORDER BY project_id, field, created_at DESC, id DESC;
 
 Grant `SELECT` to `authenticated`. Project Detail Snapshot uses this as the field-level read model for source badges, hover provenance, rule labels, and confidence. The view intentionally remains narrow: full evidence timelines and raw evidence expansion are part of B.5.
 
+Snapshot badges should not guess provenance by matching canonical UI field names against source-native `evidence.extracted_fields` keys. If a displayed field has no `project_field_resolution.evidence_ids`, render it as unlinked/system-sourced until the resolver logs field-level evidence or a source-specific provenance mapper is added.
+
 ---
 
 ## 5. ReviewItem / ReviewDecision — Staged/Committed State
