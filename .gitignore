@@ -7,6 +7,11 @@ __pycache__/
 .mypy_cache/
 
 .env
+node_modules/
+.next/
+out/
+.vercel/
+*.tsbuildinfo
 
 data/output/*
 !data/output/.gitkeep
