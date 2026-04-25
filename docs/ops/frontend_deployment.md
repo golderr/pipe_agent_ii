@@ -17,7 +17,7 @@ Current production deployment:
   - Logged-out `/coverage` returns 307 to `/login?next=%2Fcoverage`.
   - Disallowed email submit returns 303 to `/login?error=not_allowed`.
   - Allowed email submit for `ng@theconcordgroup.com` returns 303 to `/login?sent=1`.
-- Remaining smoke: click the real magic link from the inbox and confirm `/coverage` renders jurisdiction rows.
+  - Real inbox magic-link click lands on authenticated `/coverage` with jurisdiction rows visible.
 
 Required Vercel environment variables:
 
