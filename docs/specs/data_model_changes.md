@@ -1,6 +1,6 @@
 # Data Model Changes — Phase B/C Prerequisites
 
-Updated: 2026-04-24
+Updated: 2026-04-25
 
 This document specifies the schema changes required to support the Phase B and Phase C frontend. It is a prerequisite for UI implementation — none of the UI surfaces in `docs/specs/ui_requirements.md` can ship without these tables and columns in place.
 
@@ -14,16 +14,17 @@ Read alongside:
 
 ## 1. Summary of Changes
 
-Eight changes, in order of priority:
+Nine changes, in order of priority:
 
 1. **Pre-migration DB snapshot** — take a Supabase point-in-time backup or `pg_dump` before B.0b/B.0c migrations.
 2. **Markets as a first-class table** — currently a string slug on `Project`. Jurisdictions roll up into markets.
 3. **Jurisdictions as a first-class table** — currently a string field on `Project`. Needed for Coverage and jurisdiction-scoped review sessions.
 4. **SourceRun schema expansion** — scope runs per-(jurisdiction, source) for Coverage freshness display.
-5. **ReviewItem / ReviewDecision — staged/committed state machine** — the batch-commit UI requires explicit staging.
-6. **Contradiction detection as a first-class concern** — new ReviewItemType and supporting columns for override-contradiction review items.
-7. **Per-user review state** — tracking last-reviewed-at per (user, jurisdiction) for Coverage's "last reviewed by you" column.
-8. **Scrape jobs table** — UI-initiated scrapes need status tracking and auditability.
+5. **Read-model views for Phase B** — expose UI-friendly slices such as latest evidence per project without client-side full-table scans.
+6. **ReviewItem / ReviewDecision — staged/committed state machine** — the batch-commit UI requires explicit staging.
+7. **Contradiction detection as a first-class concern** — new ReviewItemType and supporting columns for override-contradiction review items.
+8. **Per-user review state** — tracking last-reviewed-at per (user, jurisdiction) for Coverage's "last reviewed by you" column.
+9. **Scrape jobs table** — UI-initiated scrapes need status tracking and auditability.
 
 Each change below includes: the motivation, the schema additions, the migration path from current state, and any backfill considerations.
 
@@ -200,6 +201,43 @@ Coverage reads `source_registrations` to list sources per jurisdiction, and join
 ### 4.5 Seeding for LA
 
 Populate `source_registrations` from the existing `config/markets/los_angeles.yaml` source definitions as part of the migration. Use the YAML `name` values as `source_name` (`ladbs_permits`, `ladbs_inspections`, `lahd_affordable`, `la_case_reports`, `zimas_pdis`, etc.) and map the YAML market/jurisdiction slug to the seeded `jurisdictions.slug`.
+
+---
+
+## 4a. Phase B Read-Model Views
+
+### 4a.1 Motivation
+
+Phase B pages read directly from Supabase PostgREST under RLS. Those reads should be shaped in Postgres when the operation is naturally relational. Pipeline needs the most recent evidence row per project for table previews and drawers; fetching the full `evidence` table and reducing it in the Next.js server component does not scale once news and additional collectors multiply the row count.
+
+### 4a.2 `project_latest_evidence`
+
+```sql
+CREATE INDEX ix_evidence_project_latest
+ON evidence (
+  project_id,
+  evidence_date DESC NULLS LAST,
+  collected_at DESC,
+  id DESC
+)
+WHERE project_id IS NOT NULL;
+
+CREATE VIEW project_latest_evidence
+WITH (security_invoker = true) AS
+SELECT DISTINCT ON (project_id)
+  project_id,
+  id AS evidence_id,
+  source_type,
+  collected_at,
+  evidence_date,
+  extracted_fields,
+  notes
+FROM evidence
+WHERE project_id IS NOT NULL
+ORDER BY project_id, evidence_date DESC NULLS LAST, collected_at DESC, id DESC;
+```
+
+Grant `SELECT` to `authenticated`. The view is read-only and uses `security_invoker` so it respects the same RLS posture as the underlying `evidence` table. B.4 needs a richer per-field provenance read model keyed from `resolution_log`; this latest-evidence view is only the B.3/B.4 preview path, not the field-level provenance source of truth.
 
 ---
 
@@ -564,13 +602,14 @@ Use timestamped, ordered Alembic revision names so the Phase B prerequisite stac
 2. Create `jurisdictions` table + backfill current LA projects to `city_of_los_angeles`; add FKs on `projects`.
 3. Create `source_registrations` + seed from `config/markets/los_angeles.yaml` using each source's jurisdiction slug.
 4. Extend `source_runs` with jurisdiction_id and new columns.
-5. Promote `researcher_override` JSONB to `researcher_overrides` table + backfill.
-6. Extend `review_items` and `review_decisions` with state/staging columns.
-7. Create `review_decision_notes`.
-8. Create `user_jurisdiction_reviews` and `user_jurisdiction_pins`.
-9. Create `scrape_jobs` and `costar_uploads`.
-10. Convert project notes to `project_notes` table.
-11. (Optional) Add snippet caching columns on `evidence`.
+5. Create Phase B read-model views, beginning with `project_latest_evidence`.
+6. Promote `researcher_override` JSONB to `researcher_overrides` table + backfill.
+7. Extend `review_items` and `review_decisions` with state/staging columns.
+8. Create `review_decision_notes`.
+9. Create `user_jurisdiction_reviews` and `user_jurisdiction_pins`.
+10. Create `scrape_jobs` and `costar_uploads`.
+11. Convert project notes to `project_notes` table.
+12. (Optional) Add snippet caching columns on `evidence`.
 
 Each migration is backward-compatible individually. Existing string columns such as `projects.market` and `projects.jurisdiction` stay in place until code paths have migrated; a later cleanup migration may drop deprecated columns only after that verification.
 

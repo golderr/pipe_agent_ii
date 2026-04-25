@@ -20,7 +20,6 @@ type RawProject = {
   pipeline_status: string;
   confidence: string | null;
   status_confidence: string | null;
-  likelihood: number | null;
   product_type: string | null;
   rent_or_sale: string | null;
   costar_submarket: string | null;
@@ -41,8 +40,8 @@ type RawIdentifier = {
   value: string;
 };
 
-type RawEvidence = {
-  project_id: string | null;
+type RawLatestEvidence = {
+  project_id: string;
   source_type: string;
   collected_at: string;
   evidence_date: string | null;
@@ -76,19 +75,7 @@ async function fetchAllRows<T>(
   }
 }
 
-function timestampForEvidence(evidence: RawEvidence) {
-  return evidence.evidence_date ?? evidence.collected_at;
-}
-
-function isEvidenceNewer(candidate: RawEvidence, current: RawEvidence | undefined) {
-  if (!current) {
-    return true;
-  }
-
-  return new Date(timestampForEvidence(candidate)) > new Date(timestampForEvidence(current));
-}
-
-function evidenceTeaser(evidence: RawEvidence) {
+function evidenceTeaser(evidence: RawLatestEvidence) {
   if (evidence.notes) {
     return evidence.notes;
   }
@@ -127,7 +114,6 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
         "pipeline_status",
         "confidence",
         "status_confidence",
-        "likelihood",
         "product_type",
         "rent_or_sale",
         "costar_submarket",
@@ -137,9 +123,9 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
     ),
     fetchAllRows<RawJurisdiction>(supabase, "jurisdictions", "id, slug, name, display_name"),
     fetchAllRows<RawIdentifier>(supabase, "project_identifiers", "project_id, identifier_type, value"),
-    fetchAllRows<RawEvidence>(
+    fetchAllRows<RawLatestEvidence>(
       supabase,
-      "evidence",
+      "project_latest_evidence",
       "project_id, source_type, collected_at, evidence_date, extracted_fields, notes"
     )
   ]);
@@ -164,7 +150,7 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
 
   const jurisdictionById = new Map(jurisdictions.rows.map((jurisdiction) => [jurisdiction.id, jurisdiction]));
   const apnsByProject = new Map<string, string[]>();
-  const latestEvidenceByProject = new Map<string, RawEvidence>();
+  const latestEvidenceByProject = new Map<string, RawLatestEvidence>();
 
   for (const identifier of identifiers.rows) {
     if (identifier.identifier_type !== "apn") {
@@ -177,14 +163,7 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
   }
 
   for (const evidence of evidenceRows.rows) {
-    if (!evidence.project_id) {
-      continue;
-    }
-
-    const current = latestEvidenceByProject.get(evidence.project_id);
-    if (isEvidenceNewer(evidence, current)) {
-      latestEvidenceByProject.set(evidence.project_id, evidence);
-    }
+    latestEvidenceByProject.set(evidence.project_id, evidence);
   }
 
   const pipelineProjects: PipelineProject[] = projects.rows.map((project) => {
@@ -213,7 +192,6 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
       dateDelivery: project.date_delivery,
       confidence: project.confidence,
       statusConfidence: project.status_confidence,
-      likelihood: project.likelihood,
       productType: project.product_type,
       rentOrSale: project.rent_or_sale,
       costarSubmarket: project.costar_submarket,
@@ -238,9 +216,7 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
       facets: {
         statuses: uniqueSorted(pipelineProjects.map((project) => project.pipelineStatus)),
         markets: uniqueSorted(pipelineProjects.map((project) => project.market)),
-        jurisdictions: uniqueSorted(
-          pipelineProjects.map((project) => project.jurisdiction?.displayName ?? project.city)
-        ),
+        jurisdictions: uniqueSorted(pipelineProjects.map((project) => project.jurisdiction?.displayName)),
         developers: uniqueSorted(pipelineProjects.map((project) => project.developer)).slice(0, 500),
         submarkets: uniqueSorted(pipelineProjects.map((project) => project.costarSubmarket)),
         maxUnits: Math.max(0, ...pipelineProjects.map((project) => project.totalUnits ?? 0))

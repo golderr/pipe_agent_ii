@@ -17,9 +17,9 @@ import {
   X
 } from "lucide-react";
 import type { Feature, FeatureCollection, Point } from "geojson";
-import type { StyleSpecification } from "mapbox-gl";
-import type { LayerProps, MapGeoJSONFeature, MapMouseEvent, MapRef } from "react-map-gl/mapbox";
-import MapboxMap, { Layer, NavigationControl, Popup, Source } from "react-map-gl/mapbox";
+import type { StyleSpecification } from "maplibre-gl";
+import type { LayerProps, MapGeoJSONFeature, MapMouseEvent, MapRef } from "react-map-gl/maplibre";
+import MapLibreMap, { Layer, NavigationControl, Popup, Source } from "react-map-gl/maplibre";
 import { Command } from "cmdk";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -93,18 +93,18 @@ const STATUS_STYLES: Record<string, { className: string; color: string }> = {
 const MAP_STYLE: StyleSpecification = {
   version: 8,
   sources: {
-    osm: {
+    carto: {
       type: "raster",
-      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tiles: ["https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
       tileSize: 256,
-      attribution: "OpenStreetMap contributors"
+      attribution: "(C) OpenStreetMap contributors (C) CARTO"
     }
   },
   layers: [
     {
-      id: "osm",
+      id: "carto",
       type: "raster",
-      source: "osm"
+      source: "carto"
     }
   ]
 };
@@ -244,6 +244,10 @@ function compactStatus(status: string) {
   return status;
 }
 
+function jurisdictionLabel(project: PipelineProject) {
+  return project.jurisdiction?.displayName ?? "Unassigned";
+}
+
 function ProjectStatusBadge({ status }: { status: string }) {
   return (
     <span className={cn("inline-flex rounded border px-1.5 py-0.5 text-[11px] font-medium", statusStyle(status).className)}>
@@ -295,6 +299,9 @@ function ProjectPreview({ project }: { project: PipelineProject }) {
         <p className="mt-1 line-clamp-2 text-slate-700">
           {project.lastEvidence?.teaser ?? project.lastEvidence?.sourceType ?? "No evidence summary"}
         </p>
+        {project.lastEvidence?.fields.length ? (
+          <p className="mt-1 text-xs text-slate-500">Fields: {project.lastEvidence.fields.slice(0, 3).join(", ")}</p>
+        ) : null}
       </div>
     </div>
   );
@@ -332,7 +339,7 @@ function DetailDrawer({ project, onClose }: { project: PipelineProject | null; o
           <PreviewField label="Units" value={number(project.totalUnits)} />
           <PreviewField label="Developer" value={project.developer ?? "-"} />
           <PreviewField label="Delivery" value={formatDate(project.dateDelivery)} />
-          <PreviewField label="Jurisdiction" value={project.jurisdiction?.displayName ?? project.city} />
+          <PreviewField label="Jurisdiction" value={jurisdictionLabel(project)} />
           <PreviewField label="Submarket" value={project.costarSubmarket ?? "-"} />
           <PreviewField label="Product" value={project.productType ?? "-"} />
           <PreviewField label="Rent / Sale" value={project.rentOrSale ?? "-"} />
@@ -345,6 +352,9 @@ function DetailDrawer({ project, onClose }: { project: PipelineProject | null; o
             {project.lastEvidence?.sourceType ?? "No source"} |{" "}
             {project.lastEvidence?.evidenceDate ?? project.lastEvidence?.collectedAt ?? "No date"}
           </p>
+          {project.lastEvidence?.fields.length ? (
+            <p className="mt-2 text-xs text-slate-500">Fields: {project.lastEvidence.fields.join(", ")}</p>
+          ) : null}
         </div>
 
         <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600">
@@ -417,7 +427,7 @@ function FilterSelect({
 }
 
 type ClusterSource = {
-  getClusterExpansionZoom: (clusterId: number, callback: (error?: Error | null, zoom?: number) => void) => void;
+  getClusterExpansionZoom: (clusterId: number) => Promise<number>;
 };
 
 function ProjectMap({
@@ -429,7 +439,7 @@ function ProjectMap({
 }) {
   const mapRef = useRef<MapRef | null>(null);
   const [popupProject, setPopupProject] = useState<PipelineProject | null>(null);
-  const projectById = useMemo(() => new globalThis.Map(projects.map((project) => [project.id, project])), [projects]);
+  const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
 
   const geojson = useMemo<FeatureCollection<Point, ProjectFeatureProperties>>(
     () => ({
@@ -466,14 +476,13 @@ function ProjectMap({
       const source = mapRef.current?.getSource("projects") as ClusterSource | undefined;
       const clusterId = feature.properties?.cluster_id as number | undefined;
       if (source && clusterId !== undefined) {
-        source.getClusterExpansionZoom(clusterId, (error, zoom) => {
-          if (error || zoom === null || zoom === undefined) {
-            return;
-          }
-
-          const coordinates = (feature.geometry as Point).coordinates;
-          mapRef.current?.easeTo({ center: coordinates as [number, number], zoom, duration: 400 });
-        });
+        source
+          .getClusterExpansionZoom(clusterId)
+          .then((zoom) => {
+            const coordinates = (feature.geometry as Point).coordinates;
+            mapRef.current?.easeTo({ center: coordinates as [number, number], zoom, duration: 400 });
+          })
+          .catch(() => undefined);
       }
       return;
     }
@@ -487,7 +496,7 @@ function ProjectMap({
 
   return (
     <div className="h-[calc(100vh-13rem)] min-h-[520px] overflow-hidden rounded-md border border-slate-200 bg-white">
-      <MapboxMap
+      <MapLibreMap
         ref={mapRef}
         initialViewState={{ latitude: 34.0522, longitude: -118.2437, zoom: 9.5 }}
         mapStyle={MAP_STYLE}
@@ -522,7 +531,7 @@ function ProjectMap({
             </div>
           </Popup>
         ) : null}
-      </MapboxMap>
+      </MapLibreMap>
     </div>
   );
 }
@@ -582,6 +591,7 @@ function CommandSearch({
 
 export function PipelineClient({ data }: PipelineClientProps) {
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
   const loadedStoredState = useRef(false);
   const [filters, setFilters] = useState<PipelineFilters>(DEFAULT_FILTERS);
   const [viewMode, setViewMode] = useState<ViewMode>("table");
@@ -656,7 +666,7 @@ export function PipelineClient({ data }: PipelineClientProps) {
       .filter((project) => {
         const units = project.totalUnits ?? 0;
         const confidence = project.confidence ?? project.statusConfidence ?? "";
-        const jurisdiction = project.jurisdiction?.displayName ?? project.city;
+        const jurisdiction = project.jurisdiction?.displayName;
 
         return (
           projectMatchesSearch(project, search) &&
@@ -688,6 +698,15 @@ export function PipelineClient({ data }: PipelineClientProps) {
   );
 
   const boundedActiveIndex = Math.min(activeIndex, Math.max(0, filteredProjects.length - 1));
+  const activeProjectId = filteredProjects[boundedActiveIndex]?.id ?? null;
+
+  useEffect(() => {
+    if (viewMode !== "table" || !activeProjectId) {
+      return;
+    }
+
+    rowRefs.current.get(activeProjectId)?.scrollIntoView({ block: "nearest" });
+  }, [activeProjectId, viewMode]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -700,6 +719,20 @@ export function PipelineClient({ data }: PipelineClientProps) {
         return;
       }
 
+      if (event.key === "Escape") {
+        if (commandOpen) {
+          event.preventDefault();
+          setCommandOpen(false);
+          return;
+        }
+
+        if (selectedProject) {
+          event.preventDefault();
+          setSelectedProject(null);
+          return;
+        }
+      }
+
       if (event.key === "/" && !inEditable) {
         event.preventDefault();
         searchRef.current?.focus();
@@ -707,6 +740,10 @@ export function PipelineClient({ data }: PipelineClientProps) {
       }
 
       if (inEditable || commandOpen) {
+        return;
+      }
+
+      if (viewMode !== "table") {
         return;
       }
 
@@ -728,7 +765,7 @@ export function PipelineClient({ data }: PipelineClientProps) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [boundedActiveIndex, commandOpen, filteredProjects]);
+  }, [boundedActiveIndex, commandOpen, filteredProjects, selectedProject, viewMode]);
 
   function updateFilter<K extends keyof PipelineFilters>(key: K, value: PipelineFilters[K]) {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -1022,6 +1059,13 @@ export function PipelineClient({ data }: PipelineClientProps) {
                             active && "bg-teal-50/70"
                           )}
                           key={project.id}
+                          ref={(node) => {
+                            if (node) {
+                              rowRefs.current.set(project.id, node);
+                            } else {
+                              rowRefs.current.delete(project.id);
+                            }
+                          }}
                           onClick={() => setSelectedProject(project)}
                           onMouseEnter={() => {
                             setHoveredProject(project);
@@ -1032,7 +1076,7 @@ export function PipelineClient({ data }: PipelineClientProps) {
                           <td className="px-3 py-2 text-xs text-slate-400">{index + 1}</td>
                           <td className="px-3 py-2">
                             <p className="font-medium text-slate-950">{project.projectName}</p>
-                            <p className="text-xs text-slate-500">{project.jurisdiction?.displayName ?? project.city}</p>
+                            <p className="text-xs text-slate-500">{jurisdictionLabel(project)}</p>
                           </td>
                           <td className="px-3 py-2 text-slate-700">{project.canonicalAddress}</td>
                           <td className="px-3 py-2">

@@ -18,7 +18,6 @@ export type PipelineProject = {
   dateDelivery: string | null;
   confidence: string | null;
   statusConfidence: string | null;
-  likelihood: number | null;
   productType: string | null;
   rentOrSale: string | null;
   costarSubmarket: string | null;
