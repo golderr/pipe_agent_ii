@@ -229,10 +229,74 @@ class TimestampMixin:
     )
 
 
+class Market(Base, TimestampMixin):
+    __tablename__ = "markets"
+    __table_args__ = (
+        Index("ix_markets_state", "state"),
+        Index("ix_markets_parent_market_id", "parent_market_id"),
+        Index("ix_markets_slug", "slug"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(String(2), nullable=False)
+    market_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_market_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("markets.id"),
+        nullable=True,
+    )
+
+    parent_market: Mapped["Market | None"] = relationship(
+        remote_side="Market.id",
+        back_populates="child_markets",
+    )
+    child_markets: Mapped[list["Market"]] = relationship(back_populates="parent_market")
+    jurisdictions: Mapped[list["Jurisdiction"]] = relationship(back_populates="market")
+    projects: Mapped[list["Project"]] = relationship(back_populates="market_ref")
+
+
+class Jurisdiction(Base, TimestampMixin):
+    __tablename__ = "jurisdictions"
+    __table_args__ = (
+        UniqueConstraint("state", "slug"),
+        Index("ix_jurisdictions_market_id", "market_id"),
+        Index("ix_jurisdictions_state", "state"),
+        Index("ix_jurisdictions_slug", "slug"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(String(2), nullable=False)
+    market_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("markets.id"),
+        nullable=False,
+    )
+    entity_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    geom: Mapped[object | None] = mapped_column(
+        Geography(geometry_type="MULTIPOLYGON", srid=4326),
+        nullable=True,
+    )
+
+    market: Mapped[Market] = relationship(back_populates="jurisdictions")
+    projects: Mapped[list["Project"]] = relationship(back_populates="jurisdiction_ref")
+    source_registrations: Mapped[list["SourceRegistration"]] = relationship(
+        back_populates="jurisdiction",
+    )
+    source_runs: Mapped[list["SourceRun"]] = relationship(back_populates="jurisdiction")
+
+
 class Project(Base, TimestampMixin):
     __tablename__ = "projects"
     __table_args__ = (
         Index("ix_projects_market", "market"),
+        Index("ix_projects_market_id", "market_id"),
+        Index("ix_projects_jurisdiction_id", "jurisdiction_id"),
         Index("ix_projects_pipeline_status", "pipeline_status"),
         Index("ix_projects_canonical_address", "canonical_address"),
     )
@@ -253,12 +317,22 @@ class Project(Base, TimestampMixin):
     )
 
     market: Mapped[str] = mapped_column(String(100), nullable=False)
+    market_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("markets.id"),
+        nullable=True,
+    )
     city: Mapped[str] = mapped_column(String(120), nullable=False)
     state: Mapped[str] = mapped_column(String(2), nullable=False)
     county: Mapped[str] = mapped_column(String(120), nullable=False)
     zip: Mapped[str | None] = mapped_column(String(10), nullable=True)
     tcg_region: Mapped[str | None] = mapped_column(String(150), nullable=True)
     jurisdiction: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    jurisdiction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jurisdictions.id"),
+        nullable=True,
+    )
     costar_submarket: Mapped[str | None] = mapped_column(String(150), nullable=True)
     zoning: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
@@ -369,6 +443,8 @@ class Project(Base, TimestampMixin):
 
     created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
+    market_ref: Mapped[Market | None] = relationship(back_populates="projects")
+    jurisdiction_ref: Mapped[Jurisdiction | None] = relationship(back_populates="projects")
     status_history: Mapped[list["StatusHistory"]] = relationship(back_populates="project")
     identifiers: Mapped[list["ProjectIdentifier"]] = relationship(back_populates="project")
     outgoing_relationships: Mapped[list["ProjectRelationship"]] = relationship(
@@ -588,21 +664,66 @@ class DeveloperAlias(Base):
     developer: Mapped[DeveloperRegistry] = relationship(back_populates="aliases")
 
 
+class SourceRegistration(Base, TimestampMixin):
+    __tablename__ = "source_registrations"
+    __table_args__ = (
+        UniqueConstraint("jurisdiction_id", "source_name"),
+        Index("ix_source_registrations_jurisdiction_id", "jurisdiction_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    jurisdiction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jurisdictions.id"),
+        nullable=False,
+    )
+    source_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_class: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    schedule_cron: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    jurisdiction: Mapped[Jurisdiction] = relationship(back_populates="source_registrations")
+
+
 class SourceRun(Base):
     __tablename__ = "source_runs"
     __table_args__ = (
         Index("ix_source_runs_market_source_name", "market", "source_name"),
+        Index("ix_source_runs_jurisdiction_id_source_name", "jurisdiction_id", "source_name"),
+        Index("ix_source_runs_finished_at", "finished_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     market: Mapped[str] = mapped_column(String(100), nullable=False)
+    jurisdiction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jurisdictions.id"),
+        nullable=True,
+    )
     source_name: Mapped[str] = mapped_column(String(120), nullable=False)
     collection_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="full")
+    trigger_type: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="scheduled",
+        server_default="scheduled",
+    )
+    initiated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
     run_timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
     )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     incremental_since: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -619,9 +740,14 @@ class SourceRun(Base):
     new_matches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updates_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     new_candidates: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rows_inserted: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rows_updated: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rows_unchanged: Mapped[int | None] = mapped_column(Integer, nullable=True)
     errors: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    jurisdiction: Mapped[Jurisdiction | None] = relationship(back_populates="source_runs")
     review_items: Mapped[list["ReviewItem"]] = relationship(back_populates="source_run")
 
 
