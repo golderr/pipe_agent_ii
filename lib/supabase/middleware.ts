@@ -35,14 +35,17 @@ export async function updateSession(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (!user && !isPublicPath(pathname)) {
     const redirectUrl = request.nextUrl.clone();
+    const nextPath = `${pathname}${request.nextUrl.search}`;
     redirectUrl.pathname = "/login";
-    redirectUrl.searchParams.set("next", pathname);
+    redirectUrl.search = "";
+    redirectUrl.searchParams.set("next", nextPath);
     return NextResponse.redirect(redirectUrl);
   }
 
   if (user && !isEmailAllowed(user.email) && !isPublicPath(pathname)) {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = "/login";
+    redirectUrl.search = "";
     redirectUrl.searchParams.set("error", "not_allowed");
     return NextResponse.redirect(redirectUrl);
   }
