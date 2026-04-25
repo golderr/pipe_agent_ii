@@ -239,6 +239,34 @@ ORDER BY project_id, evidence_date DESC NULLS LAST, collected_at DESC, id DESC;
 
 Grant `SELECT` to `authenticated`. The view is read-only and uses `security_invoker` so it respects the same RLS posture as the underlying `evidence` table. B.4 needs a richer per-field provenance read model keyed from `resolution_log`; this latest-evidence view is only the B.3/B.4 preview path, not the field-level provenance source of truth.
 
+### 4a.3 `project_field_resolution`
+
+```sql
+CREATE INDEX ix_resolution_log_project_field_latest
+ON resolution_log (
+  project_id,
+  field,
+  created_at DESC,
+  id DESC
+);
+
+CREATE VIEW project_field_resolution
+WITH (security_invoker = true) AS
+SELECT DISTINCT ON (project_id, field)
+  project_id,
+  field,
+  current_value,
+  resolved_value,
+  evidence_ids,
+  rule_applied,
+  confidence,
+  created_at
+FROM resolution_log
+ORDER BY project_id, field, created_at DESC, id DESC;
+```
+
+Grant `SELECT` to `authenticated`. Project Detail Snapshot uses this as the field-level read model for source badges, hover provenance, rule labels, and confidence. The view intentionally remains narrow: full evidence timelines and raw evidence expansion are part of B.5.
+
 ---
 
 ## 5. ReviewItem / ReviewDecision — Staged/Committed State

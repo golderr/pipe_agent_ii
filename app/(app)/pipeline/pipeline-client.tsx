@@ -6,21 +6,21 @@ import {
   ChevronLeft,
   ChevronRight,
   Command as CommandIcon,
-  Eye,
+  ExternalLink,
   List,
   Map as MapIcon,
   Plus,
   Save,
   Search,
   SlidersHorizontal,
-  Trash2,
-  X
+  Trash2
 } from "lucide-react";
 import type { Feature, FeatureCollection, Point } from "geojson";
 import type { StyleSpecification } from "maplibre-gl";
 import type { LayerProps, MapGeoJSONFeature, MapMouseEvent, MapRef } from "react-map-gl/maplibre";
 import MapLibreMap, { Layer, NavigationControl, Popup, Source } from "react-map-gl/maplibre";
 import { Command } from "cmdk";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -309,73 +309,6 @@ function ProjectPreview({ project }: { project: PipelineProject }) {
   );
 }
 
-function DetailDrawer({ project, onClose }: { project: PipelineProject | null; onClose: () => void }) {
-  if (!project) {
-    return null;
-  }
-
-  return (
-    <div className="fixed inset-0 z-40 bg-slate-950/20" onClick={onClose}>
-      <aside
-        className="absolute inset-y-0 right-0 w-full max-w-xl overflow-y-auto border-l border-slate-200 bg-white p-5 shadow-xl"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="mb-5 flex items-start justify-between gap-4">
-          <div>
-            <p className="text-xs font-medium uppercase text-slate-500">Project Preview</p>
-            <h2 className="mt-1 text-lg font-semibold text-slate-950">{project.projectName}</h2>
-            <p className="text-sm text-slate-500">{project.canonicalAddress}</p>
-          </div>
-          <button
-            aria-label="Close project preview"
-            className="flex size-8 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50"
-            type="button"
-            onClick={onClose}
-          >
-            <X className="size-4" aria-hidden="true" />
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <PreviewField label="Status" value={<ProjectStatusBadge status={project.pipelineStatus} />} />
-          <PreviewField label="Units" value={number(project.totalUnits)} />
-          <PreviewField label="Developer" value={project.developer ?? "-"} />
-          <PreviewField label="Delivery" value={formatDate(project.dateDelivery)} />
-          <PreviewField label="Jurisdiction" value={jurisdictionLabel(project)} />
-          <PreviewField label="Submarket" value={project.costarSubmarket ?? "-"} />
-          <PreviewField label="Product" value={project.productType ?? "-"} />
-          <PreviewField label="Rent / Sale" value={project.rentOrSale ?? "-"} />
-        </div>
-
-        <div className="mt-5 rounded-md border border-slate-200 p-3">
-          <p className="text-xs font-medium uppercase text-slate-500">Latest evidence</p>
-          <p className="mt-2 text-sm text-slate-900">{project.lastEvidence?.teaser ?? "No evidence summary available."}</p>
-          <p className="mt-2 text-xs text-slate-500">
-            {project.lastEvidence?.sourceType ?? "No source"} |{" "}
-            {project.lastEvidence?.evidenceDate ?? project.lastEvidence?.collectedAt ?? "No date"}
-          </p>
-          {project.lastEvidence?.fields.length ? (
-            <p className="mt-2 text-xs text-slate-500">Fields: {project.lastEvidence.fields.join(", ")}</p>
-          ) : null}
-        </div>
-
-        <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600">
-          Full Project Detail tabs are scheduled for B.4-B.6. This drawer keeps B.3 navigation behavior in place without adding write controls.
-        </p>
-      </aside>
-    </div>
-  );
-}
-
-function PreviewField({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="rounded-md border border-slate-200 p-3">
-      <p className="text-xs text-slate-500">{label}</p>
-      <div className="mt-1 font-medium text-slate-950">{value}</div>
-    </div>
-  );
-}
-
 function SortButton({
   label,
   sortKey,
@@ -527,8 +460,8 @@ function ProjectMap({
                 <span>{number(popupProject.totalUnits)} units</span>
               </div>
               <Button type="button" variant="outline" onClick={() => onOpenProject(popupProject)}>
-                <Eye className="size-4" aria-hidden="true" />
-                Open preview
+                <ExternalLink className="size-4" aria-hidden="true" />
+                Open detail
               </Button>
             </div>
           </Popup>
@@ -592,6 +525,7 @@ function CommandSearch({
 }
 
 export function PipelineClient({ data }: PipelineClientProps) {
+  const router = useRouter();
   const searchRef = useRef<HTMLInputElement | null>(null);
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
   const loadedStoredState = useRef(false);
@@ -603,7 +537,6 @@ export function PipelineClient({ data }: PipelineClientProps) {
   });
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [hoveredProject, setHoveredProject] = useState<PipelineProject | null>(null);
-  const [selectedProject, setSelectedProject] = useState<PipelineProject | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [commandOpen, setCommandOpen] = useState(false);
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
@@ -728,11 +661,6 @@ export function PipelineClient({ data }: PipelineClientProps) {
           return;
         }
 
-        if (selectedProject) {
-          event.preventDefault();
-          setSelectedProject(null);
-          return;
-        }
       }
 
       if (event.key === "/" && !inEditable) {
@@ -761,13 +689,13 @@ export function PipelineClient({ data }: PipelineClientProps) {
 
       if (event.key === "Enter" && filteredProjects[boundedActiveIndex]) {
         event.preventDefault();
-        setSelectedProject(filteredProjects[boundedActiveIndex]);
+        router.push(`/pipeline/${filteredProjects[boundedActiveIndex].id}`);
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [boundedActiveIndex, commandOpen, filteredProjects, selectedProject, viewMode]);
+  }, [boundedActiveIndex, commandOpen, filteredProjects, router, viewMode]);
 
   function updateFilter<K extends keyof PipelineFilters>(key: K, value: PipelineFilters[K]) {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -1068,7 +996,7 @@ export function PipelineClient({ data }: PipelineClientProps) {
                               rowRefs.current.delete(project.id);
                             }
                           }}
-                          onClick={() => setSelectedProject(project)}
+                          onClick={() => router.push(`/pipeline/${project.id}`)}
                           onMouseEnter={() => {
                             setHoveredProject(project);
                             setActiveIndex(index);
@@ -1113,7 +1041,7 @@ export function PipelineClient({ data }: PipelineClientProps) {
               ) : null}
             </div>
           ) : (
-            <ProjectMap projects={filteredProjects} onOpenProject={setSelectedProject} />
+            <ProjectMap projects={filteredProjects} onOpenProject={(project) => router.push(`/pipeline/${project.id}`)} />
           )}
         </section>
       </div>
@@ -1122,9 +1050,8 @@ export function PipelineClient({ data }: PipelineClientProps) {
         open={commandOpen}
         projects={data.projects}
         onOpenChange={setCommandOpen}
-        onSelectProject={setSelectedProject}
+        onSelectProject={(project) => router.push(`/pipeline/${project.id}`)}
       />
-      <DetailDrawer project={selectedProject} onClose={() => setSelectedProject(null)} />
     </main>
   );
 }
