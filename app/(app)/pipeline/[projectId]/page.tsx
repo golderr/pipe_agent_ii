@@ -203,7 +203,6 @@ function FieldRow({ field }: { field: ProjectField }) {
       </div>
       <div className="min-w-0">
         <p className="break-words font-medium text-slate-950">{field.value}</p>
-        {field.note ? <p className="mt-1 text-xs text-slate-500">{field.note}</p> : null}
       </div>
       <div className="flex flex-wrap items-center gap-1.5 md:justify-end">
         <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", CLASS_TONES[field.fieldClass])}>
@@ -223,7 +222,7 @@ function FieldRow({ field }: { field: ProjectField }) {
 
 function EvidencePopover({ field }: { field: ProjectField }) {
   return (
-    <div className="pointer-events-none absolute right-3 top-10 z-30 hidden w-[min(28rem,calc(100vw-3rem))] rounded-md border border-slate-200 bg-white p-3 text-xs shadow-xl group-hover:block group-focus-within:block">
+    <div className="pointer-events-auto absolute right-3 top-10 z-30 hidden w-[min(28rem,calc(100vw-3rem))] rounded-md border border-slate-200 bg-white p-3 text-xs shadow-xl group-hover:block group-focus-within:block">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="font-semibold text-slate-950">{field.label}</p>
