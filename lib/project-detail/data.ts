@@ -9,6 +9,7 @@ import type {
   ProjectEvidenceRow,
   ProjectOverrideRow,
   ProjectResolutionRow,
+  ProjectStatusHistoryRow,
   ProjectDetailSection,
   ProjectField,
   SourceBadge
@@ -345,6 +346,29 @@ function formatDate(value: string | null | undefined) {
   }).format(new Date(value));
 }
 
+function comparableValue(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+
+  if (Array.isArray(value)) {
+    return JSON.stringify(value);
+  }
+
+  if (isObject(value)) {
+    return JSON.stringify(
+      Object.keys(value)
+        .sort()
+        .reduce<Record<string, unknown>>((normalized, key) => {
+          normalized[key] = value[key];
+          return normalized;
+        }, {})
+    );
+  }
+
+  return String(value);
+}
+
 function evidenceFields(evidence: RawEvidence) {
   return Object.keys(evidence.extracted_fields ?? {});
 }
@@ -599,6 +623,7 @@ function toResolutionRows(
         fieldLabel: fieldLabel(resolution.field),
         currentValue: formatValue(resolution.current_value),
         resolvedValue: formatValue(resolution.resolved_value),
+        changed: comparableValue(resolution.current_value) !== comparableValue(resolution.resolved_value),
         evidenceIds,
         evidence,
         rule: resolution.rule_applied,
@@ -606,7 +631,7 @@ function toResolutionRows(
         createdAt: resolution.created_at
       };
     })
-    .sort((a, b) => a.fieldLabel.localeCompare(b.fieldLabel));
+    .sort((a, b) => Number(b.changed) - Number(a.changed) || a.fieldLabel.localeCompare(b.fieldLabel));
 }
 
 function toChangeRows(changeRows: RawChangeLog[]): ProjectChangeLogRow[] {
@@ -624,6 +649,17 @@ function toChangeRows(changeRows: RawChangeLog[]): ProjectChangeLogRow[] {
       priority: row.priority,
       reviewedBy: row.reviewed_by,
       reviewItemId: row.review_item_id
+    }));
+}
+
+function toStatusRows(statusRows: RawStatusHistory[]): ProjectStatusHistoryRow[] {
+  return [...statusRows]
+    .sort((a, b) => String(b.status_date ?? "").localeCompare(String(a.status_date ?? "")))
+    .map((row) => ({
+      status: row.status,
+      statusDate: row.status_date,
+      source: row.source,
+      notes: row.notes
     }));
 }
 
@@ -900,6 +936,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
   const resolutionByField = new Map(resolutions.data.map((resolution) => [resolution.field, resolution]));
   const resolutionRows = toResolutionRows(resolutions.data, evidenceById);
   const projectChangeRows = toChangeRows(changeRows.data);
+  const projectStatusRows = toStatusRows(statusHistory.data);
   const overrideRows = toOverrideRows(rawProject.researcher_override);
   const openReviewItems = reviewItems.data.filter((item) => item.status === "open");
   const pendingFields = extractReviewFields(openReviewItems);
@@ -1016,6 +1053,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       },
       resolutionRows,
       changeRows: projectChangeRows,
+      statusRows: projectStatusRows,
       overrideRows
     },
     error: null

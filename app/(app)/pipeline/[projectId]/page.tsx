@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import type { ReactNode } from "react";
 import { AlertCircle, ArrowLeft, ChevronRight, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
 import { getProjectDetailData } from "@/lib/project-detail/data";
 import { compactStatus, statusStyle } from "@/lib/status";
@@ -14,6 +15,7 @@ import type {
   ProjectField,
   ProjectOverrideRow,
   ProjectResolutionRow,
+  ProjectStatusHistoryRow,
   SourceBadge
 } from "@/lib/project-detail/types";
 import { cn } from "@/lib/utils";
@@ -173,10 +175,6 @@ function displayJsonValue(value: Record<string, unknown>) {
   return JSON.stringify(value, null, 2);
 }
 
-function displayListValue(values: string[]) {
-  return values.length ? values.join(", ") : "-";
-}
-
 function compactId(value: string) {
   return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
@@ -247,7 +245,7 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
     );
   }
 
-  const { project, sections, evidenceRows, evidenceFilters, resolutionRows, changeRows, overrideRows } = result.data;
+  const { project, sections, evidenceRows, evidenceFilters, resolutionRows, changeRows, statusRows, overrideRows } = result.data;
   const activeTab = normalizeTab(query.tab);
   const evidenceQuery = {
     field: normalizeQueryValue(query.field),
@@ -316,7 +314,7 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
       ) : activeTab === "resolution" ? (
         <ResolutionTab projectId={project.id} resolutionRows={resolutionRows} />
       ) : activeTab === "changes" ? (
-        <ChangesTab changeRows={changeRows} />
+        <ChangesTab changeRows={changeRows} statusRows={statusRows} />
       ) : activeTab === "overrides" ? (
         <OverridesTab overrideRows={overrideRows} />
       ) : (
@@ -500,30 +498,55 @@ function ResolutionTab({
   projectId: string;
   resolutionRows: ProjectResolutionRow[];
 }) {
+  const changedRows = resolutionRows.filter((row) => row.changed);
+  const unchangedRows = resolutionRows.filter((row) => !row.changed);
+
   return (
     <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
       <section className="rounded-md border border-slate-200 bg-white">
         <div className="border-b border-slate-200 px-4 py-3">
           <h2 className="text-sm font-semibold text-slate-950">Resolution</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            Latest resolver discrepancy rows by field. Fields with no logged discrepancy are not shown.
+            Latest resolver output per field. Only resolver-tracked fields appear here.
           </p>
         </div>
         {resolutionRows.length ? (
-          <div className="divide-y divide-slate-100">
-            {resolutionRows.map((row) => (
-              <ResolutionRow projectId={projectId} row={row} key={row.field} />
-            ))}
-          </div>
+          <>
+            {changedRows.length ? (
+              <div className="divide-y divide-slate-100">
+                {changedRows.map((row) => (
+                  <ResolutionRow projectId={projectId} row={row} key={row.field} />
+                ))}
+              </div>
+            ) : (
+              <EmptyTabMessage
+                title="No changed resolver outputs"
+                text="The resolver-tracked fields currently match the stored project values."
+              />
+            )}
+            {unchangedRows.length ? (
+              <details className="border-t border-slate-200 bg-slate-50/60">
+                <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-slate-700">
+                  Unchanged resolver outputs ({unchangedRows.length})
+                </summary>
+                <div className="divide-y divide-slate-100 border-t border-slate-200 bg-white">
+                  {unchangedRows.map((row) => (
+                    <ResolutionRow projectId={projectId} row={row} key={row.field} />
+                  ))}
+                </div>
+              </details>
+            ) : null}
+          </>
         ) : (
-          <EmptyTabMessage title="No resolution rows" text="No resolver discrepancy rows are linked to this project yet." />
+          <EmptyTabMessage title="No resolution rows" text="No resolver output rows are linked to this project yet." />
         )}
       </section>
 
       <aside className="h-fit rounded-md border border-slate-200 bg-white p-4 text-sm">
         <h2 className="font-semibold text-slate-950">Read model</h2>
         <p className="mt-2 text-slate-600">
-          This tab reads the latest `resolution_log` row per field through `project_field_resolution`.
+          This tab reads the latest <CodeText>resolution_log</CodeText> row per field through{" "}
+          <CodeText>project_field_resolution</CodeText>.
         </p>
         <p className="mt-3 text-xs text-slate-500">
           Alternatives considered are not currently stored by the resolver, so Phase B shows rule, confidence,
@@ -536,7 +559,7 @@ function ResolutionTab({
 
 function ResolutionRow({ projectId, row }: { projectId: string; row: ProjectResolutionRow }) {
   return (
-    <details className="group px-4 py-3">
+    <details className={cn("group px-4 py-3", !row.changed && "bg-slate-50/40")}>
       <summary
         className="grid cursor-pointer list-none gap-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 lg:grid-cols-[12rem_minmax(0,1fr)_8rem_7rem]"
         tabIndex={0}
@@ -550,15 +573,20 @@ function ResolutionRow({ projectId, row }: { projectId: string; row: ProjectReso
         <span className="w-fit rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] text-slate-700">
           {row.confidence ?? "no confidence"}
         </span>
-        <span className="text-xs text-slate-400 group-open:hidden">Expand</span>
-        <span className="hidden text-xs text-slate-400 group-open:block">Collapse</span>
+        <span className="flex items-center gap-2 text-xs text-slate-400">
+          <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", row.changed ? "border-amber-200 bg-amber-50 text-amber-800" : "border-slate-200 bg-white text-slate-500")}>
+            {row.changed ? "Changed" : "Unchanged"}
+          </span>
+          <span className="group-open:hidden">Expand</span>
+          <span className="hidden group-open:block">Collapse</span>
+        </span>
       </summary>
       <div className="mt-3 grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 lg:grid-cols-2">
         <DetailList
           rows={[
-            ["Rule", row.rule ?? "-"],
+            ["Rule", row.rule ? displayRawFieldKey(row.rule) : "-"],
             ["Created", formatDate(row.createdAt)],
-            ["Evidence IDs", displayListValue(row.evidenceIds.map(compactId))]
+            ["Evidence IDs", <CompactIdList ids={row.evidenceIds} key="evidence-ids" />]
           ]}
         />
         <div className="rounded-md border border-slate-200 bg-white p-3">
@@ -572,7 +600,7 @@ function ResolutionRow({ projectId, row }: { projectId: string; row: ProjectReso
           ) : (
             <p className="mt-2 text-xs text-slate-500">No linked evidence IDs on this row.</p>
           )}
-          {row.evidenceIds.length ? (
+          {row.evidence.length ? (
             <Link
               className="mt-3 inline-flex text-xs font-medium text-teal-700 hover:text-teal-900"
               href={`/pipeline/${projectId}?tab=evidence&field=${encodeURIComponent(row.field)}`}
@@ -586,23 +614,51 @@ function ResolutionRow({ projectId, row }: { projectId: string; row: ProjectReso
   );
 }
 
-function ChangesTab({ changeRows }: { changeRows: ProjectChangeLogRow[] }) {
+function ChangesTab({
+  changeRows,
+  statusRows
+}: {
+  changeRows: ProjectChangeLogRow[];
+  statusRows: ProjectStatusHistoryRow[];
+}) {
   return (
-    <section className="mt-5 rounded-md border border-slate-200 bg-white">
-      <div className="border-b border-slate-200 px-4 py-3">
-        <h2 className="text-sm font-semibold text-slate-950">Changes</h2>
-        <p className="mt-0.5 text-xs text-slate-500">Committed system and researcher changes for this project.</p>
-      </div>
-      {changeRows.length ? (
-        <div className="divide-y divide-slate-100">
-          {changeRows.map((row) => (
-            <ChangeLogRow row={row} key={row.id} />
-          ))}
+    <div className="mt-5 space-y-5">
+      <section className="rounded-md border border-slate-200 bg-white">
+        <div className="border-b border-slate-200 px-4 py-3">
+          <h2 className="text-sm font-semibold text-slate-950">ChangeLog</h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            ChangeLog rows are written when review decisions are committed in Phase C.
+          </p>
         </div>
-      ) : (
-        <EmptyTabMessage title="No change log entries" text="No committed ChangeLog rows are linked to this project yet." />
-      )}
-    </section>
+        {changeRows.length ? (
+          <div className="divide-y divide-slate-100">
+            {changeRows.map((row) => (
+              <ChangeLogRow row={row} key={row.id} />
+            ))}
+          </div>
+        ) : (
+          <EmptyTabMessage title="No change log entries" text="No review-commit ChangeLog rows are linked to this project yet." />
+        )}
+      </section>
+
+      <section className="rounded-md border border-slate-200 bg-white">
+        <div className="border-b border-slate-200 px-4 py-3">
+          <h2 className="text-sm font-semibold text-slate-950">Status History</h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Lifecycle status changes recorded by the resolver or collectors.
+          </p>
+        </div>
+        {statusRows.length ? (
+          <div className="divide-y divide-slate-100">
+            {statusRows.map((row, index) => (
+              <StatusHistoryRow row={row} key={`${row.status}-${row.statusDate ?? "undated"}-${index}`} />
+            ))}
+          </div>
+        ) : (
+          <EmptyTabMessage title="No status history" text="No lifecycle status history rows are linked to this project yet." />
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -628,11 +684,24 @@ function ChangeLogRow({ row }: { row: ProjectChangeLogRow }) {
             ["Source", row.source],
             ["Priority", row.priority],
             ["Reviewed by", row.reviewedBy ?? "-"],
-            ["Review item", row.reviewItemId ? compactId(row.reviewItemId) : "-"]
+            ["Review item", row.reviewItemId ? <CompactId id={row.reviewItemId} key="review-item-id" /> : "-"]
           ]}
         />
       </div>
     </details>
+  );
+}
+
+function StatusHistoryRow({ row }: { row: ProjectStatusHistoryRow }) {
+  return (
+    <div className="grid gap-3 px-4 py-3 text-sm lg:grid-cols-[8rem_12rem_minmax(0,1fr)]">
+      <span className="text-slate-500">{formatDate(row.statusDate)}</span>
+      <span className="font-medium text-slate-950">{row.status}</span>
+      <span className="min-w-0 text-slate-700">
+        <span className="text-slate-500">{row.source}</span>
+        {row.notes ? <span className="ml-2">{row.notes}</span> : null}
+      </span>
+    </div>
   );
 }
 
@@ -660,6 +729,10 @@ function OverridesTab({ overrideRows }: { overrideRows: ProjectOverrideRow[] }) 
         <p className="mt-2 text-slate-600">
           Overrides are read-only here. Edit, clear, superseded history, and per-override notes move to Phase C when
           overrides are promoted into a dedicated table.
+        </p>
+        <p className="mt-3 text-xs text-slate-500">
+          Legacy scalar overrides may be treated as sticky by the resolver even when this tab labels the stored JSONB
+          shape as legacy.
         </p>
       </aside>
     </div>
@@ -689,18 +762,50 @@ function OverrideRow({ row }: { row: ProjectOverrideRow }) {
             ["Note", row.note ?? "-"]
           ]}
         />
-        <div>
-          <p className="mb-1 text-xs font-medium text-slate-500">Baseline / raw payload</p>
-          <pre className="max-h-72 overflow-auto rounded-md border border-slate-200 bg-white p-3 text-[11px] leading-relaxed text-slate-700">
-            {displayJsonValue(row.baseline ?? row.raw)}
-          </pre>
-        </div>
+        {row.baseline ? (
+          <div>
+            <p className="mb-1 text-xs font-medium text-slate-500">Baseline</p>
+            <pre className="max-h-72 overflow-auto rounded-md border border-slate-200 bg-white p-3 text-[11px] leading-relaxed text-slate-700">
+              {displayJsonValue(row.baseline)}
+            </pre>
+          </div>
+        ) : (
+          <div className="rounded-md border border-slate-200 bg-white p-3 text-xs text-slate-500">
+            No captured baseline for this legacy override.
+          </div>
+        )}
       </div>
     </details>
   );
 }
 
-function DetailList({ rows }: { rows: Array<[string, string]> }) {
+function CompactId({ id }: { id: string }) {
+  return (
+    <span title={id}>{compactId(id)}</span>
+  );
+}
+
+function CompactIdList({ ids }: { ids: string[] }) {
+  if (!ids.length) {
+    return "-";
+  }
+
+  return (
+    <span className="flex flex-wrap gap-1">
+      {ids.map((id) => (
+        <CompactId id={id} key={id} />
+      ))}
+    </span>
+  );
+}
+
+function CodeText({ children }: { children: ReactNode }) {
+  return (
+    <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[12px] text-slate-700">{children}</code>
+  );
+}
+
+function DetailList({ rows }: { rows: Array<[string, ReactNode]> }) {
   return (
     <dl className="grid gap-2 rounded-md border border-slate-200 bg-white p-3 text-xs">
       {rows.map(([label, value]) => (

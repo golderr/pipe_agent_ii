@@ -47,6 +47,7 @@ export type ProjectResolutionRow = {
   fieldLabel: string;
   currentValue: string;
   resolvedValue: string;
+  changed: boolean;
   evidenceIds: string[];
   evidence: EvidenceSummary[];
   rule: string | null;
@@ -66,6 +67,13 @@ export type ProjectChangeLogRow = {
   priority: string;
   reviewedBy: string | null;
   reviewItemId: string | null;
+};
+
+export type ProjectStatusHistoryRow = {
+  status: string;
+  statusDate: string | null;
+  source: string;
+  notes: string | null;
 };
 
 export type ProjectOverrideRow = {
@@ -125,5 +133,6 @@ export type ProjectDetailData = {
   evidenceFilters: ProjectEvidenceFilters;
   resolutionRows: ProjectResolutionRow[];
   changeRows: ProjectChangeLogRow[];
+  statusRows: ProjectStatusHistoryRow[];
   overrideRows: ProjectOverrideRow[];
 };
