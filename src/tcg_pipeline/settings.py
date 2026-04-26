@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     supabase_anon_key: str | None = None
     supabase_service_role_key: str | None = None
     socrata_app_token: str | None = None
+    allowed_emails: str | None = None
+
+    api_cors_origins: str = "http://localhost:3000"
+    api_auth_audience: str = "authenticated"
+    api_required_role: str = "authenticated"
+    api_jwks_cache_ttl_seconds: int = 600
 
     data_dir: Path = Field(default_factory=lambda: Path("data"))
     seed_dir: Path = Field(default_factory=lambda: Path("data/seed"))

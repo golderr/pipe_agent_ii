@@ -67,3 +67,13 @@ tcg-pipeline collect-source ladbs_permits --market los_angeles --mode incrementa
 ```
 
 For the current `los_angeles` dataset, treat the seed as City of Los Angeles only. The ingesters already support `--allowed-city`, and using it now keeps West Hollywood, Glendale, Burbank, and other out-of-scope records out of the LA seed.
+
+## Backend API
+
+Phase C write paths use FastAPI. The scaffold can be run locally with:
+
+```powershell
+uvicorn tcg_pipeline.api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+See `docs/ops/backend_api.md` for environment variables, auth behavior, and Render deployment notes.
