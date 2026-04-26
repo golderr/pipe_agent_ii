@@ -240,7 +240,10 @@ def _is_usable_registry_row(developer: DeveloperRegistry, session: Session) -> b
     if sqlalchemy_inspect(developer).deleted or developer in session.deleted:
         return False
     normalized = normalize_developer_name(developer.canonical_name)
-    return not _is_ignored_registry_name(normalized)
+    return (
+        is_safe_developer_registry_name(developer.canonical_name)
+        and not _is_ignored_registry_name(normalized)
+    )
 
 
 def _is_ignored_registry_name(normalized_name: str | None) -> bool:
@@ -269,6 +272,11 @@ def _find_exact_matches(
             )
         for alias in developer.aliases:
             if normalize_developer_name(alias.alias_name) != normalized_name:
+                continue
+            if not is_safe_developer_alias(
+                canonical_name=developer.canonical_name,
+                alias_name=alias.alias_name,
+            ):
                 continue
             matches.append(
                 _CandidateMatch(
@@ -412,7 +420,7 @@ def _meaningful_tokens(name: str | None) -> set[str]:
     }
 
 
-def _has_meaningful_name_overlap(left: str | None, right: str | None) -> bool:
+def has_meaningful_developer_name_overlap(left: str | None, right: str | None) -> bool:
     left_tokens = _meaningful_tokens(left)
     right_tokens = _meaningful_tokens(right)
     if not left_tokens or not right_tokens:
@@ -428,6 +436,27 @@ def _has_meaningful_name_overlap(left: str | None, right: str | None) -> bool:
             if fuzz.ratio(left_token, right_token) >= MEANINGFUL_TOKEN_SIMILARITY_THRESHOLD:
                 return True
     return False
+
+
+def is_safe_developer_registry_name(name: str | None) -> bool:
+    normalized = normalize_developer_name(name)
+    return normalized is not None and bool(_meaningful_tokens(normalized))
+
+
+def is_safe_developer_alias(*, canonical_name: str | None, alias_name: str | None) -> bool:
+    canonical_normalized = normalize_developer_name(canonical_name)
+    alias_normalized = normalize_developer_name(alias_name)
+    if canonical_normalized is None or alias_normalized is None:
+        return False
+    if canonical_normalized == alias_normalized:
+        # Generic-only canonical names are blocked before this point, so this
+        # allows exact spelling variants without accepting pure-generic aliases.
+        return True
+    return has_meaningful_developer_name_overlap(canonical_normalized, alias_normalized)
+
+
+def _has_meaningful_name_overlap(left: str | None, right: str | None) -> bool:
+    return has_meaningful_developer_name_overlap(left, right)
 
 
 def _build_result(
@@ -480,6 +509,10 @@ def _persist_canonicalization(
     if result.canonical_developer_id is not None:
         canonical = session.get(DeveloperRegistry, result.canonical_developer_id)
     if canonical is None:
+        # C.a.1 registry-creation chokepoint: new DeveloperRegistry rows must
+        # retain at least one meaningful non-generic token.
+        if not is_safe_developer_registry_name(canonical_name):
+            return result
         canonical = DeveloperRegistry(canonical_name=canonical_name)
         session.add(canonical)
         session.flush()
@@ -551,9 +584,21 @@ def _merge_registry_rows(
         if cleaned_alias is None or cleaned_alias.casefold() == target.canonical_name.casefold():
             session.delete(alias)
             continue
+        if not is_safe_developer_alias(
+            canonical_name=target.canonical_name,
+            alias_name=cleaned_alias,
+        ):
+            session.delete(alias)
+            continue
         alias.developer = target
 
-    if source.canonical_name.casefold() != target.canonical_name.casefold():
+    if (
+        source.canonical_name.casefold() != target.canonical_name.casefold()
+        and is_safe_developer_alias(
+            canonical_name=target.canonical_name,
+            alias_name=source.canonical_name,
+        )
+    ):
         _ensure_alias(
             session,
             developer_id=target.id,
@@ -579,6 +624,11 @@ def _ensure_alias(
 
     target = session.get(DeveloperRegistry, developer_id)
     if target is None or cleaned_alias.casefold() == target.canonical_name.casefold():
+        return False
+    if not is_safe_developer_alias(
+        canonical_name=target.canonical_name,
+        alias_name=cleaned_alias,
+    ):
         return False
 
     pending_alias = _find_alias_in_session(session, cleaned_alias)

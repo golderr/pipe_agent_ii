@@ -12,12 +12,14 @@ from uuid import UUID
 try:
     from scripts.phase_a_review_common import DEFAULT_OUTPUT_DIR, serialize_csv_value
 except ModuleNotFoundError:  # pragma: no cover - script entrypoint fallback
-    from phase_a_review_common import DEFAULT_OUTPUT_DIR, serialize_csv_value  # type: ignore[no-redef]
+    from phase_a_review_common import (  # type: ignore[no-redef]
+        DEFAULT_OUTPUT_DIR,
+        serialize_csv_value,
+    )
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.models import Project
 from tcg_pipeline.db.review_workflow import _build_override_entry, _merge_researcher_overrides
 from tcg_pipeline.resolution import resolve_project
-
 
 REVIEW_INPUT_FILENAMES = (
     "status_review.csv",
@@ -35,11 +37,13 @@ PHASE_A_BUCKET_INPUT_FILENAMES = (
     "developer_canonical_cleanup.csv",
 )
 PHASE_A_BUCKET_PROFILE = "phase_a_2026_04_23"
-ARCHITECTURE_FIRM_RAW_VALUES = {
-    "MVE + Partners",
-    "Three 6Ixty",
-}
 VALID_DECISIONS = {"accept", "override", "defer", "bug", ""}
+DEVELOPER_REVIEW_REQUIRED_COLUMNS = (
+    "project_id",
+    "current_value",
+    "raw_value",
+    "resolved_value",
+)
 
 
 @dataclass(slots=True)
@@ -54,6 +58,33 @@ class DecisionRow:
     notes: str
     raw_row: dict[str, str]
     override_source: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ScopedDeveloperOverride:
+    project_id: UUID
+    raw_value: str
+    expected_current_developer: str
+
+
+# LA Phase A scoped exceptions. Extend per market instead of matching raw names globally.
+SCOPED_ARCHITECTURE_FIRM_OVERRIDES = (
+    ScopedDeveloperOverride(
+        project_id=UUID("1b92ab85-9860-4e3d-97ff-c2868f2b986d"),
+        raw_value="MVE + Partners",
+        expected_current_developer="Appa Real Estate",
+    ),
+    ScopedDeveloperOverride(
+        project_id=UUID("e49bd069-a6b4-486c-8aac-d71857105224"),
+        raw_value="MVE + Partners",
+        expected_current_developer="KMK Management",
+    ),
+    ScopedDeveloperOverride(
+        project_id=UUID("c4eb2f29-2e69-40e2-be88-296dc98ccf2a"),
+        raw_value="Three 6Ixty",
+        expected_current_developer="Onni Group",
+    ),
+)
 
 
 def main() -> None:
@@ -142,7 +173,9 @@ def apply_phase_a_decisions(
     ]
 
     blocking_rows = [
-        row for row in decision_rows if row.decision in {"bug", ""} or row.decision not in VALID_DECISIONS
+        row
+        for row in decision_rows
+        if row.decision in {"bug", ""} or row.decision not in VALID_DECISIONS
     ]
     if blocking_rows:
         output_lines.append(
@@ -330,12 +363,19 @@ def _phase_a_bucket_decision(
         )
 
     if source_filename == "developer_review.csv":
+        _require_columns(
+            source_filename,
+            raw_row,
+            required_columns=DEVELOPER_REVIEW_REQUIRED_COLUMNS,
+        )
         raw_value = (raw_row.get("raw_value") or "").strip()
         resolved_value = (raw_row.get("resolved_value") or "").strip()
-        if raw_value in ARCHITECTURE_FIRM_RAW_VALUES:
+        architecture_override = _scoped_architecture_firm_override(raw_row)
+        if architecture_override is not None:
             return (
                 "override",
-                f"Phase A architecture-firm exception: keep current developer instead of '{raw_value}'.",
+                "Phase A architecture-firm exception: "
+                f"keep current developer instead of '{raw_value}'.",
                 "current",
             )
         if raw_value and raw_value != resolved_value:
@@ -351,6 +391,46 @@ def _phase_a_bucket_decision(
         )
 
     raise ValueError(f"Unsupported CSV for {PHASE_A_BUCKET_PROFILE}: {source_filename}")
+
+
+def _require_columns(
+    source_filename: str,
+    raw_row: dict[str, str],
+    *,
+    required_columns: tuple[str, ...],
+) -> None:
+    missing = [column for column in required_columns if column not in raw_row]
+    if missing:
+        raise ValueError(
+            f"{source_filename} is missing required columns: {', '.join(missing)}"
+        )
+
+
+def _scoped_architecture_firm_override(
+    raw_row: dict[str, str],
+) -> ScopedDeveloperOverride | None:
+    raw_value = (raw_row.get("raw_value") or "").strip()
+    project_id_text = (raw_row.get("project_id") or "").strip()
+    if not raw_value or not project_id_text:
+        return None
+
+    try:
+        project_id = UUID(project_id_text)
+    except ValueError:
+        return None
+
+    current_value = (raw_row.get("current_value") or "").strip()
+    for override in SCOPED_ARCHITECTURE_FIRM_OVERRIDES:
+        if project_id != override.project_id or raw_value != override.raw_value:
+            continue
+        if current_value != override.expected_current_developer:
+            raise ValueError(
+                "Scoped architecture-firm override drift for "
+                f"{project_id}: current developer {current_value!r} != "
+                f"{override.expected_current_developer!r}."
+            )
+        return override
+    return None
 
 
 def _override_value_for_row(project: Project, row: DecisionRow) -> Any:

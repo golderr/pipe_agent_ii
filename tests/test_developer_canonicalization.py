@@ -9,7 +9,14 @@ from typer.testing import CliRunner
 
 from tcg_pipeline.cli import app
 from tcg_pipeline.db.models import DeveloperAlias, DeveloperRegistry, Evidence, Project
-from tcg_pipeline.developer import canonicalize_project_developers, normalize_developer_name
+from tcg_pipeline.developer import (
+    audit_developer_registry_token_overlap,
+    canonicalize_project_developers,
+    delete_developer_registry_audit_issues,
+    is_safe_developer_alias,
+    is_safe_developer_registry_name,
+    normalize_developer_name,
+)
 from tcg_pipeline.developer import registry as registry_module
 from tcg_pipeline.developer.canonicalize import DeveloperCanonicalizationSweepResult
 from tcg_pipeline.developer.registry import (
@@ -33,6 +40,19 @@ TEST_NEW_DEVELOPER = "ZZZQXQ Brand New Dev"
 def test_normalize_developer_name_strips_legal_suffixes() -> None:
     assert normalize_developer_name("Jamison Services, LLC") == "JAMISON SERVICES"
     assert normalize_developer_name("The CIM Group LP") == "CIM GROUP"
+
+
+def test_developer_registry_safety_guard_requires_meaningful_overlap() -> None:
+    assert is_safe_developer_registry_name("Jamison Services")
+    assert not is_safe_developer_registry_name("Capital")
+    assert is_safe_developer_alias(
+        canonical_name="Jamison Services",
+        alias_name="Jamison Services LP",
+    )
+    assert not is_safe_developer_alias(
+        canonical_name="Nimbleroot Capital",
+        alias_name="Vellum Capital",
+    )
 
 
 def test_canonicalize_developer_name_matches_exact_alias(
@@ -224,6 +244,112 @@ def test_canonicalize_developer_name_ignores_category_raw_name_and_does_not_pers
     assert result.canonical_name == "Category"
     assert result.match_type == "ignored_registry_entry"
     assert updated_count == existing_count
+
+
+def test_canonicalize_developer_name_does_not_persist_generic_registry_name(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    generic_name = "Capital Ventures Development Funds"
+    result = canonicalize_developer_name(
+        postgres_session,
+        generic_name,
+        persist=True,
+    )
+    postgres_session.flush()
+    registry_rows = postgres_session.execute(
+        select(DeveloperRegistry.id).where(DeveloperRegistry.canonical_name == generic_name)
+    ).scalars().all()
+
+    assert result.match_type == "new_registry_entry"
+    assert result.registry_created is False
+    assert registry_rows == []
+
+
+def test_developer_registry_audit_prunes_unsafe_aliases_for_safe_canonical(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    polluted = DeveloperRegistry(canonical_name="ZZZQXQ Prune Test Developer")
+    safe = DeveloperRegistry(canonical_name=TEST_JAMISON)
+    postgres_session.add_all([polluted, safe])
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            DeveloperAlias(developer_id=polluted.id, alias_name="Advisor Associate Holdings"),
+            DeveloperAlias(developer_id=polluted.id, alias_name="Funds Venture Properties"),
+            DeveloperAlias(developer_id=polluted.id, alias_name="Realty Management Communities"),
+            DeveloperAlias(developer_id=safe.id, alias_name=f"{TEST_JAMISON} LP"),
+            DeveloperAlias(developer_id=safe.id, alias_name=f"{TEST_JAMISON} Inc"),
+            DeveloperAlias(developer_id=safe.id, alias_name=f"The {TEST_JAMISON}"),
+        ]
+    )
+    postgres_session.flush()
+
+    issues = audit_developer_registry_token_overlap(postgres_session, min_aliases=3)
+
+    matching_issues = [issue for issue in issues if issue.developer_id == polluted.id]
+    assert len(matching_issues) == 1
+    assert matching_issues[0].unsafe_canonical_name is False
+    assert matching_issues[0].unsafe_alias_count == 3
+    assert all(issue.developer_id != safe.id for issue in issues)
+
+    apply_result = delete_developer_registry_audit_issues(postgres_session, matching_issues)
+    postgres_session.flush()
+
+    remaining_polluted = postgres_session.get(DeveloperRegistry, polluted.id)
+    remaining_safe = postgres_session.get(DeveloperRegistry, safe.id)
+    remaining_polluted_aliases = postgres_session.execute(
+        select(DeveloperAlias.id).where(DeveloperAlias.developer_id == polluted.id)
+    ).scalars().all()
+
+    assert apply_result.deleted_canonical_count == 0
+    assert apply_result.pruned_alias_count == 3
+    assert remaining_polluted is not None
+    assert remaining_safe is not None
+    assert remaining_polluted_aliases == []
+
+
+def test_developer_registry_audit_deletes_unsafe_canonical_rows(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("developer_registry"):
+        pytest.skip("Apply the evidence layer migration before running developer tests.")
+
+    polluted = DeveloperRegistry(canonical_name="Advisor Associate Holdings Fund")
+    postgres_session.add(polluted)
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            DeveloperAlias(developer_id=polluted.id, alias_name="Funds Venture Properties"),
+            DeveloperAlias(developer_id=polluted.id, alias_name="Realty Management Communities"),
+            DeveloperAlias(developer_id=polluted.id, alias_name="Residential Housing Partner"),
+        ]
+    )
+    postgres_session.flush()
+
+    issues = audit_developer_registry_token_overlap(postgres_session, min_aliases=3)
+
+    matching_issues = [issue for issue in issues if issue.developer_id == polluted.id]
+    assert len(matching_issues) == 1
+    assert matching_issues[0].unsafe_canonical_name is True
+
+    apply_result = delete_developer_registry_audit_issues(postgres_session, matching_issues)
+    postgres_session.flush()
+
+    remaining_polluted = postgres_session.get(DeveloperRegistry, polluted.id)
+    remaining_polluted_aliases = postgres_session.execute(
+        select(DeveloperAlias.id).where(DeveloperAlias.developer_id == polluted.id)
+    ).scalars().all()
+
+    assert apply_result.deleted_canonical_count == 1
+    assert apply_result.pruned_alias_count == 0
+    assert remaining_polluted is None
+    assert remaining_polluted_aliases == []
 
 
 def test_canonicalize_registry_entry_merges_duplicate_canonical_row(

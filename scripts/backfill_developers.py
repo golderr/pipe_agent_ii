@@ -15,12 +15,14 @@ if str(SRC_PATH) not in sys.path:
 
 from tcg_pipeline.db.connection import get_session_factory  # noqa: E402
 from tcg_pipeline.db.models import DeveloperRegistry, Project  # noqa: E402
+from tcg_pipeline.developer.registry import is_safe_developer_registry_name  # noqa: E402
 
 
 @dataclass(slots=True)
 class BackfillDevelopersResult:
     inserted: int = 0
     skipped_existing: int = 0
+    skipped_unsafe: int = 0
 
 
 def main() -> None:
@@ -37,6 +39,7 @@ def main() -> None:
     result = backfill_developers(dry_run=args.dry_run)
     print(f"Inserted developer registry rows: {result.inserted}")
     print(f"Skipped existing developer names: {result.skipped_existing}")
+    print(f"Skipped unsafe developer names: {result.skipped_unsafe}")
     print(f"Committed: {not args.dry_run}")
 
 
@@ -67,6 +70,9 @@ def _populate_developer_registry(session: Session) -> BackfillDevelopersResult:
         name.strip() for name in developer_names if name and name.strip()
     }
     for developer_name in sorted(normalized_names):
+        if not is_safe_developer_registry_name(developer_name):
+            result.skipped_unsafe += 1
+            continue
         if developer_name in existing_names:
             result.skipped_existing += 1
             continue
