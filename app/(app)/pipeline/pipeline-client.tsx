@@ -30,6 +30,7 @@ import type { PipelineData, PipelineProject } from "@/lib/pipeline/types";
 
 type PipelineClientProps = {
   data: PipelineData;
+  initialFilters?: Partial<PipelineFilters>;
 };
 
 type ViewMode = "table" | "map";
@@ -81,6 +82,24 @@ const DEFAULT_FILTERS: PipelineFilters = {
   confidence: "all",
   geocodedOnly: false
 };
+
+function normalizeInitialFilters(initialFilters: Partial<PipelineFilters> | undefined): PipelineFilters {
+  return {
+    ...DEFAULT_FILTERS,
+    ...initialFilters,
+    statuses: initialFilters?.statuses ?? DEFAULT_FILTERS.statuses
+  };
+}
+
+function hasInitialFilterValues(initialFilters: Partial<PipelineFilters> | undefined) {
+  if (!initialFilters) {
+    return false;
+  }
+
+  return Object.entries(initialFilters).some(([, value]) =>
+    Array.isArray(value) ? value.length > 0 : value !== undefined && value !== "" && value !== "all" && value !== false
+  );
+}
 
 const MAP_STYLE: StyleSpecification = {
   version: 8,
@@ -503,12 +522,14 @@ function CommandSearch({
   );
 }
 
-export function PipelineClient({ data }: PipelineClientProps) {
+export function PipelineClient({ data, initialFilters }: PipelineClientProps) {
   const router = useRouter();
   const searchRef = useRef<HTMLInputElement | null>(null);
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
   const loadedStoredState = useRef(false);
-  const [filters, setFilters] = useState<PipelineFilters>(DEFAULT_FILTERS);
+  const initialFilterState = useMemo(() => normalizeInitialFilters(initialFilters), [initialFilters]);
+  const hasUrlFilters = hasInitialFilterValues(initialFilters);
+  const [filters, setFilters] = useState<PipelineFilters>(() => normalizeInitialFilters(initialFilters));
   const [viewMode, setViewMode] = useState<ViewMode>("table");
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "totalUnits",
@@ -525,8 +546,10 @@ export function PipelineClient({ data }: PipelineClientProps) {
     const timeout = window.setTimeout(() => {
       try {
         const savedFilters = window.sessionStorage.getItem(FILTER_STORAGE_KEY);
-        if (savedFilters) {
+        if (savedFilters && !hasUrlFilters) {
           setFilters({ ...DEFAULT_FILTERS, ...JSON.parse(savedFilters) });
+        } else if (hasUrlFilters) {
+          setFilters(initialFilterState);
         }
 
         const savedViewMode = window.sessionStorage.getItem(VIEW_MODE_STORAGE_KEY);
@@ -548,7 +571,7 @@ export function PipelineClient({ data }: PipelineClientProps) {
     }, 0);
 
     return () => window.clearTimeout(timeout);
-  }, []);
+  }, [hasUrlFilters, initialFilterState]);
 
   useEffect(() => {
     if (!loadedStoredState.current) {

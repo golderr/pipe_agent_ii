@@ -4,7 +4,20 @@ import { getPipelineData } from "@/lib/pipeline/data";
 
 export const dynamic = "force-dynamic";
 
-export default async function PipelinePage() {
+type PipelinePageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+};
+
+function queryValues(value: string | string[] | undefined) {
+  if (!value) {
+    return [];
+  }
+
+  return Array.isArray(value) ? value : [value];
+}
+
+export default async function PipelinePage({ searchParams }: PipelinePageProps) {
+  const query = searchParams ? await searchParams : {};
   const { data, error } = await getPipelineData();
 
   if (error) {
@@ -21,5 +34,7 @@ export default async function PipelinePage() {
     );
   }
 
-  return <PipelineClient data={data} />;
+  const requestedStatuses = queryValues(query.status).filter((status) => data.facets.statuses.includes(status));
+
+  return <PipelineClient data={data} initialFilters={{ statuses: requestedStatuses }} />;
 }
