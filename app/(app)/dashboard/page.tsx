@@ -132,8 +132,8 @@ function NeedsAttentionTile({ data }: { data: DashboardData }) {
       icon={<ClipboardList className="size-4" aria-hidden="true" />}
       value={number(data.needsAttention.total)}
       label="open review items"
-      href="/review"
-      linkLabel="Open Review"
+      href="/coverage"
+      linkLabel="Open Coverage"
     >
       <PriorityBars priorities={priorities} total={data.needsAttention.total} />
       {data.needsAttention.types.length ? (
@@ -162,7 +162,7 @@ function StalledTile({ data }: { data: DashboardData }) {
       value={number(data.stalled.total)}
       label={`no evidence since ${formatDate(data.stalled.cutoffDate)}`}
       href="/pipeline?status=Approved&status=Under%20Construction"
-      linkLabel="Review Pipeline"
+      linkLabel="Review Approved + U/C"
     >
       <StatusBars buckets={data.stalled.statusBuckets} maxRows={3} />
       {data.stalled.total ? (
@@ -175,14 +175,32 @@ function StalledTile({ data }: { data: DashboardData }) {
 }
 
 function ContradictionsTile({ data }: { data: DashboardData }) {
+  if (!data.contradictions.active) {
+    return (
+      <TileShell
+        title="Contradictions"
+        icon={<GitCompareArrows className="size-4" aria-hidden="true" />}
+        value="Phase C"
+        label="detection not active yet"
+        href="/coverage"
+        linkLabel="Open Coverage"
+      >
+        <p className="text-xs text-slate-500">
+          This tile will show override-vs-evidence conflicts after the Phase C contradiction detector starts writing
+          contradiction review items.
+        </p>
+      </TileShell>
+    );
+  }
+
   return (
     <TileShell
       title="Contradictions"
       icon={<GitCompareArrows className="size-4" aria-hidden="true" />}
       value={number(data.contradictions.total)}
       label="override contradiction items"
-      href="/review"
-      linkLabel="Open Review"
+      href="/coverage"
+      linkLabel="Open Coverage"
     >
       <PriorityBars priorities={data.contradictions.priorities} total={data.contradictions.total} />
       <p className="mt-3 text-xs text-slate-500">
@@ -221,7 +239,7 @@ function RecentActivityTile({ data }: { data: DashboardData }) {
     >
       <div className="grid grid-cols-3 gap-2">
         <MiniMetric label="News" value={data.recentActivity.newsRows} />
-        <MiniMetric label="CoStar" value={data.recentActivity.costarRefreshes} />
+        <MiniMetric label="Changed" value={data.recentActivity.sourceRowsChanged} />
         <MiniMetric label="Runs" value={data.recentActivity.sourceRuns} />
       </div>
       {data.recentActivity.lines.length ? (

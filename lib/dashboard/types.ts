@@ -31,6 +31,7 @@ export type DashboardData = {
     statusBuckets: DashboardStatusBucket[];
   };
   contradictions: {
+    active: boolean;
     total: number;
     priorities: DashboardPriorityCounts;
   };
@@ -42,7 +43,7 @@ export type DashboardData = {
     sinceDate: string;
     evidenceRows: number;
     newsRows: number;
-    costarRefreshes: number;
+    sourceRowsChanged: number;
     sourceRuns: number;
     lines: DashboardActivityLine[];
   };

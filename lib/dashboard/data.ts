@@ -196,6 +196,7 @@ function topReviewItemTypes(items: RawReviewItem[]) {
 function marketLabel(markets: RawMarket[], projects: RawProject[]) {
   const firstMarket = markets[0];
   if (firstMarket) {
+    // Phase B has one active market; future market scoping should come from user preferences.
     return firstMarket.display_name ?? firstMarket.name;
   }
 
@@ -216,12 +217,12 @@ function sourceLooksLikeNews(sourceType: string) {
   return value.includes("news") || value.includes("article") || value.includes("bizjournals");
 }
 
-function sourceLooksLikeCostar(sourceName: string) {
-  return sourceName.toLowerCase().includes("costar");
-}
-
 function activityTimestamp(run: RawSourceRunActivity) {
   return run.finished_at ?? run.run_timestamp ?? "";
+}
+
+function sourceRowsChanged(sourceRuns: RawSourceRunActivity[]) {
+  return sourceRuns.reduce((sum, row) => sum + (row.rows_inserted ?? 0) + (row.rows_updated ?? 0), 0);
 }
 
 function recentActivityLines(
@@ -275,12 +276,17 @@ export async function getDashboardData(): Promise<DashboardDataResult> {
 
   const openItems = reviewItems.rows.filter((item) => item.status === "open");
   const deferredItems = reviewItems.rows.filter((item) => item.status === "deferred");
+  const contradictionTypeSeen = reviewItems.rows.some((item) => item.item_type.includes("contradiction"));
   const contradictionItems = openItems.filter((item) => item.item_type.includes("contradiction"));
   const stalledProjects = projects.rows.filter((project) => {
     if (!STALL_STATUSES.has(project.pipeline_status)) {
       return false;
     }
-    return !project.last_evidence_date || project.last_evidence_date <= stalledCutoff;
+    const lastEvidenceDate = project.last_evidence_date;
+    if (!lastEvidenceDate) {
+      return false;
+    }
+    return lastEvidenceDate <= stalledCutoff;
   });
 
   return {
@@ -299,6 +305,7 @@ export async function getDashboardData(): Promise<DashboardDataResult> {
         statusBuckets: statusBuckets(stalledProjects)
       },
       contradictions: {
+        active: contradictionTypeSeen,
         total: contradictionItems.length,
         priorities: priorityCounts(contradictionItems)
       },
@@ -310,7 +317,7 @@ export async function getDashboardData(): Promise<DashboardDataResult> {
         sinceDate: isoDate(new Date(recentSince)),
         evidenceRows: recentEvidence.rows.length,
         newsRows: recentEvidence.rows.filter((row) => sourceLooksLikeNews(row.source_type)).length,
-        costarRefreshes: recentSourceRuns.rows.filter((row) => sourceLooksLikeCostar(row.source_name)).length,
+        sourceRowsChanged: sourceRowsChanged(recentSourceRuns.rows),
         sourceRuns: recentSourceRuns.rows.length,
         lines: recentActivityLines(recentEvidence.rows, recentSourceRuns.rows)
       }
