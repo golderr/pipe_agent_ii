@@ -18,20 +18,28 @@ export type EvidenceSummary = {
   teaser: string | null;
 };
 
+export type ProjectEvidenceFilterOption = {
+  value: string;
+  label: string;
+};
+
 export type ProjectEvidenceRow = EvidenceSummary & {
   sourceTier: number;
   ingestMethod: string;
   sourceRecordId: string | null;
   sourceUrl: string | null;
   sourceBadge: SourceBadge;
+  sourceLabel: string;
+  linkedFields: ProjectEvidenceFilterOption[];
+  displayFields: string[];
   rawData: Record<string, unknown> | null;
   extractedFields: Record<string, unknown> | null;
   signalFlags: Record<string, unknown> | null;
 };
 
 export type ProjectEvidenceFilters = {
-  fields: string[];
-  sources: string[];
+  fields: ProjectEvidenceFilterOption[];
+  sources: ProjectEvidenceFilterOption[];
 };
 
 export type FieldProvenance = {

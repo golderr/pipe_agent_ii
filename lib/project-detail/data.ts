@@ -4,6 +4,7 @@ import type {
   FieldClass,
   FieldProvenance,
   ProjectDetailData,
+  ProjectEvidenceFilterOption,
   ProjectEvidenceRow,
   ProjectDetailSection,
   ProjectField,
@@ -270,6 +271,15 @@ const COMPUTED_FIELDS: FieldDefinition[] = [
   { key: "updated_at", label: "Updated", className: "computed" }
 ];
 
+const ALL_FIELD_DEFINITIONS = [
+  ...CORE_FIELDS,
+  ...SOURCE_FACT_FIELDS,
+  ...IDENTITY_FIELDS,
+  ...NOTE_FIELDS,
+  ...COMPUTED_FIELDS
+];
+const FIELD_LABELS = new Map(ALL_FIELD_DEFINITIONS.map((field) => [field.key, field.label]));
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -329,13 +339,71 @@ function evidenceTeaser(evidence: RawEvidence) {
   const fields = Object.entries(evidence.extracted_fields ?? {})
     .filter(([, value]) => value !== null && value !== undefined && value !== "")
     .slice(0, 3)
-    .map(([key, value]) => `${key}: ${formatValue(coerceEvidenceValue(value))}`);
+    .map(([key, value]) => `${fieldLabel(key)}: ${formatValue(coerceEvidenceValue(value))}`);
 
   return fields.length > 0 ? fields.join(" | ") : null;
 }
 
-function uniqueSorted(values: Array<string | null | undefined>) {
-  return [...new Set(values.filter(Boolean) as string[])].sort((a, b) => a.localeCompare(b));
+function humanizeToken(value: string) {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .replace(/\bSf\b/g, "SF")
+    .replace(/\bBr\b/g, "BR")
+    .replace(/\bUrl\b/g, "URL")
+    .replace(/\bId\b/g, "ID")
+    .replace(/\bPcis\b/g, "PCIS")
+    .replace(/\bLadbs\b/g, "LADBS")
+    .replace(/\bLahd\b/g, "LAHD")
+    .replace(/\bZimas\b/g, "ZIMAS")
+    .replace(/\bCostar\b/g, "CoStar");
+}
+
+function fieldLabel(fieldKey: string) {
+  return FIELD_LABELS.get(fieldKey) ?? humanizeToken(fieldKey);
+}
+
+function logicalSourceType(sourceName: string) {
+  const logicalTypes: Record<string, string> = {
+    ladbs_permits: "ladbs_permit",
+    ladbs_permit_activity: "ladbs_permit",
+    ladbs_inspections: "ladbs_inspection",
+    ladbs_cofo: "ladbs_cofo",
+    pipedream: "pipedream",
+    costar: "costar"
+  };
+
+  return logicalTypes[sourceName] ?? sourceName;
+}
+
+function sourceTypeLabel(sourceType: string) {
+  const labels: Record<string, string> = {
+    ladbs_permit: "LADBS permit",
+    ladbs_inspection: "LADBS inspection",
+    ladbs_cofo: "LADBS CofO",
+    zimas_pdis: "ZIMAS PDIS",
+    zimas_arcgis: "ZIMAS ArcGIS",
+    la_case_report: "LA case report",
+    lahd_affordable: "LAHD affordable",
+    costar: "CoStar",
+    costar_export: "CoStar",
+    pipedream: "Pipedream",
+    pipedream_snapshot: "Pipedream",
+    news_article: "News article",
+    developer_website: "Developer website",
+    researcher_override: "TCG override"
+  };
+
+  return labels[sourceType] ?? humanizeToken(sourceType);
+}
+
+function uniqueOptions(options: ProjectEvidenceFilterOption[]) {
+  const byValue = new Map<string, ProjectEvidenceFilterOption>();
+  for (const option of options) {
+    byValue.set(option.value, option);
+  }
+
+  return [...byValue.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function toEvidenceSummary(evidence: RawEvidence): EvidenceSummary {
@@ -358,17 +426,19 @@ function sourceRecordUrlForEvidence(
     return null;
   }
 
-  return (
-    sourceRecordUrls.get(`${evidence.source_type}:${evidence.source_record_id}`) ??
-    sourceRecordUrls.get(evidence.source_record_id) ??
-    null
-  );
+  return sourceRecordUrls.get(`${evidence.source_type}:${evidence.source_record_id}`) ?? null;
 }
 
 function toProjectEvidenceRow(
   evidence: RawEvidence,
-  sourceRecordUrls: Map<string, string | null>
+  sourceRecordUrls: Map<string, string | null>,
+  linkedFields: ProjectEvidenceFilterOption[]
 ): ProjectEvidenceRow {
+  const rawFields = evidenceFields(evidence);
+  const displayFields = linkedFields.length
+    ? linkedFields.map((field) => field.label)
+    : rawFields.map((field) => fieldLabel(field));
+
   return {
     ...toEvidenceSummary(evidence),
     sourceTier: evidence.source_tier,
@@ -376,6 +446,9 @@ function toProjectEvidenceRow(
     sourceRecordId: evidence.source_record_id,
     sourceUrl: sourceRecordUrlForEvidence(evidence, sourceRecordUrls),
     sourceBadge: sourceBadgeFromEvidence(evidence),
+    sourceLabel: sourceTypeLabel(evidence.source_type),
+    linkedFields,
+    displayFields,
     rawData: evidence.raw_data,
     extractedFields: evidence.extracted_fields,
     signalFlags: evidence.signal_flags
@@ -456,6 +529,39 @@ function buildFieldProvenance(
     confidence: resolution?.confidence ?? null,
     evidence: []
   };
+}
+
+function buildLinkedFieldsByEvidenceId(resolutions: RawFieldResolution[]) {
+  const linkedFieldsByEvidenceId = new Map<string, ProjectEvidenceFilterOption[]>();
+
+  for (const resolution of resolutions) {
+    const evidenceIds = resolution.evidence_ids ?? [];
+    if (evidenceIds.length === 0) {
+      continue;
+    }
+
+    const field = {
+      value: resolution.field,
+      label: fieldLabel(resolution.field)
+    };
+
+    for (const evidenceId of evidenceIds) {
+      const linkedFields = linkedFieldsByEvidenceId.get(evidenceId) ?? [];
+      if (!linkedFields.some((existing) => existing.value === field.value)) {
+        linkedFields.push(field);
+      }
+      linkedFieldsByEvidenceId.set(evidenceId, linkedFields);
+    }
+  }
+
+  for (const [evidenceId, fields] of linkedFieldsByEvidenceId) {
+    linkedFieldsByEvidenceId.set(
+      evidenceId,
+      fields.sort((a, b) => a.label.localeCompare(b.label))
+    );
+  }
+
+  return linkedFieldsByEvidenceId;
 }
 
 function extractReviewFields(reviewItems: RawReviewItem[]) {
@@ -684,21 +790,16 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     String(b.evidence_date ?? b.collected_at).localeCompare(String(a.evidence_date ?? a.collected_at))
   );
   const sourceRecordUrls = new Map<string, string | null>();
-  const sourceRecordIdCounts = new Map<string, number>();
   for (const sourceRecord of sourceRecords.data) {
-    sourceRecordUrls.set(`${sourceRecord.source_name}:${sourceRecord.source_record_id}`, sourceRecord.source_url);
-    sourceRecordIdCounts.set(
-      sourceRecord.source_record_id,
-      (sourceRecordIdCounts.get(sourceRecord.source_record_id) ?? 0) + 1
+    sourceRecordUrls.set(
+      `${logicalSourceType(sourceRecord.source_name)}:${sourceRecord.source_record_id}`,
+      sourceRecord.source_url
     );
   }
-  for (const sourceRecord of sourceRecords.data) {
-    if (sourceRecordIdCounts.get(sourceRecord.source_record_id) === 1) {
-      sourceRecordUrls.set(sourceRecord.source_record_id, sourceRecord.source_url);
-    }
-  }
-
-  const projectEvidenceRows = sortedEvidenceRows.map((evidence) => toProjectEvidenceRow(evidence, sourceRecordUrls));
+  const linkedFieldsByEvidenceId = buildLinkedFieldsByEvidenceId(resolutions.data);
+  const projectEvidenceRows = sortedEvidenceRows.map((evidence) =>
+    toProjectEvidenceRow(evidence, sourceRecordUrls, linkedFieldsByEvidenceId.get(evidence.id) ?? [])
+  );
   const evidenceById = new Map(sortedEvidenceRows.map((evidence) => [evidence.id, evidence]));
   const resolutionByField = new Map(resolutions.data.map((resolution) => [resolution.field, resolution]));
   const openReviewItems = reviewItems.data.filter((item) => item.status === "open");
@@ -806,8 +907,13 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       sections,
       evidenceRows: projectEvidenceRows,
       evidenceFilters: {
-        fields: uniqueSorted(projectEvidenceRows.flatMap((row) => row.fields)),
-        sources: uniqueSorted(projectEvidenceRows.map((row) => row.sourceType))
+        fields: uniqueOptions(projectEvidenceRows.flatMap((row) => row.linkedFields)),
+        sources: uniqueOptions(
+          projectEvidenceRows.map((row) => ({
+            value: row.sourceType,
+            label: row.sourceLabel
+          }))
+        )
       }
     },
     error: null

@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AlertCircle, ArrowLeft, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
+import { AlertCircle, ArrowLeft, ChevronRight, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
 import { getProjectDetailData } from "@/lib/project-detail/data";
 import { compactStatus, statusStyle } from "@/lib/status";
 import type {
   EvidenceSummary,
   FieldClass,
   ProjectDetailSection,
+  ProjectEvidenceFilterOption,
   ProjectEvidenceFilters,
   ProjectEvidenceRow,
   ProjectField,
@@ -89,6 +90,11 @@ function normalizeQueryValue(value: string | undefined) {
   return value && value.trim() ? value.trim() : null;
 }
 
+function normalizeDateQueryValue(value: string | undefined) {
+  const normalized = normalizeQueryValue(value);
+  return normalized && /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : null;
+}
+
 function evidenceDateKey(evidence: ProjectEvidenceRow) {
   return String(evidence.evidenceDate ?? evidence.collectedAt).slice(0, 10);
 }
@@ -106,7 +112,7 @@ function filterEvidenceRows(
   filters: EvidenceQuery
 ) {
   return evidenceRows.filter((evidence) => {
-    if (filters.field && !evidence.fields.includes(filters.field)) {
+    if (filters.field && !evidence.linkedFields.some((field) => field.value === filters.field)) {
       return false;
     }
     if (filters.source && evidence.sourceType !== filters.source) {
@@ -172,6 +178,33 @@ function displayEvidenceFieldValue(value: unknown): string {
   return String(value);
 }
 
+function displayRawFieldKey(value: string) {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .replace(/\bSf\b/g, "SF")
+    .replace(/\bBr\b/g, "BR")
+    .replace(/\bUrl\b/g, "URL")
+    .replace(/\bId\b/g, "ID")
+    .replace(/\bPcis\b/g, "PCIS")
+    .replace(/\bLadbs\b/g, "LADBS")
+    .replace(/\bLahd\b/g, "LAHD")
+    .replace(/\bZimas\b/g, "ZIMAS")
+    .replace(/\bCostar\b/g, "CoStar");
+}
+
+function withActiveOption(
+  options: ProjectEvidenceFilterOption[],
+  value: string | null,
+  fallbackLabel: (value: string) => string
+) {
+  if (!value || options.some((option) => option.value === value)) {
+    return options;
+  }
+
+  return [{ value, label: fallbackLabel(value) }, ...options];
+}
+
 export default async function ProjectDetailPage({ params, searchParams }: ProjectDetailPageProps) {
   const { projectId } = await params;
   const query = await searchParams;
@@ -200,8 +233,8 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
   const evidenceQuery = {
     field: normalizeQueryValue(query.field),
     source: normalizeQueryValue(query.source),
-    from: normalizeQueryValue(query.from),
-    to: normalizeQueryValue(query.to)
+    from: normalizeDateQueryValue(query.from),
+    to: normalizeDateQueryValue(query.to)
   };
   const filteredEvidenceRows = filterEvidenceRows(evidenceRows, evidenceQuery);
 
@@ -400,8 +433,18 @@ function EvidenceTab({
         </div>
         <form action={`/pipeline/${projectId}`} className="mt-4 space-y-3">
           <input name="tab" type="hidden" value="evidence" />
-          <FilterSelect label="Field" name="field" options={evidenceFilters.fields} value={evidenceQuery.field} />
-          <FilterSelect label="Source" name="source" options={evidenceFilters.sources} value={evidenceQuery.source} />
+          <FilterSelect
+            label="Field"
+            name="field"
+            options={withActiveOption(evidenceFilters.fields, evidenceQuery.field, displayRawFieldKey)}
+            value={evidenceQuery.field}
+          />
+          <FilterSelect
+            label="Source"
+            name="source"
+            options={withActiveOption(evidenceFilters.sources, evidenceQuery.source, displayRawFieldKey)}
+            value={evidenceQuery.source}
+          />
           <label className="block">
             <span className="text-xs font-medium text-slate-600">From</span>
             <input
@@ -443,7 +486,7 @@ function FilterSelect({
 }: {
   label: string;
   name: string;
-  options: string[];
+  options: ProjectEvidenceFilterOption[];
   value: string | null;
 }) {
   return (
@@ -456,8 +499,8 @@ function FilterSelect({
       >
         <option value="">Any</option>
         {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
+          <option key={option.value} value={option.value}>
+            {option.label}
           </option>
         ))}
       </select>
@@ -467,12 +510,17 @@ function FilterSelect({
 
 function EvidenceTimelineRow({ evidence }: { evidence: ProjectEvidenceRow }) {
   const sourceUrl = safeExternalUrl(evidence.sourceUrl);
-  const fieldSummary = evidence.fields.length ? evidence.fields.slice(0, 5).join(" · ") : "raw observation";
-  const extraFieldCount = Math.max(0, evidence.fields.length - 5);
+  const displayFields = evidence.displayFields.length ? evidence.displayFields : ["Raw observation"];
+  const fieldSummary = displayFields.slice(0, 5).join(" / ");
+  const extraFieldCount = Math.max(0, displayFields.length - 5);
+  const rawJsonCount = Number(Boolean(evidence.rawData)) + Number(Boolean(evidence.signalFlags));
 
   return (
     <details className="group px-4 py-3">
-      <summary className="grid cursor-pointer list-none gap-3 text-sm md:grid-cols-[5rem_8rem_minmax(0,1fr)_auto] md:items-start">
+      <summary
+        className="grid cursor-pointer list-none gap-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 md:grid-cols-[5rem_8rem_minmax(0,1fr)_auto] md:items-start"
+        tabIndex={0}
+      >
         <span className="font-medium text-slate-700">{formatDate(evidence.evidenceDate ?? evidence.collectedAt)}</span>
         <span className={cn("w-fit rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[evidence.sourceBadge.tone])}>
           {evidence.sourceBadge.label}
@@ -493,7 +541,7 @@ function EvidenceTimelineRow({ evidence }: { evidence: ProjectEvidenceRow }) {
       <div className="mt-3 grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
         <div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-            <span>{evidence.sourceType}</span>
+            <span>{evidence.sourceLabel}</span>
             <span>Tier {evidence.sourceTier}</span>
             <span>{evidence.ingestMethod}</span>
             {evidence.sourceRecordId ? <span>Record {evidence.sourceRecordId}</span> : null}
@@ -523,7 +571,9 @@ function EvidenceTimelineRow({ evidence }: { evidence: ProjectEvidenceRow }) {
                 .slice(0, 12)
                 .map(([key, value]) => (
                   <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2" key={key}>
-                    <dt className="truncate text-slate-500">{key}</dt>
+                    <dt className="truncate text-slate-500" title={key}>
+                      {displayRawFieldKey(key)}
+                    </dt>
                     <dd className="break-words font-medium text-slate-800">{displayEvidenceFieldValue(value)}</dd>
                   </div>
                 ))
@@ -533,8 +583,14 @@ function EvidenceTimelineRow({ evidence }: { evidence: ProjectEvidenceRow }) {
           </dl>
         </div>
 
-        <details className="lg:col-span-2">
-          <summary className="cursor-pointer text-xs font-medium text-slate-600">Raw JSON</summary>
+        <details className="group/raw-json lg:col-span-2">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700">
+            <ChevronRight className="size-3 transition-transform group-open/raw-json:rotate-90" aria-hidden="true" />
+            Raw JSON
+            <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-500">
+              {rawJsonCount} blocks
+            </span>
+          </summary>
           <div className="mt-2 grid gap-3 lg:grid-cols-2">
             <JsonBlock label="raw_data" value={evidence.rawData} />
             <JsonBlock label="signal_flags" value={evidence.signalFlags} />

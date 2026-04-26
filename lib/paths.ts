@@ -1,7 +1,14 @@
 export function safeRedirectPath(value: string | null | undefined, fallback = "/coverage") {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) {
+  let decoded: string | null = null;
+  try {
+    decoded = value ? decodeURIComponent(value) : null;
+  } catch {
     return fallback;
   }
 
-  return value;
+  if (!decoded || !decoded.startsWith("/") || decoded.startsWith("//") || decoded.startsWith("/\\")) {
+    return fallback;
+  }
+
+  return decoded;
 }
