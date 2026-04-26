@@ -165,7 +165,6 @@ def test_auth_errors_are_mapped_to_http_responses() -> None:
         ("POST", f"/coverage/{JURISDICTION_ID}/scrape"),
         ("POST", f"/coverage/{JURISDICTION_ID}/costar-upload"),
         ("GET", f"/scrape_jobs/{JOB_ID}"),
-        ("GET", f"/evidence/{EVIDENCE_ID}/snippet?field=total_units"),
     ],
 )
 def test_phase_c_routes_are_protected_stubs(method: str, path: str) -> None:
@@ -184,6 +183,15 @@ def test_phase_c_stubs_do_not_run_without_auth() -> None:
     client = _client()
 
     response = client.post(f"/projects/{PROJECT_ID}/override", json={})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing bearer token."
+
+
+def test_evidence_snippet_requires_auth_before_database_access() -> None:
+    client = _client()
+
+    response = client.get(f"/evidence/{EVIDENCE_ID}/snippet?field=total_units")
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing bearer token."

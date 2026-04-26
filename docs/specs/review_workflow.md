@@ -372,9 +372,15 @@ def render_snippet(evidence: Evidence, field_name: str) -> SnippetPayload:
 
 ### 7.3 Output shape
 
+`summary` is renderer-owned. Most field-centric renderers summarize as
+`field_name: value`, while source-centric renderers may lead with source
+metadata that better identifies the row. For example, LADBS permit snippets use
+the PCIS permit identifier and permit status in `summary`; the requested
+field/value is always returned in `fields`.
+
 ```json
 {
-  "summary": "pipeline_status: Approved",
+  "summary": "PCIS 11010-10000-02451 · building_permit_issued · permit status: Issued",
   "detail": "Permit PCIS 11010-10000-02451 issued 2013-01-02, current status: Issued.",
   "fields": {
     "field_name": "pipeline_status",

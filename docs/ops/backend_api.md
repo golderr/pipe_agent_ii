@@ -17,6 +17,14 @@ The protected write routes intentionally return `501 Not Implemented` until the
 corresponding Phase C steps implement real behavior. Do not wire frontend mutation
 controls to these routes until the specific backend path is complete.
 
+## Evidence Snippet Reads
+
+`GET /evidence/{id}/snippet` is a FastAPI read endpoint backed by the privileged
+server-side database session, not Supabase PostgREST/RLS. Access is currently
+limited by Supabase JWT validation plus `ALLOWED_EMAILS`; project/user-level
+read scoping should be revisited with the Phase C staging/auth policy before
+the contributor set broadens.
+
 ## Required Environment
 
 ```powershell
