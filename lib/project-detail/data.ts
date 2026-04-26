@@ -3,9 +3,12 @@ import type {
   EvidenceSummary,
   FieldClass,
   FieldProvenance,
+  ProjectChangeLogRow,
   ProjectDetailData,
   ProjectEvidenceFilterOption,
   ProjectEvidenceRow,
+  ProjectOverrideRow,
+  ProjectResolutionRow,
   ProjectDetailSection,
   ProjectField,
   SourceBadge
@@ -29,6 +32,7 @@ type RawProject = Record<string, unknown> & {
   confidence: string | null;
   status_confidence: string | null;
   last_evidence_date: string | null;
+  researcher_override: Record<string, unknown> | null;
 };
 
 type RawJurisdiction = {
@@ -93,6 +97,19 @@ type RawStatusHistory = {
   status_date: string | null;
   source: string;
   notes: string | null;
+};
+
+type RawChangeLog = {
+  id: string;
+  timestamp: string;
+  source: string;
+  field: string;
+  old_value: unknown;
+  new_value: unknown;
+  change_type: string;
+  priority: string;
+  reviewed_by: string | null;
+  review_item_id: string | null;
 };
 
 type ProjectDetailResult =
@@ -186,6 +203,7 @@ const PROJECT_SELECT = [
   "inclusion_in_analysis",
   "inclusion_in_exhibit",
   "inclusion_note",
+  "researcher_override",
   "created_by",
   "created_at",
   "updated_at"
@@ -564,6 +582,76 @@ function buildLinkedFieldsByEvidenceId(resolutions: RawFieldResolution[]) {
   return linkedFieldsByEvidenceId;
 }
 
+function toResolutionRows(
+  resolutions: RawFieldResolution[],
+  evidenceById: Map<string, RawEvidence>
+): ProjectResolutionRow[] {
+  return resolutions
+    .map((resolution) => {
+      const evidenceIds = resolution.evidence_ids ?? [];
+      const evidence = evidenceIds
+        .map((id) => evidenceById.get(id))
+        .filter((row): row is RawEvidence => Boolean(row))
+        .map(toEvidenceSummary);
+
+      return {
+        field: resolution.field,
+        fieldLabel: fieldLabel(resolution.field),
+        currentValue: formatValue(resolution.current_value),
+        resolvedValue: formatValue(resolution.resolved_value),
+        evidenceIds,
+        evidence,
+        rule: resolution.rule_applied,
+        confidence: resolution.confidence,
+        createdAt: resolution.created_at
+      };
+    })
+    .sort((a, b) => a.fieldLabel.localeCompare(b.fieldLabel));
+}
+
+function toChangeRows(changeRows: RawChangeLog[]): ProjectChangeLogRow[] {
+  return [...changeRows]
+    .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
+    .map((row) => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      source: row.source,
+      field: row.field,
+      fieldLabel: fieldLabel(row.field),
+      oldValue: formatValue(row.old_value),
+      newValue: formatValue(row.new_value),
+      changeType: row.change_type,
+      priority: row.priority,
+      reviewedBy: row.reviewed_by,
+      reviewItemId: row.review_item_id
+    }));
+}
+
+function toOverrideRows(overrides: Record<string, unknown> | null): ProjectOverrideRow[] {
+  if (!isObject(overrides)) {
+    return [];
+  }
+
+  return Object.entries(overrides)
+    .map(([field, payload]) => {
+      const normalized = isObject(payload) ? payload : { value: payload };
+      const baseline = isObject(normalized.baseline) ? normalized.baseline : null;
+
+      return {
+        field,
+        fieldLabel: fieldLabel(field),
+        value: formatValue(normalized.value),
+        mode: typeof normalized.mode === "string" ? normalized.mode : null,
+        setBy: typeof normalized.set_by === "string" ? normalized.set_by : null,
+        setAt: typeof normalized.set_at === "string" ? normalized.set_at : null,
+        note: typeof normalized.note === "string" ? normalized.note : null,
+        baseline,
+        raw: normalized
+      };
+    })
+    .sort((a, b) => a.fieldLabel.localeCompare(b.fieldLabel));
+}
+
 function extractReviewFields(reviewItems: RawReviewItem[]) {
   const fields = new Set<string>();
 
@@ -719,7 +807,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     reviewItems,
     relationships,
     incomingRelationships,
-    statusHistory
+    statusHistory,
+    changeRows
   ] = await Promise.all([
     rawProject.jurisdiction_id
       ? supabase
@@ -768,6 +857,12 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       "status_history",
       "status, status_date, source, notes",
       projectId
+    ),
+    fetchProjectRows<RawChangeLog>(
+      supabase,
+      "change_log",
+      "id, timestamp, source, field, old_value, new_value, change_type, priority, reviewed_by, review_item_id",
+      projectId
     )
   ]);
 
@@ -780,7 +875,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     reviewItems.error ??
     relationships.error ??
     incomingRelationships.error?.message ??
-    statusHistory.error;
+    statusHistory.error ??
+    changeRows.error;
 
   if (error) {
     return { data: null, error };
@@ -802,6 +898,9 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
   );
   const evidenceById = new Map(sortedEvidenceRows.map((evidence) => [evidence.id, evidence]));
   const resolutionByField = new Map(resolutions.data.map((resolution) => [resolution.field, resolution]));
+  const resolutionRows = toResolutionRows(resolutions.data, evidenceById);
+  const projectChangeRows = toChangeRows(changeRows.data);
+  const overrideRows = toOverrideRows(rawProject.researcher_override);
   const openReviewItems = reviewItems.data.filter((item) => item.status === "open");
   const pendingFields = extractReviewFields(openReviewItems);
   const jurisdictionName = jurisdiction.data
@@ -914,7 +1013,10 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
             label: row.sourceLabel
           }))
         )
-      }
+      },
+      resolutionRows,
+      changeRows: projectChangeRows,
+      overrideRows
     },
     error: null
   };

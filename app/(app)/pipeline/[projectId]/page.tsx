@@ -6,11 +6,14 @@ import { compactStatus, statusStyle } from "@/lib/status";
 import type {
   EvidenceSummary,
   FieldClass,
+  ProjectChangeLogRow,
   ProjectDetailSection,
   ProjectEvidenceFilterOption,
   ProjectEvidenceFilters,
   ProjectEvidenceRow,
   ProjectField,
+  ProjectOverrideRow,
+  ProjectResolutionRow,
   SourceBadge
 } from "@/lib/project-detail/types";
 import { cn } from "@/lib/utils";
@@ -28,7 +31,7 @@ type ProjectDetailPageProps = {
   }>;
 };
 
-type ProjectDetailTab = "snapshot" | "evidence";
+type ProjectDetailTab = "snapshot" | "evidence" | "resolution" | "changes" | "overrides";
 type EvidenceQuery = {
   field: string | null;
   source: string | null;
@@ -83,7 +86,11 @@ function sourceBadgeTitle(badge: SourceBadge) {
 }
 
 function normalizeTab(value: string | undefined): ProjectDetailTab {
-  return value === "evidence" ? "evidence" : "snapshot";
+  if (value === "evidence" || value === "resolution" || value === "changes" || value === "overrides") {
+    return value;
+  }
+
+  return "snapshot";
 }
 
 function normalizeQueryValue(value: string | undefined) {
@@ -162,6 +169,18 @@ function prettyJson(value: Record<string, unknown> | null) {
   return value ? JSON.stringify(value, null, 2) : "{}";
 }
 
+function displayJsonValue(value: Record<string, unknown>) {
+  return JSON.stringify(value, null, 2);
+}
+
+function displayListValue(values: string[]) {
+  return values.length ? values.join(", ") : "-";
+}
+
+function compactId(value: string) {
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
+}
+
 function displayEvidenceFieldValue(value: unknown): string {
   if (value === null || value === undefined || value === "") {
     return "-";
@@ -228,7 +247,7 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
     );
   }
 
-  const { project, sections, evidenceRows, evidenceFilters } = result.data;
+  const { project, sections, evidenceRows, evidenceFilters, resolutionRows, changeRows, overrideRows } = result.data;
   const activeTab = normalizeTab(query.tab);
   const evidenceQuery = {
     field: normalizeQueryValue(query.field),
@@ -280,19 +299,9 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
         <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200 pt-3" role="tablist" aria-label="Project detail tabs">
           <DetailTabLink active={activeTab === "snapshot"} href={`/pipeline/${project.id}`} label="Snapshot" />
           <DetailTabLink active={activeTab === "evidence"} href={`/pipeline/${project.id}?tab=evidence`} label="Evidence" />
-          {["Resolution", "Changes", "Overrides"].map((tab) => (
-            <button
-              aria-disabled="true"
-              aria-selected="false"
-              className="cursor-not-allowed rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-400"
-              key={tab}
-              role="tab"
-              title={`${tab} tab is scheduled later in Phase B.`}
-              type="button"
-            >
-              {tab}
-            </button>
-          ))}
+          <DetailTabLink active={activeTab === "resolution"} href={`/pipeline/${project.id}?tab=resolution`} label="Resolution" />
+          <DetailTabLink active={activeTab === "changes"} href={`/pipeline/${project.id}?tab=changes`} label="Changes" />
+          <DetailTabLink active={activeTab === "overrides"} href={`/pipeline/${project.id}?tab=overrides`} label="Overrides" />
         </div>
       </div>
 
@@ -304,6 +313,12 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
           projectId={project.id}
           totalEvidenceRows={evidenceRows.length}
         />
+      ) : activeTab === "resolution" ? (
+        <ResolutionTab projectId={project.id} resolutionRows={resolutionRows} />
+      ) : activeTab === "changes" ? (
+        <ChangesTab changeRows={changeRows} />
+      ) : activeTab === "overrides" ? (
+        <OverridesTab overrideRows={overrideRows} />
       ) : (
         <SnapshotTab projectId={project.id} sections={sections} />
       )}
@@ -474,6 +489,235 @@ function EvidenceTab({
           B.5 uses a generic snippet renderer. Source-specific snippets and suspect-row writes are scheduled after the read-only tabs.
         </p>
       </aside>
+    </div>
+  );
+}
+
+function ResolutionTab({
+  projectId,
+  resolutionRows
+}: {
+  projectId: string;
+  resolutionRows: ProjectResolutionRow[];
+}) {
+  return (
+    <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <section className="rounded-md border border-slate-200 bg-white">
+        <div className="border-b border-slate-200 px-4 py-3">
+          <h2 className="text-sm font-semibold text-slate-950">Resolution</h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Latest resolver discrepancy rows by field. Fields with no logged discrepancy are not shown.
+          </p>
+        </div>
+        {resolutionRows.length ? (
+          <div className="divide-y divide-slate-100">
+            {resolutionRows.map((row) => (
+              <ResolutionRow projectId={projectId} row={row} key={row.field} />
+            ))}
+          </div>
+        ) : (
+          <EmptyTabMessage title="No resolution rows" text="No resolver discrepancy rows are linked to this project yet." />
+        )}
+      </section>
+
+      <aside className="h-fit rounded-md border border-slate-200 bg-white p-4 text-sm">
+        <h2 className="font-semibold text-slate-950">Read model</h2>
+        <p className="mt-2 text-slate-600">
+          This tab reads the latest `resolution_log` row per field through `project_field_resolution`.
+        </p>
+        <p className="mt-3 text-xs text-slate-500">
+          Alternatives considered are not currently stored by the resolver, so Phase B shows rule, confidence,
+          current/resolved values, and linked evidence only.
+        </p>
+      </aside>
+    </div>
+  );
+}
+
+function ResolutionRow({ projectId, row }: { projectId: string; row: ProjectResolutionRow }) {
+  return (
+    <details className="group px-4 py-3">
+      <summary
+        className="grid cursor-pointer list-none gap-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 lg:grid-cols-[12rem_minmax(0,1fr)_8rem_7rem]"
+        tabIndex={0}
+      >
+        <span className="font-medium text-slate-950">{row.fieldLabel}</span>
+        <span className="min-w-0 text-slate-700">
+          <span className="text-slate-500">Current</span> {row.currentValue}
+          <span className="px-1.5 text-slate-400">/</span>
+          <span className="text-slate-500">Resolved</span> {row.resolvedValue}
+        </span>
+        <span className="w-fit rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] text-slate-700">
+          {row.confidence ?? "no confidence"}
+        </span>
+        <span className="text-xs text-slate-400 group-open:hidden">Expand</span>
+        <span className="hidden text-xs text-slate-400 group-open:block">Collapse</span>
+      </summary>
+      <div className="mt-3 grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 lg:grid-cols-2">
+        <DetailList
+          rows={[
+            ["Rule", row.rule ?? "-"],
+            ["Created", formatDate(row.createdAt)],
+            ["Evidence IDs", displayListValue(row.evidenceIds.map(compactId))]
+          ]}
+        />
+        <div className="rounded-md border border-slate-200 bg-white p-3">
+          <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">Linked evidence</p>
+          {row.evidence.length ? (
+            <div className="mt-2 space-y-2">
+              {row.evidence.map((evidence) => (
+                <EvidenceLine evidence={evidence} key={evidence.id} />
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-slate-500">No linked evidence IDs on this row.</p>
+          )}
+          {row.evidenceIds.length ? (
+            <Link
+              className="mt-3 inline-flex text-xs font-medium text-teal-700 hover:text-teal-900"
+              href={`/pipeline/${projectId}?tab=evidence&field=${encodeURIComponent(row.field)}`}
+            >
+              Open Evidence filtered to {row.fieldLabel}
+            </Link>
+          ) : null}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function ChangesTab({ changeRows }: { changeRows: ProjectChangeLogRow[] }) {
+  return (
+    <section className="mt-5 rounded-md border border-slate-200 bg-white">
+      <div className="border-b border-slate-200 px-4 py-3">
+        <h2 className="text-sm font-semibold text-slate-950">Changes</h2>
+        <p className="mt-0.5 text-xs text-slate-500">Committed system and researcher changes for this project.</p>
+      </div>
+      {changeRows.length ? (
+        <div className="divide-y divide-slate-100">
+          {changeRows.map((row) => (
+            <ChangeLogRow row={row} key={row.id} />
+          ))}
+        </div>
+      ) : (
+        <EmptyTabMessage title="No change log entries" text="No committed ChangeLog rows are linked to this project yet." />
+      )}
+    </section>
+  );
+}
+
+function ChangeLogRow({ row }: { row: ProjectChangeLogRow }) {
+  return (
+    <details className="group px-4 py-3">
+      <summary
+        className="grid cursor-pointer list-none gap-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 lg:grid-cols-[8rem_12rem_minmax(0,1fr)_8rem]"
+        tabIndex={0}
+      >
+        <span className="text-slate-500">{formatDate(row.timestamp)}</span>
+        <span className="font-medium text-slate-950">{row.fieldLabel}</span>
+        <span className="min-w-0 text-slate-700">
+          {row.oldValue} <span className="text-slate-400">to</span> {row.newValue}
+        </span>
+        <span className="w-fit rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] text-slate-700">
+          {displayRawFieldKey(row.changeType)}
+        </span>
+      </summary>
+      <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+        <DetailList
+          rows={[
+            ["Source", row.source],
+            ["Priority", row.priority],
+            ["Reviewed by", row.reviewedBy ?? "-"],
+            ["Review item", row.reviewItemId ? compactId(row.reviewItemId) : "-"]
+          ]}
+        />
+      </div>
+    </details>
+  );
+}
+
+function OverridesTab({ overrideRows }: { overrideRows: ProjectOverrideRow[] }) {
+  return (
+    <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <section className="rounded-md border border-slate-200 bg-white">
+        <div className="border-b border-slate-200 px-4 py-3">
+          <h2 className="text-sm font-semibold text-slate-950">Overrides</h2>
+          <p className="mt-0.5 text-xs text-slate-500">Active researcher overrides from the legacy project JSONB column.</p>
+        </div>
+        {overrideRows.length ? (
+          <div className="divide-y divide-slate-100">
+            {overrideRows.map((row) => (
+              <OverrideRow row={row} key={row.field} />
+            ))}
+          </div>
+        ) : (
+          <EmptyTabMessage title="No active overrides" text="This project does not currently have active researcher overrides." />
+        )}
+      </section>
+
+      <aside className="h-fit rounded-md border border-slate-200 bg-white p-4 text-sm">
+        <h2 className="font-semibold text-slate-950">Phase B behavior</h2>
+        <p className="mt-2 text-slate-600">
+          Overrides are read-only here. Edit, clear, superseded history, and per-override notes move to Phase C when
+          overrides are promoted into a dedicated table.
+        </p>
+      </aside>
+    </div>
+  );
+}
+
+function OverrideRow({ row }: { row: ProjectOverrideRow }) {
+  return (
+    <details className="group px-4 py-3">
+      <summary
+        className="grid cursor-pointer list-none gap-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 lg:grid-cols-[12rem_minmax(0,1fr)_9rem_7rem]"
+        tabIndex={0}
+      >
+        <span className="font-medium text-slate-950">{row.fieldLabel}</span>
+        <span className="min-w-0 text-slate-700">{row.value}</span>
+        <span className="w-fit rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[11px] text-blue-800">
+          {row.mode ?? "legacy"}
+        </span>
+        <span className="text-xs text-slate-400 group-open:hidden">Expand</span>
+        <span className="hidden text-xs text-slate-400 group-open:block">Collapse</span>
+      </summary>
+      <div className="mt-3 grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 lg:grid-cols-2">
+        <DetailList
+          rows={[
+            ["Set by", row.setBy ?? "-"],
+            ["Set at", row.setAt ? formatDate(row.setAt) : "-"],
+            ["Note", row.note ?? "-"]
+          ]}
+        />
+        <div>
+          <p className="mb-1 text-xs font-medium text-slate-500">Baseline / raw payload</p>
+          <pre className="max-h-72 overflow-auto rounded-md border border-slate-200 bg-white p-3 text-[11px] leading-relaxed text-slate-700">
+            {displayJsonValue(row.baseline ?? row.raw)}
+          </pre>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function DetailList({ rows }: { rows: Array<[string, string]> }) {
+  return (
+    <dl className="grid gap-2 rounded-md border border-slate-200 bg-white p-3 text-xs">
+      {rows.map(([label, value]) => (
+        <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2" key={label}>
+          <dt className="text-slate-500">{label}</dt>
+          <dd className="break-words font-medium text-slate-800">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function EmptyTabMessage({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="px-4 py-10 text-center">
+      <p className="text-sm font-medium text-slate-700">{title}</p>
+      <p className="mt-1 text-sm text-slate-500">{text}</p>
     </div>
   );
 }

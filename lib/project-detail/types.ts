@@ -42,6 +42,44 @@ export type ProjectEvidenceFilters = {
   sources: ProjectEvidenceFilterOption[];
 };
 
+export type ProjectResolutionRow = {
+  field: string;
+  fieldLabel: string;
+  currentValue: string;
+  resolvedValue: string;
+  evidenceIds: string[];
+  evidence: EvidenceSummary[];
+  rule: string | null;
+  confidence: string | null;
+  createdAt: string;
+};
+
+export type ProjectChangeLogRow = {
+  id: string;
+  timestamp: string;
+  source: string;
+  field: string;
+  fieldLabel: string;
+  oldValue: string;
+  newValue: string;
+  changeType: string;
+  priority: string;
+  reviewedBy: string | null;
+  reviewItemId: string | null;
+};
+
+export type ProjectOverrideRow = {
+  field: string;
+  fieldLabel: string;
+  value: string;
+  mode: string | null;
+  setBy: string | null;
+  setAt: string | null;
+  note: string | null;
+  baseline: Record<string, unknown> | null;
+  raw: Record<string, unknown>;
+};
+
 export type FieldProvenance = {
   sourceBadge: SourceBadge;
   rule: string | null;
@@ -85,4 +123,7 @@ export type ProjectDetailData = {
   sections: ProjectDetailSection[];
   evidenceRows: ProjectEvidenceRow[];
   evidenceFilters: ProjectEvidenceFilters;
+  resolutionRows: ProjectResolutionRow[];
+  changeRows: ProjectChangeLogRow[];
+  overrideRows: ProjectOverrideRow[];
 };
