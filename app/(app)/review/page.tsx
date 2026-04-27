@@ -39,6 +39,7 @@ export default async function ReviewPage({ searchParams }: ReviewPageProps) {
   return (
     <ReviewQueueClient
       data={result.data}
+      jurisdictionId={jurisdictionId ?? null}
       currentUserId={user.id}
       currentUserEmail={user.email ?? null}
     />

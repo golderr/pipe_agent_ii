@@ -124,7 +124,10 @@ export async function getReviewQueueData(options: {
 async function fetchProjects(
   items: ReviewQueueItem[]
 ): Promise<{ rows: ReviewProjectSummary[]; error: string | null }> {
-  const projectIds = uniqueStrings(items.map((item) => item.projectId));
+  const projectIds = uniqueStrings([
+    ...items.map((item) => item.projectId),
+    ...items.flatMap(candidateProjectIdsForItem)
+  ]);
   if (projectIds.length === 0) {
     return { rows: [], error: null };
   }
@@ -240,4 +243,22 @@ function mapDecision(decision: ReviewDecisionApi): ReviewDecisionSummary {
 
 function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value)))];
+}
+
+function candidateProjectIdsForItem(item: ReviewQueueItem) {
+  const payload = asRecord(item.payload);
+  const match = asRecord(payload?.match);
+  return asStringArray(match?.candidate_project_ids ?? payload?.candidate_project_ids);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && Boolean(item))
+    : [];
 }

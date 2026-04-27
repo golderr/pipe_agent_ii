@@ -30,6 +30,7 @@ import type {
 
 type ReviewQueueClientProps = {
   data: ReviewQueueData;
+  jurisdictionId: string | null;
   currentUserId: string;
   currentUserEmail: string | null;
 };
@@ -76,6 +77,7 @@ const SECTION_LABELS: Record<string, string> = {
 
 export function ReviewQueueClient({
   data,
+  jurisdictionId,
   currentUserId,
   currentUserEmail
 }: ReviewQueueClientProps) {
@@ -213,7 +215,7 @@ export function ReviewQueueClient({
     }
     setBanner(null);
     startTransition(async () => {
-      const result = await commitReviewDecisionsAction();
+      const result = await commitReviewDecisionsAction({ jurisdictionId });
       setBanner({
         tone: result.ok ? "success" : "error",
         message: result.message
@@ -222,7 +224,7 @@ export function ReviewQueueClient({
         router.refresh();
       }
     });
-  }, [router, stagedMineCount]);
+  }, [jurisdictionId, router, stagedMineCount]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -368,6 +370,7 @@ export function ReviewQueueClient({
             {selectedGroup ? (
               <ProjectReviewPanel
                 group={selectedGroup}
+                projects={data.projects}
                 sourceRuns={data.sourceRuns}
                 currentUserId={currentUserId}
                 currentUserEmail={currentUserEmail}
@@ -455,6 +458,7 @@ function ProjectSection({
 
 function ProjectReviewPanel({
   group,
+  projects,
   sourceRuns,
   currentUserId,
   currentUserEmail,
@@ -467,6 +471,7 @@ function ProjectReviewPanel({
   onStageProject
 }: {
   group: ReviewGroup;
+  projects: Record<string, ReviewProjectSummary>;
   sourceRuns: Record<string, ReviewSourceRunSummary>;
   currentUserId: string;
   currentUserEmail: string | null;
@@ -562,6 +567,7 @@ function ProjectReviewPanel({
             key={item.id}
             item={item}
             index={index}
+            projects={projects}
             sourceRun={item.sourceRunId ? sourceRuns[item.sourceRunId] : undefined}
             currentUserId={currentUserId}
             currentUserEmail={currentUserEmail}
@@ -581,6 +587,7 @@ function ProjectReviewPanel({
 function ReviewItemRow({
   item,
   index,
+  projects,
   sourceRun,
   currentUserId,
   currentUserEmail,
@@ -593,6 +600,7 @@ function ReviewItemRow({
 }: {
   item: ReviewQueueItem;
   index: number;
+  projects: Record<string, ReviewProjectSummary>;
   sourceRun: ReviewSourceRunSummary | undefined;
   currentUserId: string;
   currentUserEmail: string | null;
@@ -607,6 +615,7 @@ function ReviewItemRow({
   const stagedByOther = isStagedByOther(item, currentUserId, currentUserEmail);
   const disabled = isPending || stagedByOther;
   const candidates = candidateValuesForItem(item);
+  const matchCandidates = possibleMatchCandidateProjects(item, projects);
   const warningText = warningForItem(item);
 
   return (
@@ -683,12 +692,35 @@ function ReviewItemRow({
               ))}
             </div>
           ) : null}
+          {matchCandidates.length > 1 ? (
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              {matchCandidates.map((candidate) => (
+                <button
+                  key={`${item.id}-${candidate.id}`}
+                  type="button"
+                  className="rounded-md border border-slate-200 bg-white px-3 py-2 text-left text-xs hover:border-teal-300 hover:bg-teal-50 disabled:pointer-events-none disabled:opacity-50"
+                  disabled={disabled}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onStage(item, "accept_new", { project_id: candidate.id });
+                  }}
+                >
+                  <span className="block font-medium text-slate-950">{candidate.projectName}</span>
+                  <span className="mt-0.5 block text-slate-500">{candidate.canonicalAddress}</span>
+                  <span className="mt-1 block text-slate-500">
+                    {compactStatus(candidate.pipelineStatus)}
+                    {candidate.totalUnits !== null ? ` - ${candidate.totalUnits.toLocaleString()} units` : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2 xl:max-w-72 xl:justify-end">
           <DecisionButton
             keycap="a"
-            label="Accept new"
+            label={item.itemType === "new_candidate" ? "Create project" : "Accept new"}
             disabled={disabled || !canAcceptItem(item)}
             pending={pending}
             onClick={() => onStage(item, "accept_new")}
@@ -966,24 +998,38 @@ function isStagedByOther(
 
 function canAcceptItem(item: ReviewQueueItem) {
   if (item.itemType === "new_candidate") {
-    return false;
+    return true;
   }
   if (item.itemType === "possible_match") {
-    return Boolean(discoveryTargetProjectId(item));
+    return candidateProjectIdsForItem(item).length === 1;
   }
   return true;
 }
 
 function acceptDecisionValue(item: ReviewQueueItem) {
-  const targetProjectId = discoveryTargetProjectId(item);
+  if (item.itemType === "new_candidate") {
+    return { create_new: true, new_project_data: newProjectDataForItem(item) };
+  }
+  const targetProjectId = candidateProjectIdsForItem(item)[0];
   return targetProjectId ? { project_id: targetProjectId } : undefined;
 }
 
-function discoveryTargetProjectId(item: ReviewQueueItem) {
+function candidateProjectIdsForItem(item: ReviewQueueItem) {
   const payload = item.payload;
   const match = asRecord(payload?.match);
-  const candidates = asStringArray(match?.candidate_project_ids ?? payload?.candidate_project_ids);
-  return candidates[0] ?? null;
+  return asStringArray(match?.candidate_project_ids ?? payload?.candidate_project_ids);
+}
+
+function newProjectDataForItem(item: ReviewQueueItem) {
+  const mappedFields = asRecord(item.payload?.mapped_fields);
+  return {
+    canonical_address: asString(item.payload?.canonical_address) ?? undefined,
+    project_name: asString(mappedFields?.project_name) ?? undefined,
+    city: asString(mappedFields?.city) ?? undefined,
+    state: asString(mappedFields?.state) ?? undefined,
+    county: asString(mappedFields?.county) ?? undefined,
+    zip: asString(mappedFields?.zip) ?? undefined
+  };
 }
 
 function fieldNameForItem(item: ReviewQueueItem) {
@@ -1043,8 +1089,23 @@ function proposedValueForItem(item: ReviewQueueItem) {
 }
 
 function candidateValuesForItem(item: ReviewQueueItem) {
+  if (item.itemType === "new_candidate" || item.itemType === "possible_match") {
+    return [];
+  }
   const candidates = asRecordArray(item.payload?.candidates);
   return candidates.map((candidate) => ("value" in candidate ? candidate.value : candidate));
+}
+
+function possibleMatchCandidateProjects(
+  item: ReviewQueueItem,
+  projects: Record<string, ReviewProjectSummary>
+) {
+  if (item.itemType !== "possible_match") {
+    return [];
+  }
+  return candidateProjectIdsForItem(item)
+    .map((projectId) => projects[projectId])
+    .filter((project): project is ReviewProjectSummary => Boolean(project));
 }
 
 function sourceTextForItem(item: ReviewQueueItem) {

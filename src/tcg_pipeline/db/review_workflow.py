@@ -90,6 +90,11 @@ STAGEABLE_DECISION_TYPES = {
     DECISION_CUSTOM,
     DECISION_DEFER,
 }
+DISCOVERY_STAGEABLE_DECISION_TYPES = {
+    DECISION_ACCEPT_NEW,
+    DECISION_KEEP_OLD,
+    DECISION_DEFER,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +470,13 @@ def stage_review_decision(
 
     normalized_decision_type = _normalize_decision_type(decision_type)
     review_item = _load_stageable_review_item(session, review_item_id)
+    if (
+        review_item.item_type in DISCOVERY_REVIEW_ITEM_TYPES
+        and normalized_decision_type not in DISCOVERY_STAGEABLE_DECISION_TYPES
+    ):
+        raise ValueError(
+            f"{normalized_decision_type} is not supported for discovery review items."
+        )
     now = datetime.now(UTC)
     existing = _active_staged_decision(session, review_item.id)
     revised = existing is not None
@@ -883,6 +895,15 @@ def _apply_staged_decision(
     decision_type = _normalize_decision_type(decision.decision_type or "")
     if review_item.item_type in DISCOVERY_REVIEW_ITEM_TYPES:
         if decision_type == DECISION_ACCEPT_NEW:
+            if _decision_requests_create_new(decision):
+                return _apply_discovery_accept_new_project(
+                    session,
+                    decision=decision,
+                    actor=actor,
+                    actor_user_id=actor_user_id,
+                    actor_email=actor_email,
+                    timestamp=timestamp,
+                )
             return _apply_discovery_accept_existing(
                 session,
                 decision=decision,
@@ -911,6 +932,78 @@ def _apply_staged_decision(
         actor_email=actor_email,
         timestamp=timestamp,
     )
+
+
+def _apply_discovery_accept_new_project(
+    session: Session,
+    *,
+    decision: ReviewDecision,
+    actor: str,
+    actor_user_id: uuid.UUID,
+    actor_email: str | None,
+    timestamp: datetime,
+) -> tuple[uuid.UUID | None, int]:
+    review_item = decision.review_item
+    source_run = _load_source_run(review_item)
+    payload = _payload_mapping(review_item.payload)
+    source_record_id = _required_payload_text(payload, "source_record_id")
+    source_name = source_run.source_name
+    source_type = get_logical_source_type(source_name)
+    project = _build_project_from_review_item(
+        review_item=review_item,
+        source_run=source_run,
+        actor=actor,
+        new_project_data=_new_project_data_from_decision(decision),
+    )
+    session.add(project)
+    session.flush()
+    previous_values = _capture_project_values(project)
+    previous_snapshot = snapshot_project_for_diff(project)
+    evidence_link = _link_orphan_evidence(
+        session,
+        project_id=project.id,
+        source_type=source_type,
+        source_record_id=source_record_id,
+    )
+    _upsert_project_source_record(
+        session,
+        project=project,
+        review_item=review_item,
+        source_name=source_name,
+        source_record_id=source_record_id,
+        evidence_rows=evidence_link.evidence_rows,
+    )
+    _persist_review_identifiers(session, project=project, payload=payload)
+    project.last_reviewed_by = actor
+    project.last_reviewed_date = timestamp.date()
+    session.flush()
+    resolution_result = resolve_project(
+        project.id,
+        session,
+        apply=True,
+        write_resolution_log=True,
+    )
+    change_log_count = _write_accept_change_logs(
+        session,
+        project=project,
+        review_item=review_item,
+        source_name=source_name,
+        actor=actor,
+        previous_values=previous_values,
+        resolution_result=resolution_result,
+        timestamp=timestamp,
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+    )
+    _create_follow_up_review_item(
+        session,
+        project=project,
+        review_item=review_item,
+        previous_snapshot=previous_snapshot,
+        resolution_result=resolution_result,
+    )
+    review_item.project_id = project.id
+    return project.id, change_log_count
 
 
 def _apply_discovery_accept_existing(
@@ -984,6 +1077,20 @@ def _apply_discovery_accept_existing(
     )
     review_item.project_id = project.id
     return project.id, change_log_count
+
+
+def _decision_requests_create_new(decision: ReviewDecision) -> bool:
+    value = decision.decision_value
+    return isinstance(value, Mapping) and value.get("create_new") is True
+
+
+def _new_project_data_from_decision(decision: ReviewDecision) -> Mapping[str, Any] | None:
+    value = decision.decision_value
+    if isinstance(value, Mapping):
+        nested = value.get("new_project_data")
+        if isinstance(nested, Mapping):
+            return nested
+    return None
 
 
 def _target_project_id_from_decision(decision: ReviewDecision) -> uuid.UUID | None:

@@ -18,6 +18,8 @@ from tcg_pipeline.db.models import (
     DismissReason,
     Evidence,
     IdentifierType,
+    Jurisdiction,
+    Market,
     PipelineStatus,
     Priority,
     Project,
@@ -815,6 +817,89 @@ def test_staged_defer_is_not_committed_and_can_be_unstaged(
     assert review_item.status == ReviewItemStatus.OPEN
 
 
+def test_commit_staged_decisions_can_scope_to_jurisdiction(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    market = Market(slug="review-scope-market", name="Review Scope", state="CA")
+    postgres_session.add(market)
+    postgres_session.flush()
+    first_jurisdiction = Jurisdiction(
+        slug="review-scope-one",
+        name="Review Scope One",
+        state="CA",
+        market_id=market.id,
+    )
+    second_jurisdiction = Jurisdiction(
+        slug="review-scope-two",
+        name="Review Scope Two",
+        state="CA",
+        market_id=market.id,
+    )
+    postgres_session.add_all([first_jurisdiction, second_jurisdiction])
+    postgres_session.flush()
+    first_project = _build_project(
+        "713 JURISDICTION ONE WAY LOS ANGELES CA 90012",
+        total_units=10,
+        jurisdiction_id=first_jurisdiction.id,
+    )
+    second_project = _build_project(
+        "713 JURISDICTION TWO WAY LOS ANGELES CA 90012",
+        total_units=20,
+        jurisdiction_id=second_jurisdiction.id,
+    )
+    postgres_session.add_all([first_project, second_project])
+    postgres_session.flush()
+    first_item = _add_status_review_item(
+        postgres_session,
+        project=first_project,
+        old_value=10,
+        new_value=30,
+    )
+    second_item = _add_status_review_item(
+        postgres_session,
+        project=second_project,
+        old_value=20,
+        new_value=40,
+    )
+    stage_review_decision(
+        postgres_session,
+        review_item_id=first_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="custom",
+        decision_value={"value": 30},
+    )
+    stage_review_decision(
+        postgres_session,
+        review_item_id=second_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="custom",
+        decision_value={"value": 40},
+    )
+
+    result = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+        jurisdiction_id=first_jurisdiction.id,
+    )
+    postgres_session.refresh(first_item)
+    postgres_session.refresh(second_item)
+    postgres_session.refresh(first_project)
+    postgres_session.refresh(second_project)
+
+    assert result.committed_decisions == 1
+    assert result.review_items_committed == 1
+    assert result.jurisdictions_touched == [first_jurisdiction.id]
+    assert first_item.state == REVIEW_ITEM_STATE_COMMITTED
+    assert second_item.state == REVIEW_ITEM_STATE_STAGED
+    assert first_project.total_units == 30
+    assert second_project.total_units == 20
+
+
 def test_stage_review_decision_translates_unique_race_to_staged_conflict(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -865,6 +950,30 @@ def test_stage_review_decision_translates_unique_race_to_staged_conflict(
     assert exc_info.value.staged_by == other_reviewer_id
     assert exc_info.value.staged_by_email == "other@example.com"
     assert exc_info.value.decision_type == "keep_old"
+
+
+def test_stage_review_decision_rejects_candidate_decisions_for_discovery_items(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    candidate = _build_project("713 DISCOVERY CANDIDATE WAY LOS ANGELES CA 90012")
+    postgres_session.add(candidate)
+    postgres_session.flush()
+    _, review_item = _add_discovery_review_item(
+        postgres_session,
+        item_type=ReviewItemType.POSSIBLE_MATCH,
+        candidate_project_ids=[candidate.id],
+    )
+
+    with pytest.raises(ValueError, match="not supported for discovery review items"):
+        stage_review_decision(
+            postgres_session,
+            review_item_id=review_item.id,
+            staged_by=reviewer_id,
+            staged_by_email="reviewer@example.com",
+            decision_type="candidate_1",
+        )
 
 
 def test_commit_staged_custom_decision_applies_override_and_audit_identity(
@@ -944,6 +1053,105 @@ def test_commit_staged_custom_decision_applies_override_and_audit_identity(
     assert total_units_change.reviewed_by == "reviewer@example.com"
     assert total_units_change.reviewed_by_user_id == reviewer_id
     assert total_units_change.reviewed_by_email == "reviewer@example.com"
+
+
+def test_commit_staged_new_candidate_accept_creates_project(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    mapped_fields = {
+        "city": "Los Angeles",
+        "state": "CA",
+        "county": "Los Angeles",
+        "status_evidence_type": "building_permit_issued",
+        "status_evidence_date": "2026-04-01",
+        "total_units": 120,
+    }
+    _add_orphan_evidence(
+        postgres_session,
+        source_record_id="permit-stage-create-1",
+        mapped_fields=mapped_fields,
+    )
+    _, review_item = _add_discovery_review_item(
+        postgres_session,
+        source_record_id="permit-stage-create-1",
+        item_type=ReviewItemType.NEW_CANDIDATE,
+        mapped_fields=mapped_fields,
+        canonical_address="715 STAGED CREATE WAY LOS ANGELES CA 90012",
+    )
+
+    stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="accept_new",
+        decision_value={"create_new": True},
+    )
+    result = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+    )
+    postgres_session.refresh(review_item)
+
+    assert result.committed_decisions == 1
+    assert result.affected_projects == 1
+    assert review_item.state == REVIEW_ITEM_STATE_COMMITTED
+    assert review_item.project_id is not None
+    new_project = postgres_session.get(Project, review_item.project_id)
+    assert new_project is not None
+    assert new_project.canonical_address == "715 STAGED CREATE WAY LOS ANGELES CA 90012"
+    assert new_project.pipeline_status == PipelineStatus.APPROVED
+    assert new_project.total_units == 120
+    linked_evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == "permit-stage-create-1")
+    ).scalars().all()
+    assert linked_evidence
+    assert {row.project_id for row in linked_evidence} == {new_project.id}
+
+
+def test_commit_staged_possible_match_can_choose_second_candidate(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    first_candidate = _build_project("716 FIRST MATCH WAY LOS ANGELES CA 90012")
+    second_candidate = _build_project("717 SECOND MATCH WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([first_candidate, second_candidate])
+    postgres_session.flush()
+    _add_orphan_evidence(postgres_session, source_record_id="permit-second-match-1")
+    _, review_item = _add_discovery_review_item(
+        postgres_session,
+        source_record_id="permit-second-match-1",
+        item_type=ReviewItemType.POSSIBLE_MATCH,
+        candidate_project_ids=[first_candidate.id, second_candidate.id],
+    )
+
+    stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="accept_new",
+        decision_value={"project_id": str(second_candidate.id)},
+    )
+    result = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+    )
+    postgres_session.refresh(review_item)
+
+    assert result.committed_decisions == 1
+    assert review_item.state == REVIEW_ITEM_STATE_COMMITTED
+    assert review_item.project_id == second_candidate.id
+    linked_evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == "permit-second-match-1")
+    ).scalars().all()
+    assert linked_evidence
+    assert {row.project_id for row in linked_evidence} == {second_candidate.id}
 
 
 def test_commit_staged_override_contradiction_accept_new_does_not_invalidate_item(

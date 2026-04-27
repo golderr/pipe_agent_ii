@@ -96,14 +96,17 @@ export async function unstageReviewDecisionAction(
   }
 }
 
-export async function commitReviewDecisionsAction(): Promise<ReviewMutationResult> {
+export async function commitReviewDecisionsAction(options: {
+  jurisdictionId?: string | null;
+} = {}): Promise<ReviewMutationResult> {
   try {
     const apiBaseUrl = await apiBaseUrlForWrite();
     const response = await fetch(`${apiBaseUrl}/review/commit`, {
       method: "POST",
       headers: await jsonHeadersForApi(),
       body: JSON.stringify({
-        dry_run: false
+        dry_run: false,
+        jurisdiction_id: options.jurisdictionId ?? null
       })
     });
 
