@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import inspect
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from scripts.verify_researcher_overrides_migration import (
     OverrideMigrationSummary,
     SnapshotValidationError,
+    build_resolution_snapshot,
     compare_resolution_snapshots,
     summarize_override_state,
 )
@@ -208,6 +210,64 @@ def test_summarize_override_state_counts_seeded_table_and_legacy_drift(
     assert f"{legacy_only_project.id}.developer" in summary.legacy_only_pairs
     assert f"{table_only_project.id}.developer" in summary.table_only_pairs
     assert f"{mismatched_project.id}.total_units" in summary.mismatched_pairs
+
+
+def test_build_resolution_snapshot_uses_pair_keys_for_override_fields(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_researcher_overrides_table(postgres_session)
+    set_at = datetime(2026, 4, 24, 12, 0, tzinfo=UTC)
+    project = _project(
+        "904 SNAPSHOT OVERRIDE WAY LOS ANGELES CA 90012",
+        researcher_override={
+            "developer": {
+                "value": "Legacy Snapshot Dev",
+                "set_by": "researcher",
+                "set_at": set_at.isoformat(),
+                "mode": "sticky",
+            }
+        },
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        ResearcherOverride(
+            project_id=project.id,
+            field_name="total_units",
+            value=88,
+            set_by_label="researcher",
+            set_at=set_at,
+            mode="sticky",
+        )
+    )
+    postgres_session.flush()
+
+    def fake_resolve_project(project_id, session, *, apply, write_resolution_log):
+        assert project_id
+        assert apply is False
+        assert write_resolution_log is False
+        return SimpleNamespace(
+            field_resolutions={
+                "developer": SimpleNamespace(value="Resolved Snapshot Dev"),
+                "total_units": SimpleNamespace(value=88),
+            }
+        )
+
+    monkeypatch.setattr(
+        "scripts.verify_researcher_overrides_migration.resolve_project",
+        fake_resolve_project,
+    )
+
+    snapshot = build_resolution_snapshot(postgres_session)
+    snapshot_project = next(
+        row for row in snapshot["projects"] if row["project_id"] == str(project.id)
+    )
+
+    assert snapshot_project["fields"] == {
+        "developer": "Resolved Snapshot Dev",
+        "total_units": 88,
+    }
 
 
 def _ensure_researcher_overrides_table(postgres_session: Session) -> None:

@@ -14,7 +14,6 @@ from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.evidence import serialize_json
 from tcg_pipeline.db.models import Project, ResearcherOverride
 from tcg_pipeline.db.researcher_overrides import (
-    active_researcher_overrides_for_project,
     normalize_legacy_researcher_overrides,
     researcher_overrides_table_exists,
 )
@@ -186,14 +185,15 @@ def print_summary(summary: OverrideMigrationSummary, *, verbose: bool = False) -
 
 
 def build_resolution_snapshot(session: Session) -> dict[str, Any]:
-    projects = _projects_with_any_override(session)
+    override_fields_by_project = _override_fields_by_project(session)
+    projects = _projects_with_any_override(session, override_fields_by_project)
     snapshots: list[dict[str, Any]] = []
     for project in projects:
-        active_overrides = active_researcher_overrides_for_project(session, project)
-        if not active_overrides:
+        override_fields = override_fields_by_project.get(project.id, set())
+        if not override_fields:
             continue
         resolution = resolve_project(project.id, session, apply=False, write_resolution_log=False)
-        missing_fields = sorted(set(active_overrides) - set(resolution.field_resolutions))
+        missing_fields = sorted(override_fields - set(resolution.field_resolutions))
         if missing_fields:
             print(
                 "WARNING: "
@@ -208,7 +208,7 @@ def build_resolution_snapshot(session: Session) -> dict[str, Any]:
                     field_name: serialize_json(
                         resolution.field_resolutions[field_name].value
                     )
-                    for field_name in sorted(active_overrides)
+                    for field_name in sorted(override_fields)
                     if field_name in resolution.field_resolutions
                 },
             }
@@ -290,16 +290,11 @@ def _validate_resolution_snapshot(
             )
 
 
-def _projects_with_any_override(session: Session) -> list[Project]:
-    project_ids = {
-        project_id
-        for project_id, _field_name in _legacy_override_pairs(session)
-    }
-    if researcher_overrides_table_exists(session):
-        table_project_ids = session.execute(
-            select(ResearcherOverride.project_id).where(ResearcherOverride.cleared_at.is_(None))
-        ).scalars().all()
-        project_ids.update(table_project_ids)
+def _projects_with_any_override(
+    session: Session,
+    override_fields_by_project: dict[Any, set[str]],
+) -> list[Project]:
+    project_ids = set(override_fields_by_project)
     if not project_ids:
         return []
     return (
@@ -307,6 +302,16 @@ def _projects_with_any_override(session: Session) -> list[Project]:
         .scalars()
         .all()
     )
+
+
+def _override_fields_by_project(session: Session) -> dict[Any, set[str]]:
+    override_fields_by_project: dict[Any, set[str]] = {}
+    pair_keys = set(_legacy_override_pairs(session))
+    if researcher_overrides_table_exists(session):
+        pair_keys.update(_active_table_override_pairs(session))
+    for project_id, field_name in pair_keys:
+        override_fields_by_project.setdefault(project_id, set()).add(field_name)
+    return override_fields_by_project
 
 
 def _legacy_override_pairs(session: Session) -> dict[tuple[Any, str], dict[str, Any]]:
@@ -324,19 +329,39 @@ def _legacy_override_pairs(session: Session) -> dict[tuple[Any, str], dict[str, 
 
 def _active_table_override_pairs(session: Session) -> dict[tuple[Any, str], dict[str, Any]]:
     rows = session.execute(
-        select(ResearcherOverride).where(ResearcherOverride.cleared_at.is_(None))
-    ).scalars().all()
+        select(
+            ResearcherOverride.project_id,
+            ResearcherOverride.field_name,
+            ResearcherOverride.value,
+            ResearcherOverride.set_by_label,
+            ResearcherOverride.set_at,
+            ResearcherOverride.note,
+            ResearcherOverride.source_url,
+            ResearcherOverride.mode,
+            ResearcherOverride.baseline,
+        ).where(ResearcherOverride.cleared_at.is_(None))
+    ).all()
     return {
-        (row.project_id, row.field_name): {
-            "value": row.value,
-            "set_by": row.set_by_label,
-            "set_at": row.set_at,
-            "note": row.note,
-            "source_url": row.source_url,
-            "mode": row.mode,
-            "baseline": row.baseline,
+        (project_id, field_name): {
+            "value": value,
+            "set_by": set_by_label,
+            "set_at": set_at,
+            "note": note,
+            "source_url": source_url,
+            "mode": mode,
+            "baseline": baseline,
         }
-        for row in rows
+        for (
+            project_id,
+            field_name,
+            value,
+            set_by_label,
+            set_at,
+            note,
+            source_url,
+            mode,
+            baseline,
+        ) in rows
     }
 
 
