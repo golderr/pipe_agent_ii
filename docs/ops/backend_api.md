@@ -78,6 +78,42 @@ Set the same environment variables as local, with production values. The Render
 service should not be used by Vercel preview writes until the preview/staging
 policy is revisited for Phase C.
 
+## C.c Migration Verification
+
+Before C.d write endpoints are enabled, verify the `researcher_overrides`
+migration against staging or a snapshotted database. Do not run the migration
+blindly against the production project.
+
+Safe pre-migration checks:
+
+```powershell
+python scripts/verify_researcher_overrides_migration.py summary --verbose
+python scripts/verify_researcher_overrides_migration.py snapshot --output data/output/migration_checks/researcher_overrides_<env>_<utc>_before.json
+```
+
+Use a DB-specific filename (`<env>` and timestamp) for every snapshot. Do not
+reuse one hardcoded JSON path across production and staging checks.
+
+After taking a DB snapshot or targeting staging:
+
+```powershell
+alembic upgrade head
+python scripts/verify_researcher_overrides_migration.py summary --verbose
+python scripts/verify_researcher_overrides_migration.py compare --before data/output/migration_checks/researcher_overrides_<env>_<utc>_before.json
+```
+
+The pre-migration `compare` can be run as a tool sanity check, but it does not
+verify the migration. The post-migration `compare` is mandatory.
+
+Done criteria:
+
+- `summary` reports the `researcher_overrides` table exists.
+- Legacy override field-pair count equals active table row count.
+- Legacy-only, table-only, and mismatched pair counts are all `0`.
+- Unique active-field index, RLS enabled, authenticated read policy, and
+  authenticated SELECT grant are all present.
+- Snapshot comparison passes with no resolution differences.
+
 ## Auth Notes
 
 The API verifies Supabase access tokens with the Supabase JWKS endpoint:
