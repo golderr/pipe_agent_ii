@@ -460,6 +460,9 @@ class Project(Base, TimestampMixin):
     review_items: Mapped[list["ReviewItem"]] = relationship(back_populates="project")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="project")
     resolution_logs: Mapped[list["ResolutionLog"]] = relationship(back_populates="project")
+    researcher_overrides: Mapped[list[ResearcherOverride]] = relationship(
+        back_populates="project"
+    )
 
 
 class StatusHistory(Base):
@@ -485,6 +488,57 @@ class StatusHistory(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="status_history")
+
+
+class ResearcherOverride(Base):
+    __tablename__ = "researcher_overrides"
+    __table_args__ = (
+        Index(
+            "ix_researcher_overrides_project_id_active",
+            "project_id",
+            postgresql_where=text("cleared_at IS NULL"),
+        ),
+        Index(
+            "uq_researcher_overrides_active_field",
+            "project_id",
+            "field_name",
+            unique=True,
+            postgresql_where=text("cleared_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    field_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+    set_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    set_by_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    reaffirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleared_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mode: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    baseline: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    project: Mapped[Project] = relationship(back_populates="researcher_overrides")
 
 
 class ProjectIdentifier(Base):

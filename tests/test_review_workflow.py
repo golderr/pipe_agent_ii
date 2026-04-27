@@ -21,6 +21,7 @@ from tcg_pipeline.db.models import (
     Project,
     ProjectIdentifier,
     ProjectSourceRecord,
+    ResearcherOverride,
     ReviewDecision,
     ReviewDecisionAction,
     ReviewItem,
@@ -48,6 +49,8 @@ def _ensure_review_tables(postgres_session: Session) -> None:
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply the latest migrations before running review workflow tests: {missing}")
+    if not inspector.has_table("researcher_overrides"):
+        ResearcherOverride.__table__.create(bind=postgres_session.connection())
 
 
 def _build_project(canonical_address: str, **overrides) -> Project:
@@ -290,6 +293,18 @@ def test_accept_review_item_merges_field_overrides_before_resolve(
     assert project.researcher_override["total_units"]["note"] == "Researcher confirmed 300 units."
     assert project.researcher_override["total_units"]["mode"] == "until_newer_evidence"
     assert project.researcher_override["total_units"]["baseline"]["evidence_date"] == "2026-04-01"
+    table_override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "total_units",
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert table_override.value == 300
+    assert table_override.set_by_label == "nate"
+    assert table_override.note == "Researcher confirmed 300 units."
+    assert table_override.mode == "until_newer_evidence"
+    assert table_override.baseline["evidence_date"] == "2026-04-01"
 
 
 def test_accept_review_item_raises_when_matching_evidence_belongs_to_another_project(
@@ -662,6 +677,14 @@ def test_reject_status_change_creates_expiring_override_and_newer_evidence_super
     assert review_item.status == ReviewItemStatus.REJECTED
     assert project.pipeline_status == PipelineStatus.PROPOSED
     assert project.researcher_override["pipeline_status"]["value"] == PipelineStatus.PROPOSED.value
+    table_override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "pipeline_status",
+        )
+    ).scalar_one()
+    assert table_override.value == PipelineStatus.PROPOSED.value
+    assert table_override.cleared_at is None
     assert (
         project.researcher_override["pipeline_status"]["mode"] == "until_newer_evidence"
     )
@@ -720,6 +743,8 @@ def test_reject_status_change_creates_expiring_override_and_newer_evidence_super
 
     assert project.pipeline_status == PipelineStatus.UNDER_CONSTRUCTION
     assert "pipeline_status" not in (project.researcher_override or {})
+    postgres_session.refresh(table_override)
+    assert table_override.cleared_at is not None
     assert {
         "code": "researcher_override_superseded",
         "message": (

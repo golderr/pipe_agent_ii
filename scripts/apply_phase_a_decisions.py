@@ -18,7 +18,8 @@ except ModuleNotFoundError:  # pragma: no cover - script entrypoint fallback
     )
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.models import Project
-from tcg_pipeline.db.review_workflow import _build_override_entry, _merge_researcher_overrides
+from tcg_pipeline.db.researcher_overrides import upsert_researcher_overrides
+from tcg_pipeline.db.review_workflow import _build_override_entry
 from tcg_pipeline.resolution import resolve_project
 
 REVIEW_INPUT_FILENAMES = (
@@ -257,10 +258,7 @@ def apply_phase_a_decisions(
                 )
                 overrides_written += 1
 
-            project.researcher_override = _merge_researcher_overrides(
-                project.researcher_override,
-                incoming_overrides,
-            )
+            upsert_researcher_overrides(session, project, incoming_overrides)
 
         session.commit()
     output_lines.append(f"Overrides written: {overrides_written}")

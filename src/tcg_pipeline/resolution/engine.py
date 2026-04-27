@@ -16,6 +16,10 @@ from tcg_pipeline.db.models import (
     ResolutionLog,
     StatusHistory,
 )
+from tcg_pipeline.db.researcher_overrides import (
+    active_researcher_overrides_for_project,
+    clear_researcher_override_fields,
+)
 from tcg_pipeline.matching.differ import ReviewFlag
 from tcg_pipeline.resolution.confidence import compute_overall_confidence
 from tcg_pipeline.resolution.fields import (
@@ -74,7 +78,7 @@ def resolve_project(
         raise ValueError(f"Project {project_id} does not exist.")
 
     evidence_rows = _load_project_evidence(session, project_id)
-    overrides = _normalize_researcher_overrides(project.researcher_override)
+    overrides = active_researcher_overrides_for_project(session, project)
 
     status_resolution = resolve_status(evidence_rows, project, overrides=overrides)
     total_units_resolution = resolve_units(
@@ -223,8 +227,9 @@ def resolve_project(
         previous_status = project.pipeline_status
         for field_name, resolution in field_resolutions.items():
             setattr(project, field_name, resolution.value)
-        project.researcher_override = _prune_superseded_overrides(
-            project.researcher_override,
+        _clear_superseded_researcher_overrides(
+            session,
+            project,
             field_resolutions,
         )
         if previous_status != project.pipeline_status:
@@ -274,33 +279,6 @@ def _load_project_evidence(session: Session, project_id) -> list[Evidence]:
         .scalars()
         .all()
     )
-
-
-def _normalize_researcher_overrides(raw_override: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(raw_override, dict):
-        return {}
-
-    normalized: dict[str, dict[str, Any]] = {}
-    for field_name, payload in raw_override.items():
-        if isinstance(payload, dict) and "value" in payload:
-            normalized[field_name] = {
-                "value": payload.get("value"),
-                "set_by": payload.get("set_by"),
-                "set_at": payload.get("set_at"),
-                "note": payload.get("note"),
-                "mode": payload.get("mode"),
-                "baseline": payload.get("baseline"),
-            }
-            continue
-        normalized[field_name] = {
-            "value": payload,
-            "set_by": "legacy",
-            "set_at": None,
-            "note": None,
-            "mode": "sticky",
-            "baseline": None,
-        }
-    return normalized
 
 
 def normalize_value_for_project(value: Any) -> Any:
@@ -431,24 +409,14 @@ def _override_superseded_review_flags(
     return review_flags
 
 
-def _prune_superseded_overrides(
-    raw_override: Any,
+def _clear_superseded_researcher_overrides(
+    session: Session,
+    project: Project,
     field_resolutions: dict[str, FieldResolution],
-) -> dict[str, Any] | None:
-    if not isinstance(raw_override, dict):
-        return raw_override
-
+) -> None:
     superseded_fields = {
         field_name
         for field_name, resolution in field_resolutions.items()
         if resolution.metadata.get("override_superseded")
     }
-    if not superseded_fields:
-        return raw_override
-
-    remaining = {
-        field_name: payload
-        for field_name, payload in raw_override.items()
-        if field_name not in superseded_fields
-    }
-    return remaining or None
+    clear_researcher_override_fields(session, project, superseded_fields)

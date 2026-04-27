@@ -28,6 +28,7 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
     SourceRun,
 )
+from tcg_pipeline.db.researcher_overrides import upsert_researcher_overrides
 from tcg_pipeline.ingesters._common import serialize_json_value
 from tcg_pipeline.matching.differ import (
     DiffResult,
@@ -170,10 +171,7 @@ def accept_review_item(
         candidate_resolutions=pre_override_resolution.field_resolutions,
     )
     if normalized_overrides:
-        project.researcher_override = _merge_researcher_overrides(
-            project.researcher_override,
-            normalized_overrides,
-        )
+        upsert_researcher_overrides(session, project, normalized_overrides)
 
     project.last_reviewed_by = actor
     project.last_reviewed_date = now.date()
@@ -279,10 +277,7 @@ def reject_review_item(
             )
             if generated_field_overrides:
                 previous_status = normalize_value_for_project(project.pipeline_status)
-                project.researcher_override = _merge_researcher_overrides(
-                    project.researcher_override,
-                    generated_field_overrides,
-                )
+                upsert_researcher_overrides(session, project, generated_field_overrides)
                 project.last_reviewed_by = actor
                 project.last_reviewed_date = now.date()
                 session.flush()
@@ -691,16 +686,6 @@ def _normalize_field_overrides(
             candidate_resolution=resolution if isinstance(resolution, FieldResolution) else None,
         )
     return normalized
-
-
-def _merge_researcher_overrides(
-    existing: Any,
-    incoming: Mapping[str, dict[str, Any]],
-) -> dict[str, Any]:
-    merged = dict(existing) if isinstance(existing, dict) else {}
-    for field_name, payload in incoming.items():
-        merged[field_name] = payload
-    return merged
 
 
 def _write_accept_change_logs(

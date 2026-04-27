@@ -386,15 +386,16 @@ CREATE TABLE researcher_overrides (
   project_id           UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   field_name           TEXT NOT NULL,
   value                JSONB NOT NULL,
-  set_by_user_id       UUID REFERENCES auth.users(id),
+  set_by_user_id       UUID,                    -- Supabase auth.users id; no cross-schema FK in app migration
   set_by_label         TEXT,                    -- legacy initials / system actor when no auth user exists
   set_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   reaffirmed_at        TIMESTAMPTZ,
   cleared_at           TIMESTAMPTZ,
-  cleared_by_user_id   UUID REFERENCES auth.users(id),
+  cleared_by_user_id   UUID,                    -- Supabase auth.users id; no cross-schema FK in app migration
   note                 TEXT,
   source_url           TEXT,
-  baseline             JSONB,                   -- preserved for audit, no longer load-bearing
+  mode                 TEXT,                    -- still honored until §22 contradiction handling replaces supersession
+  baseline             JSONB,                   -- still honored with mode until §22 contradiction handling lands
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -402,7 +403,7 @@ CREATE INDEX ix_researcher_overrides_project_id_active ON researcher_overrides(p
 CREATE UNIQUE INDEX uq_researcher_overrides_active_field ON researcher_overrides(project_id, field_name) WHERE cleared_at IS NULL;
 ```
 
-Migration: extract current JSONB overrides into rows in this table; drop the JSONB column on `projects` after verification. Resolution engine reads from the new table.
+Migration: extract current JSONB overrides into rows in this table. During C.c, keep the legacy `projects.researcher_override` JSONB column synchronized for existing read-only UI surfaces and verification. Drop the JSONB column only after the table-backed write/read paths are verified. Resolution engine reads active rows from the new table first, with a legacy JSONB fallback during the transition.
 
 ### 6.5 Contradiction detection
 
