@@ -66,3 +66,19 @@ class ProjectNoteAppendResponse(BaseModel):
     body: str
     created_at: str
     change_log_entries_created: int
+
+
+class ProjectRelationshipCreateRequest(BaseModel):
+    relationship_type: str = Field(min_length=1, max_length=50)
+    related_project_id: uuid.UUID
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectRelationshipMutationResponse(BaseModel):
+    project_id: uuid.UUID
+    relationship_id: uuid.UUID
+    relationship_type: str
+    related_project_id: uuid.UUID
+    notes: str | None
+    created: bool
+    change_log_entries_created: int

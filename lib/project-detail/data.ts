@@ -9,6 +9,7 @@ import type {
   ProjectEvidenceRow,
   ProjectOverrideRow,
   ProjectResolutionRow,
+  ProjectRelationshipRow,
   ProjectStatusHistoryRow,
   ProjectDetailSection,
   FieldEditConfig,
@@ -88,10 +89,21 @@ type RawReviewItem = {
 };
 
 type RawRelationship = {
+  id: string;
   relationship_type: string;
   related_project_id?: string;
   project_id?: string;
   notes: string | null;
+};
+
+type RawRelationshipProject = {
+  id: string;
+  project_name: string | null;
+  canonical_address: string;
+  city: string;
+  state: string;
+  zip: string | null;
+  pipeline_status: string;
 };
 
 type RawStatusHistory = {
@@ -918,17 +930,17 @@ function buildFields(
 
 function relationshipFields(
   identifiers: RawIdentifier[],
-  relationships: RawRelationship[],
-  incomingRelationships: RawRelationship[],
+  relationshipRows: ProjectRelationshipRow[],
   statusHistory: RawStatusHistory[]
 ): ProjectField[] {
   const identifierSummary = identifiers.length
     ? identifiers.map((identifier) => `${identifier.identifier_type}: ${identifier.value}`).join(", ")
     : "-";
-  const relationshipSummary =
-    relationships.length + incomingRelationships.length > 0
-      ? `${relationships.length} outgoing, ${incomingRelationships.length} incoming`
-      : "-";
+  const outgoingCount = relationshipRows.filter((row) => row.direction === "outgoing").length;
+  const incomingCount = relationshipRows.length - outgoingCount;
+  const relationshipSummary = relationshipRows.length
+    ? `${outgoingCount} outgoing, ${incomingCount} incoming`
+    : "-";
   const statusSummary = statusHistory.length
     ? statusHistory
         .slice(0, 4)
@@ -941,6 +953,55 @@ function relationshipFields(
     makeRelationshipField("relationships", "Project links", relationshipSummary),
     makeRelationshipField("status_history", "Status history", statusSummary)
   ];
+}
+
+function toRelationshipRows(
+  outgoing: RawRelationship[],
+  incoming: RawRelationship[],
+  projectsById: Map<string, RawRelationshipProject>
+): ProjectRelationshipRow[] {
+  return [
+    ...outgoing.flatMap((relationship) =>
+      relationship.related_project_id
+        ? [
+            toRelationshipRow(
+              relationship,
+              "outgoing",
+              relationship.related_project_id,
+              projectsById
+            )
+          ]
+        : []
+    ),
+    ...incoming.flatMap((relationship) =>
+      relationship.project_id
+        ? [toRelationshipRow(relationship, "incoming", relationship.project_id, projectsById)]
+        : []
+    )
+  ].sort((a, b) => a.relationshipType.localeCompare(b.relationshipType));
+}
+
+function toRelationshipRow(
+  relationship: RawRelationship,
+  direction: "outgoing" | "incoming",
+  relatedProjectId: string,
+  projectsById: Map<string, RawRelationshipProject>
+): ProjectRelationshipRow {
+  const relatedProject = projectsById.get(relatedProjectId);
+  return {
+    id: relationship.id,
+    direction,
+    relationshipType: relationship.relationship_type,
+    relatedProjectId,
+    relatedProjectName:
+      relatedProject?.project_name ?? relatedProject?.canonical_address ?? relatedProjectId,
+    relatedProjectAddress: relatedProject?.canonical_address ?? "-",
+    relatedProjectStatus: relatedProject?.pipeline_status ?? "-",
+    relatedProjectLocation: relatedProject
+      ? [relatedProject.city, relatedProject.state, relatedProject.zip].filter(Boolean).join(", ")
+      : "-",
+    notes: relationship.notes
+  };
 }
 
 function makeRelationshipField(key: string, label: string, value: string): ProjectField {
@@ -1035,12 +1096,12 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     fetchProjectRows<RawRelationship>(
       supabase,
       "project_relationships",
-      "relationship_type, related_project_id, notes",
+      "id, relationship_type, related_project_id, notes",
       projectId
     ),
     supabase
       .from("project_relationships")
-      .select("relationship_type, project_id, notes")
+      .select("id, relationship_type, project_id, notes")
       .eq("related_project_id", projectId),
     fetchProjectRows<RawStatusHistory>(
       supabase,
@@ -1072,6 +1133,23 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     return { data: null, error };
   }
 
+  const relationshipProjectIds = [
+    ...relationships.data.map((relationship) => relationship.related_project_id),
+    ...((incomingRelationships.data ?? []) as unknown as RawRelationship[]).map(
+      (relationship) => relationship.project_id
+    )
+  ].filter((value): value is string => Boolean(value));
+  const uniqueRelationshipProjectIds = [...new Set(relationshipProjectIds)];
+  const relationshipProjects = uniqueRelationshipProjectIds.length
+    ? await supabase
+        .from("projects")
+        .select("id, project_name, canonical_address, city, state, zip, pipeline_status")
+        .in("id", uniqueRelationshipProjectIds)
+    : { data: [], error: null };
+  if (relationshipProjects.error) {
+    return { data: null, error: relationshipProjects.error.message };
+  }
+
   const sortedEvidenceRows = evidenceRows.data.sort((a, b) =>
     String(b.evidence_date ?? b.collected_at).localeCompare(String(a.evidence_date ?? a.collected_at))
   );
@@ -1092,6 +1170,16 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
   const projectChangeRows = toChangeRows(changeRows.data);
   const projectStatusRows = toStatusRows(statusHistory.data);
   const overrideRows = toOverrideRows(rawProject.researcher_override);
+  const relationshipRows = toRelationshipRows(
+    relationships.data,
+    (incomingRelationships.data ?? []) as unknown as RawRelationship[],
+    new Map(
+      ((relationshipProjects.data ?? []) as RawRelationshipProject[]).map((projectRow) => [
+        projectRow.id,
+        projectRow
+      ])
+    )
+  );
   const openReviewItems = reviewItems.data.filter((item) => item.status === "open");
   const pendingFields = extractReviewFields(openReviewItems);
   const jurisdictionName = jurisdiction.data
@@ -1161,8 +1249,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       description: "Identifiers, project relationships, and lifecycle history.",
       fields: relationshipFields(
         identifiers.data,
-        relationships.data,
-        (incomingRelationships.data ?? []) as unknown as RawRelationship[],
+        relationshipRows,
         statusHistory.data
       )
     },
@@ -1213,7 +1300,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       resolutionRows,
       changeRows: projectChangeRows,
       statusRows: projectStatusRows,
-      overrideRows
+      overrideRows,
+      relationshipRows
     },
     error: null
   };

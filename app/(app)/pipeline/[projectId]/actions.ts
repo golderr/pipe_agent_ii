@@ -10,6 +10,20 @@ export type ProjectMutationActionState = {
   message: string | null;
 };
 
+export type RelationshipSearchCandidate = {
+  id: string;
+  name: string;
+  canonicalAddress: string;
+  location: string;
+  status: string;
+};
+
+export type RelationshipSearchActionState = ProjectMutationActionState & {
+  query: string;
+  relationshipType: string;
+  candidates: RelationshipSearchCandidate[];
+};
+
 const initialErrorState: ProjectMutationActionState = {
   ok: false,
   message: null
@@ -41,6 +55,121 @@ export async function addProjectNoteAction(
   formData: FormData
 ): Promise<ProjectMutationActionState> {
   return mutateProjectNote(formData);
+}
+
+export async function searchRelationshipCandidatesAction(
+  _previousState: RelationshipSearchActionState,
+  formData: FormData
+): Promise<RelationshipSearchActionState> {
+  const projectId = textFormValue(formData, "projectId");
+  const query = textFormValue(formData, "query") ?? "";
+  const relationshipType = textFormValue(formData, "relationshipType") ?? "phase";
+  if (!projectId) {
+    return relationshipSearchState({
+      ok: false,
+      message: "Missing project.",
+      query,
+      relationshipType
+    });
+  }
+  if (query.length < 2) {
+    return relationshipSearchState({
+      ok: false,
+      message: "Enter at least 2 characters.",
+      query,
+      relationshipType
+    });
+  }
+
+  try {
+    assertPreviewWritesAllowed();
+    await accessTokenForApi();
+    const supabase = await createSupabaseServerClient();
+    const select = "id, project_name, canonical_address, city, state, zip, pipeline_status";
+    const addressQuery = supabase
+      .from("projects")
+      .select(select)
+      .neq("id", projectId)
+      .ilike("canonical_address", `%${query}%`)
+      .limit(8);
+    const nameQuery = supabase
+      .from("projects")
+      .select(select)
+      .neq("id", projectId)
+      .ilike("project_name", `%${query}%`)
+      .limit(8);
+    const [addressResults, nameResults] = await Promise.all([addressQuery, nameQuery]);
+    const error = addressResults.error ?? nameResults.error;
+    if (error) {
+      return relationshipSearchState({
+        ok: false,
+        message: error.message,
+        query,
+        relationshipType
+      });
+    }
+    const byId = new Map<string, RelationshipSearchCandidate>();
+    for (const row of [...(addressResults.data ?? []), ...(nameResults.data ?? [])]) {
+      byId.set(row.id, {
+        id: row.id,
+        name: row.project_name ?? row.canonical_address,
+        canonicalAddress: row.canonical_address,
+        location: [row.city, row.state, row.zip].filter(Boolean).join(", "),
+        status: row.pipeline_status
+      });
+    }
+    return relationshipSearchState({
+      ok: true,
+      message: byId.size ? null : "No matching projects.",
+      query,
+      relationshipType,
+      candidates: [...byId.values()].slice(0, 8)
+    });
+  } catch (error) {
+    return relationshipSearchState({
+      ok: false,
+      message: error instanceof Error ? error.message : "Project search failed.",
+      query,
+      relationshipType
+    });
+  }
+}
+
+export async function addProjectRelationshipAction(
+  _previousState: ProjectMutationActionState,
+  formData: FormData
+): Promise<ProjectMutationActionState> {
+  const projectId = textFormValue(formData, "projectId");
+  const relatedProjectId = textFormValue(formData, "relatedProjectId");
+  const relationshipType = textFormValue(formData, "relationshipType");
+  if (!projectId || !relatedProjectId || !relationshipType) {
+    return { ok: false, message: "Missing relationship target." };
+  }
+
+  try {
+    const apiBaseUrl = await apiBaseUrlForWrite();
+    const response = await fetch(`${apiBaseUrl}/projects/${projectId}/relationship`, {
+      method: "POST",
+      headers: await jsonHeadersForApi(),
+      body: JSON.stringify({
+        relationship_type: relationshipType,
+        related_project_id: relatedProjectId,
+        notes: textFormValue(formData, "notes")
+      })
+    });
+
+    if (!response.ok) {
+      return { ok: false, message: await responseErrorMessage(response) };
+    }
+  } catch (error) {
+    return {
+      ...initialErrorState,
+      message: error instanceof Error ? error.message : "Relationship link failed."
+    };
+  }
+
+  revalidatePath(`/pipeline/${projectId}`);
+  return { ok: true, message: "Linked." };
 }
 
 async function mutateProjectOverride(
@@ -177,6 +306,19 @@ function assertPreviewWritesAllowed() {
   if (process.env.VERCEL_ENV === "preview" && !previewWritesEnabled()) {
     throw new Error("Preview writes are disabled.");
   }
+}
+
+function relationshipSearchState(
+  overrides: Partial<RelationshipSearchActionState> = {}
+): RelationshipSearchActionState {
+  return {
+    ok: false,
+    message: null,
+    query: "",
+    relationshipType: "phase",
+    candidates: [],
+    ...overrides
+  };
 }
 
 async function accessTokenForApi() {

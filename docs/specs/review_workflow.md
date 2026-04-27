@@ -313,7 +313,7 @@ Phase B read surfaces use Supabase PostgREST directly with RLS. The FastAPI surf
 | `POST` | `/projects/{id}/override` | Set a researcher override (equivalent to an inline edit on a Core field). |
 | `DELETE` | `/projects/{id}/override/{field}` | Clear an override. Triggers re-resolution. |
 | `POST` | `/projects/{id}/note` | Add an append-only note. Body: `{note_type, text}`. |
-| `POST` | `/projects/{id}/relationship` | Link relationship. Body: `{relationship_type, target_project_id}`. |
+| `POST` | `/projects/{id}/relationship` | Link relationship. Body: `{relationship_type, related_project_id, notes?}`. |
 | `POST` | `/projects` | Create new project. Body: `{canonical_address, market_id, jurisdiction_id, ...optional_fields}`. Runs matcher, returns candidates if duplicates. |
 
 ### 6.2 Auth

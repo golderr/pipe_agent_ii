@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { AlertCircle, ArrowLeft, ChevronRight, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
 import { FieldEditControl } from "./field-edit-control";
+import { RelationshipPicker } from "./relationship-picker";
 import { getProjectDetailData } from "@/lib/project-detail/data";
 import { compactStatus, statusStyle } from "@/lib/status";
 import type {
@@ -15,6 +16,7 @@ import type {
   ProjectEvidenceRow,
   ProjectField,
   ProjectOverrideRow,
+  ProjectRelationshipRow,
   ProjectResolutionRow,
   ProjectStatusHistoryRow,
   SourceBadge
@@ -246,7 +248,7 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
     );
   }
 
-  const { project, sections, evidenceRows, evidenceFilters, resolutionRows, changeRows, statusRows, overrideRows } = result.data;
+  const { project, sections, evidenceRows, evidenceFilters, resolutionRows, changeRows, statusRows, overrideRows, relationshipRows } = result.data;
   const activeTab = normalizeTab(query.tab);
   const evidenceQuery = {
     field: normalizeQueryValue(query.field),
@@ -319,7 +321,7 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
       ) : activeTab === "overrides" ? (
         <OverridesTab overrideRows={overrideRows} />
       ) : (
-        <SnapshotTab projectId={project.id} sections={sections} />
+        <SnapshotTab projectId={project.id} relationshipRows={relationshipRows} sections={sections} />
       )}
     </main>
   );
@@ -343,7 +345,15 @@ function DetailTabLink({ active, href, label }: { active: boolean; href: string;
   );
 }
 
-function SnapshotTab({ projectId, sections }: { projectId: string; sections: ProjectDetailSection[] }) {
+function SnapshotTab({
+  projectId,
+  relationshipRows,
+  sections
+}: {
+  projectId: string;
+  relationshipRows: ProjectRelationshipRow[];
+  sections: ProjectDetailSection[];
+}) {
   return (
     <div className="mt-5 grid gap-5 2xl:grid-cols-[minmax(0,1fr)_22rem]">
       <div className="space-y-5">
@@ -358,6 +368,9 @@ function SnapshotTab({ projectId, sections }: { projectId: string; sections: Pro
                 <FieldRow field={field} key={field.key} projectId={projectId} />
               ))}
             </div>
+            {section.id === "relationships" ? (
+              <RelationshipPicker projectId={projectId} relationships={relationshipRows} />
+            ) : null}
           </section>
         ))}
       </div>

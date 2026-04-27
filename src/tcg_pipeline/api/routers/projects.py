@@ -17,6 +17,9 @@ from tcg_pipeline.api.project_overrides import (
 from tcg_pipeline.api.project_overrides import (
     set_project_override as set_project_override_value,
 )
+from tcg_pipeline.api.project_relationships import (
+    add_project_relationship as add_project_relationship_value,
+)
 from tcg_pipeline.api.schemas import (
     ProjectFieldMutationResponse,
     ProjectFieldUpdateRequest,
@@ -24,6 +27,8 @@ from tcg_pipeline.api.schemas import (
     ProjectNoteAppendResponse,
     ProjectOverrideMutationResponse,
     ProjectOverrideSetRequest,
+    ProjectRelationshipCreateRequest,
+    ProjectRelationshipMutationResponse,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -116,7 +121,15 @@ def add_project_note(
 @router.post("/{project_id}/relationship")
 def add_project_relationship(
     project_id: uuid.UUID,
-    _payload: dict[str, Any] = JSON_BODY,
-    _user: AuthenticatedUser = AUTH_USER,
-) -> None:
-    raise_not_implemented(f"project relationship link for {project_id}")
+    payload: ProjectRelationshipCreateRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectRelationshipMutationResponse:
+    return add_project_relationship_value(
+        session,
+        project_id=project_id,
+        relationship_type=payload.relationship_type,
+        related_project_id=payload.related_project_id,
+        notes=payload.notes,
+        user=user,
+    )

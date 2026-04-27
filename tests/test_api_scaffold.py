@@ -150,7 +150,6 @@ def test_auth_errors_are_mapped_to_http_responses() -> None:
     [
         ("POST", "/projects"),
         ("GET", f"/projects/{PROJECT_ID}"),
-        ("POST", f"/projects/{PROJECT_ID}/relationship"),
         ("GET", "/review/queue"),
         ("GET", f"/review/queue/{ITEM_ID}"),
         ("POST", f"/review/{ITEM_ID}/decide"),
@@ -175,7 +174,14 @@ def test_phase_c_routes_are_protected_stubs(method: str, path: str) -> None:
     assert response.json()["detail"]["phase"] == "C.a"
 
 
-@pytest.mark.parametrize("path", [f"/projects/{PROJECT_ID}/field", f"/projects/{PROJECT_ID}/note"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/projects/{PROJECT_ID}/field",
+        f"/projects/{PROJECT_ID}/note",
+        f"/projects/{PROJECT_ID}/relationship",
+    ],
+)
 def test_phase_c_project_write_routes_are_implemented_and_body_validated(path: str) -> None:
     client = _client()
 

@@ -88,6 +88,18 @@ export type ProjectOverrideRow = {
   raw: Record<string, unknown>;
 };
 
+export type ProjectRelationshipRow = {
+  id: string;
+  direction: "outgoing" | "incoming";
+  relationshipType: string;
+  relatedProjectId: string;
+  relatedProjectName: string;
+  relatedProjectAddress: string;
+  relatedProjectStatus: string;
+  relatedProjectLocation: string;
+  notes: string | null;
+};
+
 export type FieldProvenance = {
   sourceBadge: SourceBadge;
   rule: string | null;
@@ -146,4 +158,5 @@ export type ProjectDetailData = {
   changeRows: ProjectChangeLogRow[];
   statusRows: ProjectStatusHistoryRow[];
   overrideRows: ProjectOverrideRow[];
+  relationshipRows: ProjectRelationshipRow[];
 };
