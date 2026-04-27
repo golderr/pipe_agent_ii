@@ -139,11 +139,18 @@ instead of silently yielding to newer evidence.
 For operational checks before a large apply/backfill, run:
 
 ```bash
-tcg-pipeline detect-contradictions --market los_angeles
+tcg-pipeline detect-contradictions --market los_angeles --only-with-overrides
 ```
 
-This is a dry run by default. Add `--apply` only after reviewing the reported
-created/updated/invalidated counts.
+This focused audit scans only projects with active researcher overrides, which is
+the practical pre-apply check for the contradiction rows a broad resolver pass is
+likely to create. Omit `--only-with-overrides` for a full-market health scan.
+Both modes are dry runs by default. Add `--apply` only after reviewing the
+reported created/updated/invalidated counts.
+
+The command snapshots the project ID list before processing. For long-running
+production scans against a moving dataset, resume from the printed `Last project
+id` with `--start-after <project-id>` rather than restarting from the beginning.
 
 The preview-write block is enforced by the Next.js server action guard. The
 FastAPI service still trusts Supabase JWT validation plus `ALLOWED_EMAILS` for

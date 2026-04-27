@@ -19,6 +19,7 @@ from tcg_pipeline.db.models import (
     DeveloperRegistry,
     DismissReason,
     Project,
+    ResearcherOverride,
     ResolutionLog,
     SourceRun,
 )
@@ -723,6 +724,12 @@ def detect_contradictions_command(
         uuid.UUID | None,
         typer.Option(help="Resume after this Project.id using keyset pagination."),
     ] = None,
+    only_with_overrides: bool = typer.Option(
+        False,
+        "--only-with-overrides",
+        "--only-projects-with-active-overrides",
+        help="Scan only projects with at least one active researcher override.",
+    ),
 ) -> None:
     """Detect override contradictions in dry-run or apply mode."""
     detect_contradictions_for_projects(
@@ -731,6 +738,7 @@ def detect_contradictions_command(
         limit=limit,
         batch_size=batch_size,
         start_after=start_after,
+        only_with_overrides=only_with_overrides,
     )
 
 
@@ -741,6 +749,7 @@ def detect_contradictions_for_projects(
     limit: int | None = None,
     batch_size: int = 100,
     start_after: uuid.UUID | None = None,
+    only_with_overrides: bool = False,
 ) -> None:
     """Detect override contradictions in dry-run or apply mode."""
     session_factory = get_session_factory()
@@ -750,6 +759,7 @@ def detect_contradictions_for_projects(
             market=market,
             after_project_id=start_after,
             limit=limit,
+            only_with_active_overrides=only_with_overrides,
         )
 
     total_projects = 0
@@ -812,8 +822,18 @@ def _fetch_project_ids(
     market: str | None,
     after_project_id: uuid.UUID | None,
     limit: int | None,
+    only_with_active_overrides: bool = False,
 ) -> list[uuid.UUID]:
     statement = select(Project.id).order_by(Project.id)
+    if only_with_active_overrides:
+        statement = (
+            statement.join(
+                ResearcherOverride,
+                ResearcherOverride.project_id == Project.id,
+            )
+            .where(ResearcherOverride.cleared_at.is_(None))
+            .distinct()
+        )
     if market is not None:
         statement = statement.where(Project.market == market)
     if after_project_id is not None:

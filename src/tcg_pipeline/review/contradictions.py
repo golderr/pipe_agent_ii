@@ -217,6 +217,9 @@ def _developers_contradict(
     candidate_normalized = normalize_developer_name(candidate_text)
     if override_normalized == candidate_normalized:
         return False
+    # Production contradiction detection passes a session so registry aliases can
+    # suppress known-equivalent developer names. Session-less callers get only
+    # normalization-level comparison.
     if session is None:
         return True
 
