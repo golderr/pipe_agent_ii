@@ -78,6 +78,27 @@ Set the same environment variables as local, with production values. The Render
 service should not be used by Vercel preview writes until the preview/staging
 policy is revisited for Phase C.
 
+## Preview Write Policy
+
+Phase C preview writes are blocked by default. Vercel previews may keep using
+Supabase/PostgREST for Phase B read-only surfaces, but they must not point at a
+production FastAPI write service for mutation routes unless an explicit preview
+write session is approved and documented.
+
+Use this default until the team needs heavier staging infrastructure:
+
+- Production writes use the production Vercel app and production FastAPI service.
+- Production `API_CORS_ORIGINS` should include the production frontend URL and
+  local development origins only; do not add wildcard Vercel preview origins.
+- Preview write testing requires an explicit target decision: either a staging
+  FastAPI/Supabase pair, or a temporary approved write session against production
+  with a narrow `ALLOWED_EMAILS` list.
+- Do not rely on `APP_ENV` alone to identify preview traffic. `APP_ENV` is set on
+  the Render service, while the preview/production distinction comes from the
+  caller's Vercel deployment and configured `NEXT_PUBLIC_API_BASE_URL`.
+- C.d write endpoints must preserve this policy when real mutation handlers
+  replace the current `501` stubs.
+
 ## C.c Migration Verification
 
 Before C.d write endpoints are enabled, verify the `researcher_overrides`

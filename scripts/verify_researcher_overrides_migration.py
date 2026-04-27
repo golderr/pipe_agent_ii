@@ -185,6 +185,10 @@ def print_summary(summary: OverrideMigrationSummary, *, verbose: bool = False) -
 
 
 def build_resolution_snapshot(session: Session) -> dict[str, Any]:
+    # Keep verifier metadata reads separate from the resolver's merged override
+    # helper. During the 2026-04 production gate, a same-session ORM preload of
+    # ResearcherOverride rows followed by per-project resolution intermittently
+    # hung; the compare path only needs field keys, so it stays column-only here.
     override_fields_by_project = _override_fields_by_project(session)
     projects = _projects_with_any_override(session, override_fields_by_project)
     snapshots: list[dict[str, Any]] = []
@@ -340,28 +344,18 @@ def _active_table_override_pairs(session: Session) -> dict[tuple[Any, str], dict
             ResearcherOverride.mode,
             ResearcherOverride.baseline,
         ).where(ResearcherOverride.cleared_at.is_(None))
-    ).all()
+    ).mappings().all()
     return {
-        (project_id, field_name): {
-            "value": value,
-            "set_by": set_by_label,
-            "set_at": set_at,
-            "note": note,
-            "source_url": source_url,
-            "mode": mode,
-            "baseline": baseline,
+        (row["project_id"], row["field_name"]): {
+            "value": row["value"],
+            "set_by": row["set_by_label"],
+            "set_at": row["set_at"],
+            "note": row["note"],
+            "source_url": row["source_url"],
+            "mode": row["mode"],
+            "baseline": row["baseline"],
         }
-        for (
-            project_id,
-            field_name,
-            value,
-            set_by_label,
-            set_at,
-            note,
-            source_url,
-            mode,
-            baseline,
-        ) in rows
+        for row in rows
     }
 
 
