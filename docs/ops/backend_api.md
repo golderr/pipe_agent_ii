@@ -250,6 +250,65 @@ the map until a geocoder or editable coordinates path exists. Concurrent
 duplicate creation is guarded by the matcher but not by a database unique
 constraint.
 
+## C.h Review Staging + Commit
+
+Review queue state changes now call FastAPI:
+
+```text
+GET  /review/queue
+GET  /review/queue/{item_id}
+POST /review/{item_id}/decide
+POST /review/{item_id}/revise
+POST /review/{item_id}/unstage
+POST /review/commit
+```
+
+`decide` and `revise` stage a `ReviewDecision` without applying it to project
+state. The body is:
+
+```json
+{
+  "decision_type": "accept_new | keep_old | custom | defer | candidate_0",
+  "decision_value": "optional value or structured payload",
+  "notes": "optional note",
+  "source_url": "optional supporting URL"
+}
+```
+
+Only one staged decision can be active for a `ReviewItem`. A competing stage
+attempt returns `409` with the current staged actor details. `unstage` removes
+the caller's staged decision and returns the item to `state = open`.
+
+`review_decisions.decision_value` is the source of truth for staged decision
+payloads. The legacy `field_overrides` column is still dual-written for
+transition compatibility and should not be used by new Review Queue code.
+
+`commit` applies the caller's non-deferred staged decisions in one transaction:
+
+```json
+{
+  "jurisdiction_id": "optional jurisdiction UUID",
+  "dry_run": false
+}
+```
+
+Commits mark `review_items.state = committed`, mark the decision committed, and
+write full audit identity where available (`staged_by`, `staged_by_email`,
+`committed_by`, `committed_by_email`, and `change_log.reviewed_by_user_id` /
+`reviewed_by_email`). Deferred decisions remain staged and are excluded from
+commit counts.
+
+`change_log.reviewed_by_user_id` is the authoritative reviewer identity for new
+write paths. `reviewed_by` remains a legacy display label, and
+`reviewed_by_email` exists so pre-C.h rows and transition-period tools can still
+show full email context.
+
+C.h requires the `202604270013` Alembic migration before deployed code runs
+against a database. Dashboard, Coverage, and Project Detail still preserve the
+legacy deferred count by mirroring `review_items.status`; open work is read from
+`review_items.state = open`, while non-deferred staged work is surfaced as an
+`In review` count.
+
 ## C.c Migration Verification
 
 Before C.d write endpoints are enabled, verify the `researcher_overrides`

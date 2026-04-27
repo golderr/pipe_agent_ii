@@ -32,6 +32,7 @@ export type CoverageJurisdiction = {
   underConstructionCount: number;
   queue: {
     pending: number;
+    staged: number;
     deferred: number;
     high: number;
     medium: number;

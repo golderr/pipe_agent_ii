@@ -111,3 +111,69 @@ class ProjectRelationshipMutationResponse(BaseModel):
     created: bool
     updated: bool
     change_log_entries_created: int
+
+
+class ReviewDecisionStageRequest(BaseModel):
+    decision_type: str = Field(min_length=1, max_length=50)
+    decision_value: Any | None = None
+    notes: str | None = Field(default=None, max_length=2000)
+    source_url: str | None = Field(default=None, max_length=2000)
+
+
+class ReviewDecisionStageResponse(BaseModel):
+    review_item_id: uuid.UUID
+    decision_id: uuid.UUID
+    decision_type: str
+    item_state: str
+    staged_by: uuid.UUID | None
+    staged_by_email: str | None
+    revised: bool
+
+
+class ReviewDecisionSummary(BaseModel):
+    decision_id: uuid.UUID
+    state: str
+    decision_type: str | None
+    staged_at: str | None
+    staged_by: uuid.UUID | None
+    staged_by_email: str | None
+    committed_at: str | None
+    committed_by: uuid.UUID | None
+    committed_by_email: str | None
+    decision_value: Any | None
+    decision_notes: str | None
+    source_url: str | None
+
+
+class ReviewQueueItemResponse(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID | None
+    source_run_id: uuid.UUID | None
+    item_type: str
+    status: str
+    state: str
+    priority: str
+    match_confidence: float | None
+    payload: Any | None
+    assigned_to: str | None
+    created_at: str
+    resolved_at: str | None
+    resolved_by: str | None
+    active_decision: ReviewDecisionSummary | None
+
+
+class ReviewCommitRequest(BaseModel):
+    jurisdiction_id: uuid.UUID | None = None
+    dry_run: bool = False
+
+
+class ReviewCommitResponse(BaseModel):
+    committed_decisions: int
+    affected_projects: int
+    field_changes_applied: int
+    review_items_committed: int
+    review_items_remaining: int
+    deferred_items: int
+    jurisdictions_touched: list[uuid.UUID]
+    queue_cleared: bool
+    dry_run: bool

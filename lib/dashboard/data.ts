@@ -25,6 +25,7 @@ type RawProject = {
 type RawReviewItem = {
   item_type: string;
   status: string;
+  state: string | null;
   priority: string;
 };
 
@@ -263,7 +264,7 @@ export async function getDashboardData(): Promise<DashboardDataResult> {
       "projects",
       "market, pipeline_status, last_evidence_date"
     ),
-    fetchAllRows<RawReviewItem>(supabase, "review_items", "item_type, status, priority"),
+    fetchAllRows<RawReviewItem>(supabase, "review_items", "item_type, status, state, priority"),
     fetchRecentEvidence(supabase, recentSince),
     fetchRecentSourceRuns(supabase, recentSince),
     fetchAllRows<RawMarket>(supabase, "markets", "name, display_name")
@@ -274,7 +275,10 @@ export async function getDashboardData(): Promise<DashboardDataResult> {
     return { data: null, error };
   }
 
-  const openItems = reviewItems.rows.filter((item) => item.status === "open");
+  const openItems = reviewItems.rows.filter((item) => (item.state ?? "open") === "open");
+  const stagedItems = reviewItems.rows.filter(
+    (item) => item.state === "staged" && item.status !== "deferred"
+  );
   const deferredItems = reviewItems.rows.filter((item) => item.status === "deferred");
   const contradictionTypeSeen = reviewItems.rows.some((item) => item.item_type.includes("contradiction"));
   const contradictionItems = openItems.filter((item) => item.item_type.includes("contradiction"));
@@ -295,6 +299,7 @@ export async function getDashboardData(): Promise<DashboardDataResult> {
       generatedAt: now.toISOString(),
       needsAttention: {
         total: openItems.length,
+        staged: stagedItems.length,
         deferred: deferredItems.length,
         priorities: priorityCounts(openItems),
         types: topReviewItemTypes(openItems)

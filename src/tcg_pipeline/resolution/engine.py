@@ -578,7 +578,7 @@ def _existing_override_contradiction_items_by_field(
         select(ReviewItem).where(
             ReviewItem.project_id == project.id,
             ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
-            ReviewItem.status.in_([ReviewItemStatus.OPEN, ReviewItemStatus.DEFERRED]),
+            ReviewItem.state.in_(["open", "staged"]),
         )
     ).scalars().all()
     items_by_field: dict[str, ReviewItem] = {}

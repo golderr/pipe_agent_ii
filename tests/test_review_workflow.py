@@ -5,8 +5,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import inspect, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import tcg_pipeline.db.review_workflow as review_workflow
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.models import (
@@ -30,9 +32,19 @@ from tcg_pipeline.db.models import (
     SourceRun,
 )
 from tcg_pipeline.db.review_workflow import (
+    REVIEW_DECISION_STATE_COMMITTED,
+    REVIEW_DECISION_STATE_STAGED,
+    REVIEW_ITEM_STATE_COMMITTED,
+    REVIEW_ITEM_STATE_OPEN,
+    REVIEW_ITEM_STATE_STAGED,
+    ReviewItemAlreadyStagedError,
     accept_review_item,
+    commit_staged_decisions,
     defer_review_item,
     reject_review_item,
+    revise_review_decision,
+    stage_review_decision,
+    unstage_review_decision,
 )
 from tcg_pipeline.resolution import resolve_project
 
@@ -51,6 +63,45 @@ def _ensure_review_tables(postgres_session: Session) -> None:
         pytest.skip(f"Apply the latest migrations before running review workflow tests: {missing}")
     if not inspector.has_table("researcher_overrides"):
         ResearcherOverride.__table__.create(bind=postgres_session.connection())
+    review_item_columns = {
+        column["name"] for column in inspector.get_columns("review_items")
+    }
+    review_decision_columns = {
+        column["name"] for column in inspector.get_columns("review_decisions")
+    }
+    change_log_columns = {
+        column["name"] for column in inspector.get_columns("change_log")
+    }
+    required_columns = {
+        "review_items": {"state"},
+        "review_decisions": {
+            "state",
+            "decision_type",
+            "staged_at",
+            "staged_by",
+            "staged_by_email",
+            "committed_at",
+            "committed_by",
+            "committed_by_email",
+            "decision_value",
+            "decision_notes",
+            "source_url",
+        },
+        "change_log": {"reviewed_by_user_id", "reviewed_by_email"},
+    }
+    missing_columns = {
+        "review_items": required_columns["review_items"] - review_item_columns,
+        "review_decisions": required_columns["review_decisions"] - review_decision_columns,
+        "change_log": required_columns["change_log"] - change_log_columns,
+    }
+    missing_columns = {
+        table: columns for table, columns in missing_columns.items() if columns
+    }
+    if missing_columns:
+        pytest.skip(
+            "Apply the latest migrations before running review workflow tests: "
+            f"{missing_columns}"
+        )
 
 
 def _build_project(canonical_address: str, **overrides) -> Project:
@@ -132,6 +183,34 @@ def _add_discovery_review_item(
     postgres_session.add(review_item)
     postgres_session.flush()
     return source_run, review_item
+
+
+def _add_status_review_item(
+    postgres_session: Session,
+    *,
+    project: Project,
+    field_name: str = "total_units",
+    old_value: object = 10,
+    new_value: object = 20,
+) -> ReviewItem:
+    review_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        status=ReviewItemStatus.OPEN,
+        priority=Priority.HIGH,
+        payload={
+            "changes": [
+                {
+                    "field": field_name,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                }
+            ],
+        },
+    )
+    postgres_session.add(review_item)
+    postgres_session.flush()
+    return review_item
 
 
 def _add_orphan_evidence(
@@ -609,6 +688,368 @@ def test_defer_review_item_marks_item_deferred(
     assert result.action == ReviewDecisionAction.DEFER
     assert review_item.status == ReviewItemStatus.DEFERRED
     assert review_decision.action == ReviewDecisionAction.DEFER
+
+
+def test_stage_revise_and_unstage_review_decision(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    other_reviewer_id = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    project = _build_project(
+        "712 STAGED DECISION WAY LOS ANGELES CA 90012",
+        total_units=10,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    review_item = _add_status_review_item(postgres_session, project=project)
+
+    staged = stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="custom",
+        decision_value={"value": 30},
+        notes="Set 30 units.",
+    )
+    postgres_session.flush()
+    postgres_session.refresh(review_item)
+
+    decision = postgres_session.get(ReviewDecision, staged.decision_id)
+    assert decision is not None
+    assert staged.revised is False
+    assert review_item.state == REVIEW_ITEM_STATE_STAGED
+    assert review_item.status == ReviewItemStatus.OPEN
+    assert decision.state == REVIEW_DECISION_STATE_STAGED
+    assert decision.decision_type == "custom"
+    assert decision.decision_value == {"value": 30}
+    assert decision.staged_by == reviewer_id
+    assert decision.staged_by_email == "reviewer@example.com"
+
+    revised = revise_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="keep_old",
+        notes="Keep current value.",
+    )
+    postgres_session.flush()
+    postgres_session.refresh(decision)
+
+    assert revised.decision_id == staged.decision_id
+    assert revised.revised is True
+    assert decision.decision_type == "keep_old"
+    assert decision.decision_notes == "Keep current value."
+
+    with pytest.raises(ReviewItemAlreadyStagedError):
+        stage_review_decision(
+            postgres_session,
+            review_item_id=review_item.id,
+            staged_by=other_reviewer_id,
+            staged_by_email="other@example.com",
+            decision_type="custom",
+            decision_value={"value": 40},
+        )
+
+    unstaged = unstage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(review_item)
+    remaining_decisions = postgres_session.execute(
+        select(ReviewDecision).where(ReviewDecision.review_item_id == review_item.id)
+    ).scalars().all()
+
+    assert unstaged.item_state == REVIEW_ITEM_STATE_OPEN
+    assert review_item.state == REVIEW_ITEM_STATE_OPEN
+    assert review_item.status == ReviewItemStatus.OPEN
+    assert remaining_decisions == []
+
+
+def test_staged_defer_is_not_committed_and_can_be_unstaged(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    project = _build_project("713 STAGED DEFER WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    review_item = _add_status_review_item(postgres_session, project=project)
+
+    result = stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="defer",
+        notes="Needs source review.",
+    )
+    dry_run = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+        dry_run=True,
+    )
+    postgres_session.refresh(review_item)
+
+    assert result.decision_type == "defer"
+    assert review_item.state == REVIEW_ITEM_STATE_STAGED
+    assert review_item.status == ReviewItemStatus.DEFERRED
+    assert dry_run.committed_decisions == 0
+    assert dry_run.deferred_items == 1
+
+    unstage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(review_item)
+
+    assert review_item.state == REVIEW_ITEM_STATE_OPEN
+    assert review_item.status == ReviewItemStatus.OPEN
+
+
+def test_stage_review_decision_translates_unique_race_to_staged_conflict(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    other_reviewer_id = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    project = _build_project("713 RACE CONFLICT WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    review_item = _add_status_review_item(postgres_session, project=project)
+    conflict = ReviewDecision(
+        review_item_id=review_item.id,
+        action=ReviewDecisionAction.REJECT,
+        actor="other@example.com",
+        state=REVIEW_DECISION_STATE_STAGED,
+        decision_type="keep_old",
+        staged_by=other_reviewer_id,
+        staged_by_email="other@example.com",
+        staged_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+    )
+    calls = 0
+
+    def fake_active_staged_decision(
+        _session: Session,
+        _review_item_id: uuid.UUID,
+    ) -> ReviewDecision | None:
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else conflict
+
+    def fake_flush(*_args: object, **_kwargs: object) -> None:
+        raise IntegrityError("INSERT", {}, Exception("unique staged review decision"))
+
+    monkeypatch.setattr(review_workflow, "_active_staged_decision", fake_active_staged_decision)
+    monkeypatch.setattr(postgres_session, "flush", fake_flush)
+
+    with pytest.raises(ReviewItemAlreadyStagedError) as exc_info:
+        stage_review_decision(
+            postgres_session,
+            review_item_id=review_item.id,
+            staged_by=reviewer_id,
+            staged_by_email="reviewer@example.com",
+            decision_type="custom",
+            decision_value={"value": 30},
+        )
+
+    assert exc_info.value.staged_by == other_reviewer_id
+    assert exc_info.value.staged_by_email == "other@example.com"
+    assert exc_info.value.decision_type == "keep_old"
+
+
+def test_commit_staged_custom_decision_applies_override_and_audit_identity(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    project = _build_project(
+        "714 COMMIT STAGED WAY LOS ANGELES CA 90012",
+        total_units=10,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    review_item = _add_status_review_item(
+        postgres_session,
+        project=project,
+        old_value=10,
+        new_value=20,
+    )
+
+    staged = stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="custom",
+        decision_value={"value": 25},
+        notes="Confirmed 25 units.",
+        source_url="https://example.com/source",
+    )
+    dry_run = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+        dry_run=True,
+    )
+    postgres_session.refresh(project)
+    assert dry_run.committed_decisions == 1
+    assert project.total_units == 10
+
+    commit_result = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    postgres_session.refresh(review_item)
+    decision = postgres_session.get(ReviewDecision, staged.decision_id)
+    override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "total_units",
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    change_logs = postgres_session.execute(
+        select(ChangeLog).where(ChangeLog.review_item_id == review_item.id)
+    ).scalars().all()
+    total_units_change = next(
+        change_log for change_log in change_logs if change_log.field == "total_units"
+    )
+
+    assert commit_result.committed_decisions == 1
+    assert commit_result.field_changes_applied >= 1
+    assert review_item.state == REVIEW_ITEM_STATE_COMMITTED
+    assert review_item.status == ReviewItemStatus.ACCEPTED
+    assert project.total_units == 25
+    assert project.researcher_override["total_units"]["mode"] == "review_protected"
+    assert override.value == 25
+    assert override.set_by_user_id == reviewer_id
+    assert override.source_url == "https://example.com/source"
+    assert decision is not None
+    assert decision.state == REVIEW_DECISION_STATE_COMMITTED
+    assert decision.committed_by == reviewer_id
+    assert decision.committed_by_email == "reviewer@example.com"
+    assert total_units_change.reviewed_by == "reviewer@example.com"
+    assert total_units_change.reviewed_by_user_id == reviewer_id
+    assert total_units_change.reviewed_by_email == "reviewer@example.com"
+
+
+def test_commit_staged_decisions_rolls_back_all_decisions_when_one_fails(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    project = _build_project(
+        "715 ATOMIC COMMIT WAY LOS ANGELES CA 90012",
+        total_units=10,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    valid_item = _add_status_review_item(
+        postgres_session,
+        project=project,
+        old_value=10,
+        new_value=20,
+    )
+    invalid_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        status=ReviewItemStatus.OPEN,
+        priority=Priority.HIGH,
+        payload={},
+    )
+    postgres_session.add(invalid_item)
+    postgres_session.flush()
+
+    stage_review_decision(
+        postgres_session,
+        review_item_id=valid_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="custom",
+        decision_value={"value": 25},
+    )
+    stage_review_decision(
+        postgres_session,
+        review_item_id=invalid_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="custom",
+        decision_value={"value": 99},
+    )
+    postgres_session.flush()
+
+    with pytest.raises(ValueError, match="does not identify a field"):
+        commit_staged_decisions(
+            postgres_session,
+            committed_by=reviewer_id,
+            committed_by_email="reviewer@example.com",
+        )
+
+    postgres_session.refresh(project)
+    postgres_session.refresh(valid_item)
+    postgres_session.refresh(invalid_item)
+    decisions = postgres_session.execute(
+        select(ReviewDecision).where(
+            ReviewDecision.review_item_id.in_({valid_item.id, invalid_item.id})
+        )
+    ).scalars().all()
+    change_logs = postgres_session.execute(
+        select(ChangeLog).where(ChangeLog.review_item_id.in_({valid_item.id, invalid_item.id}))
+    ).scalars().all()
+
+    assert project.total_units == 10
+    assert valid_item.state == REVIEW_ITEM_STATE_STAGED
+    assert invalid_item.state == REVIEW_ITEM_STATE_STAGED
+    assert {decision.state for decision in decisions} == {REVIEW_DECISION_STATE_STAGED}
+    assert change_logs == []
+
+
+def test_commit_staged_discovery_reject_preserves_dismiss_reason(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    _, review_item = _add_discovery_review_item(
+        postgres_session,
+        source_record_id="permit-staged-reject-reason-1",
+    )
+
+    stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="keep_old",
+        decision_value={"reason": "not_residential"},
+        notes="Commercial record.",
+    )
+    commit_result = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+    )
+    postgres_session.flush()
+    dismissed = postgres_session.execute(
+        select(DismissedRecord).where(
+            DismissedRecord.source == "ladbs_permits",
+            DismissedRecord.source_record_id == "permit-staged-reject-reason-1",
+        )
+    ).scalar_one()
+
+    assert commit_result.committed_decisions == 1
+    assert dismissed.reason == DismissReason.NOT_RESIDENTIAL
 
 
 def test_reject_status_change_creates_expiring_override_and_newer_evidence_supersedes_it(

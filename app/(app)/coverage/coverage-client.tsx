@@ -137,7 +137,10 @@ function queueRank(jurisdiction: CoverageJurisdiction) {
   if (jurisdiction.queue.low > 0) {
     return 2;
   }
-  return 3;
+  if (jurisdiction.queue.staged > 0) {
+    return 3;
+  }
+  return 4;
 }
 
 function newestIngested(jurisdiction: CoverageJurisdiction) {
@@ -179,7 +182,11 @@ function QueueBadge({ jurisdiction }: { jurisdiction: CoverageJurisdiction }) {
   const { queue } = jurisdiction;
 
   if (queue.pending === 0) {
-    return <span className="text-sm text-slate-500">cleared</span>;
+    return (
+      <span className="text-sm text-slate-500">
+        {queue.staged ? `${number(queue.staged)} in review` : "cleared"}
+      </span>
+    );
   }
 
   const label =
@@ -192,6 +199,9 @@ function QueueBadge({ jurisdiction }: { jurisdiction: CoverageJurisdiction }) {
       <span className={cn("size-2 rounded-full", dotClass)} aria-hidden="true" />
       <span className="font-medium text-slate-900">{number(queue.pending)}</span>
       <span className="text-xs text-slate-500">{label}</span>
+      {queue.staged ? (
+        <span className="text-xs text-slate-500">+{number(queue.staged)} in review</span>
+      ) : null}
     </span>
   );
 }
@@ -336,7 +346,9 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
         const matchesQueue =
           filters.queue === "any" ||
           (filters.queue === "pending" && jurisdiction.queue.pending > 0) ||
-          (filters.queue === "cleared" && jurisdiction.queue.pending === 0) ||
+          (filters.queue === "cleared" &&
+            jurisdiction.queue.pending === 0 &&
+            jurisdiction.queue.staged === 0) ||
           (filters.queue === "high" && jurisdiction.queue.high > 0);
         const matchesFreshness =
           filters.freshness === "any" || freshnessBucket(newest) === filters.freshness;
@@ -373,13 +385,14 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
         0
       ),
       pending: jurisdictions.reduce((sum, jurisdiction) => sum + jurisdiction.queue.pending, 0),
+      staged: jurisdictions.reduce((sum, jurisdiction) => sum + jurisdiction.queue.staged, 0),
       deferred: jurisdictions.reduce((sum, jurisdiction) => sum + jurisdiction.queue.deferred, 0)
     }),
     [jurisdictions]
   );
 
   const visibleOptionalColumns = filters.optionalColumns;
-  const colSpan = 9 + visibleOptionalColumns.length;
+  const colSpan = 10 + visibleOptionalColumns.length;
 
   function updateFilter<K extends keyof CoverageFilters>(key: K, value: CoverageFilters[K]) {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -430,6 +443,7 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
             <Metric label="Projects" value={number(totals.projects)} />
             <Metric label="Under construction" value={number(totals.underConstruction)} />
             <Metric label="Pending queue" value={number(totals.pending)} />
+            <Metric label="In review" value={number(totals.staged)} />
             <Metric label="Deferred" value={number(totals.deferred)} />
           </div>
         </div>
@@ -530,6 +544,7 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
               <th className="px-3 py-2 text-right font-medium">Projects</th>
               <th className="px-3 py-2 text-right font-medium">U/C</th>
               <th className="min-w-36 px-3 py-2 font-medium">Queue</th>
+              <th className="px-3 py-2 text-right font-medium">In review</th>
               <th className="px-3 py-2 text-right font-medium">Deferred</th>
               {visibleOptionalColumns.includes("gov") ? (
                 <th className="px-3 py-2 font-medium">Gov last</th>
@@ -588,6 +603,9 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
                     <QueueBadge jurisdiction={jurisdiction} />
                   </td>
                   <td className="px-3 py-2 text-right align-top text-slate-700">
+                    {number(jurisdiction.queue.staged)}
+                  </td>
+                  <td className="px-3 py-2 text-right align-top text-slate-700">
                     {number(jurisdiction.queue.deferred)}
                   </td>
                   {visibleOptionalColumns.includes("gov") ? (
@@ -642,6 +660,7 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
                           <Metric label="Projects" value={number(jurisdiction.projectCount)} />
                           <Metric label="U/C" value={number(jurisdiction.underConstructionCount)} />
                           <Metric label="Queue" value={number(jurisdiction.queue.pending)} />
+                          <Metric label="In review" value={number(jurisdiction.queue.staged)} />
                           <Metric label="Deferred" value={number(jurisdiction.queue.deferred)} />
                         </div>
                         <div className="flex flex-wrap gap-2">

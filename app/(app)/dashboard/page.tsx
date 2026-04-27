@@ -150,6 +150,9 @@ function NeedsAttentionTile({ data }: { data: DashboardData }) {
       {data.needsAttention.deferred ? (
         <p className="mt-3 text-xs text-slate-500">{number(data.needsAttention.deferred)} deferred items remain parked.</p>
       ) : null}
+      {data.needsAttention.staged ? (
+        <p className="mt-3 text-xs text-slate-500">{number(data.needsAttention.staged)} items are in review.</p>
+      ) : null}
     </TileShell>
   );
 }

@@ -84,6 +84,7 @@ type RawFieldResolution = {
 type RawReviewItem = {
   item_type: string;
   status: string;
+  state: string | null;
   priority: string;
   payload: Record<string, unknown> | null;
 };
@@ -1092,7 +1093,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       "field, current_value, resolved_value, evidence_ids, rule_applied, confidence, created_at",
       projectId
     ),
-    fetchProjectRows<RawReviewItem>(supabase, "review_items", "item_type, status, priority, payload", projectId),
+    fetchProjectRows<RawReviewItem>(supabase, "review_items", "item_type, status, state, priority, payload", projectId),
     fetchProjectRows<RawRelationship>(
       supabase,
       "project_relationships",
@@ -1180,8 +1181,10 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       ])
     )
   );
-  const openReviewItems = reviewItems.data.filter((item) => item.status === "open");
-  const pendingFields = extractReviewFields(openReviewItems);
+  const activeReviewItems = reviewItems.data.filter((item) =>
+    ["open", "staged"].includes(item.state ?? "open")
+  );
+  const pendingFields = extractReviewFields(activeReviewItems);
   const jurisdictionName = jurisdiction.data
     ? ((jurisdiction.data as RawJurisdiction).display_name ?? (jurisdiction.data as RawJurisdiction).name)
     : rawProject.jurisdiction_id;
@@ -1284,7 +1287,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         confidence: rawProject.confidence ?? rawProject.status_confidence,
         lastEvidenceDate: rawProject.last_evidence_date,
         evidenceCount: sortedEvidenceRows.length,
-        openReviewCount: openReviewItems.length
+        openReviewCount: activeReviewItems.length
       },
       sections,
       evidenceRows: projectEvidenceRows,

@@ -21,6 +21,7 @@ export type DashboardData = {
   generatedAt: string;
   needsAttention: {
     total: number;
+    staged: number;
     deferred: number;
     priorities: DashboardPriorityCounts;
     types: Array<{ type: string; count: number }>;

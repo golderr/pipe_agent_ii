@@ -8,7 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tcg_pipeline.api.auth import AuthenticatedUser, AuthError, _is_email_allowed
+from tcg_pipeline.api.deps import get_db_session
 from tcg_pipeline.api.main import create_app
+from tcg_pipeline.api.routers import review as review_router
+from tcg_pipeline.db.review_workflow import ReviewItemAlreadyStagedError, ReviewStageResult
 from tcg_pipeline.settings import Settings
 
 USER_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -149,12 +152,6 @@ def test_auth_errors_are_mapped_to_http_responses() -> None:
     ("method", "path"),
     [
         ("GET", f"/projects/{PROJECT_ID}"),
-        ("GET", "/review/queue"),
-        ("GET", f"/review/queue/{ITEM_ID}"),
-        ("POST", f"/review/{ITEM_ID}/decide"),
-        ("POST", f"/review/{ITEM_ID}/revise"),
-        ("POST", f"/review/{ITEM_ID}/unstage"),
-        ("POST", "/review/commit"),
         ("POST", f"/coverage/{JURISDICTION_ID}/pin"),
         ("POST", f"/coverage/{JURISDICTION_ID}/scrape"),
         ("POST", f"/coverage/{JURISDICTION_ID}/costar-upload"),
@@ -180,6 +177,8 @@ def test_phase_c_routes_are_protected_stubs(method: str, path: str) -> None:
         f"/projects/{PROJECT_ID}/note",
         f"/projects/{PROJECT_ID}/relationship",
         "/projects",
+        f"/review/{ITEM_ID}/decide",
+        f"/review/{ITEM_ID}/revise",
     ],
 )
 def test_phase_c_project_write_routes_are_implemented_and_body_validated(path: str) -> None:
@@ -188,6 +187,80 @@ def test_phase_c_project_write_routes_are_implemented_and_body_validated(path: s
     response = client.post(path, json={}, headers=_auth_headers())
 
     assert response.status_code == 422
+
+
+def test_review_decide_stages_with_full_actor_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client()
+    client.app.dependency_overrides[get_db_session] = lambda: object()
+    calls: dict[str, Any] = {}
+
+    def fake_stage_review_decision(_session: object, **kwargs: Any) -> ReviewStageResult:
+        calls.update(kwargs)
+        return ReviewStageResult(
+            review_item_id=ITEM_ID,
+            decision_id=uuid.UUID("77777777-7777-7777-7777-777777777777"),
+            decision_type=kwargs["decision_type"],
+            item_state="staged",
+            staged_by=kwargs["staged_by"],
+            staged_by_email=kwargs["staged_by_email"],
+        )
+
+    monkeypatch.setattr(
+        review_router,
+        "stage_review_decision",
+        fake_stage_review_decision,
+    )
+
+    response = client.post(
+        f"/review/{ITEM_ID}/decide",
+        json={
+            "decision_type": "custom",
+            "decision_value": {"value": 30},
+            "notes": "Confirmed.",
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["staged_by"] == str(USER_ID)
+    assert response.json()["staged_by_email"] == "allowed@example.com"
+    assert calls["staged_by"] == USER_ID
+    assert calls["staged_by_email"] == "allowed@example.com"
+    assert calls["decision_value"] == {"value": 30}
+
+
+def test_review_decide_returns_409_for_competing_staged_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client()
+    client.app.dependency_overrides[get_db_session] = lambda: object()
+    other_user_id = uuid.UUID("88888888-8888-8888-8888-888888888888")
+
+    def fake_stage_review_decision(_session: object, **_kwargs: Any) -> ReviewStageResult:
+        raise ReviewItemAlreadyStagedError(
+            review_item_id=ITEM_ID,
+            staged_by=other_user_id,
+            staged_by_email="other@example.com",
+            decision_type="keep_old",
+            staged_at=None,
+        )
+
+    monkeypatch.setattr(
+        review_router,
+        "stage_review_decision",
+        fake_stage_review_decision,
+    )
+
+    response = client.post(
+        f"/review/{ITEM_ID}/decide",
+        json={"decision_type": "custom", "decision_value": {"value": 30}},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["staged_by"] == str(other_user_id)
+    assert response.json()["detail"]["staged_by_email"] == "other@example.com"
+    assert response.json()["detail"]["decision_type"] == "keep_old"
 
 
 def test_phase_c_stubs_do_not_run_without_auth() -> None:

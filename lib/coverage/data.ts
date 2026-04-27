@@ -34,6 +34,7 @@ type RawReviewItem = {
   id: string;
   project_id: string | null;
   status: string | null;
+  state: string | null;
   priority: string | null;
 };
 
@@ -206,7 +207,7 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
       "projects",
       "id, jurisdiction_id, pipeline_status, researcher_override, last_reviewed_date"
     ),
-    fetchAllRows<RawReviewItem>(supabase, "review_items", "id, project_id, status, priority"),
+    fetchAllRows<RawReviewItem>(supabase, "review_items", "id, project_id, status, state, priority"),
     fetchAllRows<RawSourceRegistration>(
       supabase,
       "source_registrations",
@@ -240,7 +241,10 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
       const projectId = item.project_id;
       return projectId ? projectJurisdiction.get(projectId) === jurisdiction.id : false;
     });
-    const pendingItems = jurisdictionReviewItems.filter((item) => item.status === "open");
+    const pendingItems = jurisdictionReviewItems.filter((item) => (item.state ?? "open") === "open");
+    const stagedItems = jurisdictionReviewItems.filter(
+      (item) => item.state === "staged" && item.status !== "deferred"
+    );
     const deferredItems = jurisdictionReviewItems.filter((item) => item.status === "deferred");
     const high = pendingItems.filter((item) => item.priority === "high").length;
     const medium = pendingItems.filter((item) => item.priority === "medium").length;
@@ -273,6 +277,7 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
       ).length,
       queue: {
         pending: pendingItems.length,
+        staged: stagedItems.length,
         deferred: deferredItems.length,
         high,
         medium,

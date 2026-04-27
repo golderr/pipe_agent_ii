@@ -7,6 +7,7 @@ from datetime import date, datetime
 from geoalchemy2 import Geography
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -841,6 +842,12 @@ class ReviewItem(Base):
     __tablename__ = "review_items"
     __table_args__ = (
         Index("ix_review_items_status_priority", "status", "priority"),
+        Index("ix_review_items_state_priority", "state", "priority"),
+        Index("ix_review_items_project_id_state", "project_id", "state"),
+        CheckConstraint(
+            "state IN ('open', 'staged', 'committed', 'invalidated')",
+            name="state",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -860,6 +867,7 @@ class ReviewItem(Base):
         nullable=False,
         default=ReviewItemStatus.OPEN,
     )
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     priority: Mapped[Priority] = mapped_column(PRIORITY_ENUM, nullable=False)
     match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -886,6 +894,24 @@ class ReviewItem(Base):
 
 class ReviewDecision(Base):
     __tablename__ = "review_decisions"
+    __table_args__ = (
+        Index(
+            "ix_review_decisions_state_staged_by",
+            "state",
+            "staged_by",
+            postgresql_where=text("state = 'staged'"),
+        ),
+        Index(
+            "uq_review_decisions_one_staged_per_item",
+            "review_item_id",
+            unique=True,
+            postgresql_where=text("state = 'staged'"),
+        ),
+        CheckConstraint(
+            "state IN ('staged', 'committed')",
+            name="state",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     review_item_id: Mapped[uuid.UUID] = mapped_column(
@@ -900,6 +926,20 @@ class ReviewDecision(Base):
     actor: Mapped[str] = mapped_column(String(50), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     field_overrides: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="staged")
+    decision_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    staged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    staged_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    staged_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    committed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    committed_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision_value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    decision_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -938,6 +978,8 @@ class ChangeLog(Base):
     change_type: Mapped[ChangeType] = mapped_column(CHANGE_TYPE_ENUM, nullable=False)
     priority: Mapped[Priority] = mapped_column(PRIORITY_ENUM, nullable=False)
     reviewed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    reviewed_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="change_log_entries")
     review_item: Mapped[ReviewItem | None] = relationship(back_populates="change_log_entries")
