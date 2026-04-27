@@ -1,8 +1,15 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { isEmailAllowed } from "@/lib/auth";
-import { previewWritesEnabled, requireApiBaseUrl } from "@/lib/env";
+import {
+  accessTokenForApi,
+  apiBaseUrlForWrite,
+  assertWriteFlowAllowed,
+  escapeIlikeTerm,
+  jsonHeadersForApi,
+  responseErrorMessage,
+  textFormValue
+} from "@/lib/server-actions";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export type ProjectMutationActionState = {
@@ -229,7 +236,7 @@ async function mutateProjectOverride(
     if (!response.ok) {
       return {
         ok: false,
-        message: await responseErrorMessage(response)
+        message: await responseErrorMessage(response, "Override update failed.")
       };
     }
   } catch (error) {
@@ -263,7 +270,7 @@ async function mutateProjectField(formData: FormData): Promise<ProjectMutationAc
     });
 
     if (!response.ok) {
-      return { ok: false, message: await responseErrorMessage(response) };
+      return { ok: false, message: await responseErrorMessage(response, "Field update failed.") };
     }
   } catch (error) {
     return {
@@ -296,7 +303,7 @@ async function mutateProjectNote(formData: FormData): Promise<ProjectMutationAct
     });
 
     if (!response.ok) {
-      return { ok: false, message: await responseErrorMessage(response) };
+      return { ok: false, message: await responseErrorMessage(response, "Note append failed.") };
     }
   } catch (error) {
     return {
@@ -307,29 +314,6 @@ async function mutateProjectNote(formData: FormData): Promise<ProjectMutationAct
 
   revalidatePath(`/pipeline/${projectId}`);
   return { ok: true, message: "Added." };
-}
-
-async function apiBaseUrlForWrite() {
-  assertWriteFlowAllowed();
-  return requireApiBaseUrl();
-}
-
-async function jsonHeadersForApi() {
-  const accessToken = await accessTokenForApi();
-  return {
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Type": "application/json"
-  };
-}
-
-function assertWriteFlowAllowed() {
-  if (process.env.VERCEL_ENV === "preview" && !previewWritesEnabled()) {
-    throw new Error("Preview writes are disabled.");
-  }
-}
-
-function escapeIlikeTerm(value: string) {
-  return value.replace(/[\\%_]/g, "\\$&");
 }
 
 function relationshipSearchState(
@@ -343,49 +327,4 @@ function relationshipSearchState(
     candidates: [],
     ...overrides
   };
-}
-
-async function accessTokenForApi() {
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user }
-  } = await supabase.auth.getUser();
-  if (!user || !isEmailAllowed(user.email)) {
-    throw new Error("Not authorized.");
-  }
-
-  const {
-    data: { session }
-  } = await supabase.auth.getSession();
-  if (!session?.access_token) {
-    throw new Error("No Supabase access token available.");
-  }
-
-  return session.access_token;
-}
-
-async function responseErrorMessage(response: Response) {
-  try {
-    const payload = await response.json();
-    const detail = payload?.detail;
-    if (typeof detail === "string") {
-      return detail;
-    }
-    if (typeof detail?.message === "string") {
-      return detail.message;
-    }
-  } catch {
-    // Fall through to generic status text.
-  }
-
-  return response.statusText || "Override update failed.";
-}
-
-function textFormValue(formData: FormData, key: string) {
-  const value = formData.get(key);
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed || null;
 }

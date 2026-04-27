@@ -218,6 +218,8 @@ Body:
   "market_id": "<market-uuid>",
   "jurisdiction_id": "<jurisdiction-uuid>",
   "project_name": "optional",
+  "city": "optional",
+  "county": "optional",
   "zip": "90012",
   "force_create": false
 }
@@ -226,8 +228,9 @@ Body:
 `canonical_address`, `market_id`, and `jurisdiction_id` are required. The API
 validates that the jurisdiction belongs to the selected market, derives the
 legacy `projects.market` / `projects.jurisdiction` strings from those rows,
-normalizes the address, and runs the existing conservative matcher against the
-normalized address.
+uses supplied city/county values when present, falls back to jurisdiction/market
+labels otherwise, normalizes the address, and runs the existing conservative
+matcher against the normalized address.
 
 If the matcher finds duplicate candidates and `force_create` is false, the API
 returns `created = false` with duplicate candidates and performs no write. The
@@ -240,6 +243,12 @@ project edit metadata, and a `change_log` row with
 blocked; creation uses the privileged FastAPI database session.
 
 True merge into an existing project is not implemented in C.g.
+
+C.g does not geocode created projects or collect APNs, permit/case identifiers,
+or source URLs at creation time. Manually created projects may remain absent from
+the map until a geocoder or editable coordinates path exists. Concurrent
+duplicate creation is guarded by the matcher but not by a database unique
+constraint.
 
 ## C.c Migration Verification
 

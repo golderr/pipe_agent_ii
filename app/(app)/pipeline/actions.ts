@@ -1,9 +1,12 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { isEmailAllowed } from "@/lib/auth";
-import { previewWritesEnabled, requireApiBaseUrl } from "@/lib/env";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  apiBaseUrlForWrite,
+  jsonHeadersForApi,
+  responseErrorMessage,
+  textFormValue
+} from "@/lib/server-actions";
 
 export type ProjectCreateCandidate = {
   projectId: string;
@@ -19,6 +22,8 @@ export type ProjectCreateFormValues = {
   marketId: string;
   jurisdictionId: string;
   projectName: string;
+  city: string;
+  county: string;
   zip: string;
 };
 
@@ -58,6 +63,8 @@ export const initialProjectCreateState: ProjectCreateActionState = {
     marketId: "",
     jurisdictionId: "",
     projectName: "",
+    city: "",
+    county: "",
     zip: ""
   }
 };
@@ -86,6 +93,8 @@ export async function createProjectAction(
         market_id: form.marketId,
         jurisdiction_id: form.jurisdictionId,
         project_name: form.projectName || null,
+        city: form.city || null,
+        county: form.county || null,
         zip: form.zip || null,
         force_create: formData.get("forceCreate") === "true"
       })
@@ -95,7 +104,7 @@ export async function createProjectAction(
       return {
         ...initialProjectCreateState,
         ok: false,
-        message: await responseErrorMessage(response),
+        message: await responseErrorMessage(response, "Project creation failed."),
         form
       };
     }
@@ -141,76 +150,14 @@ export async function createProjectAction(
   }
 }
 
-async function apiBaseUrlForWrite() {
-  assertWriteFlowAllowed();
-  return requireApiBaseUrl();
-}
-
-async function jsonHeadersForApi() {
-  const accessToken = await accessTokenForApi();
-  return {
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Type": "application/json"
-  };
-}
-
-function assertWriteFlowAllowed() {
-  if (process.env.VERCEL_ENV === "preview" && !previewWritesEnabled()) {
-    throw new Error("Preview writes are disabled.");
-  }
-}
-
-async function accessTokenForApi() {
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user }
-  } = await supabase.auth.getUser();
-  if (!user || !isEmailAllowed(user.email)) {
-    throw new Error("Not authorized.");
-  }
-
-  const {
-    data: { session }
-  } = await supabase.auth.getSession();
-  if (!session?.access_token) {
-    throw new Error("No Supabase access token available.");
-  }
-
-  return session.access_token;
-}
-
-async function responseErrorMessage(response: Response) {
-  try {
-    const payload = await response.json();
-    const detail = payload?.detail;
-    if (typeof detail === "string") {
-      return detail;
-    }
-    if (typeof detail?.message === "string") {
-      return detail.message;
-    }
-  } catch {
-    // Fall through to generic status text.
-  }
-
-  return response.statusText || "Project creation failed.";
-}
-
 function projectCreateFormValues(formData: FormData): ProjectCreateFormValues {
   return {
     canonicalAddress: textFormValue(formData, "canonicalAddress") ?? "",
     marketId: textFormValue(formData, "marketId") ?? "",
     jurisdictionId: textFormValue(formData, "jurisdictionId") ?? "",
     projectName: textFormValue(formData, "projectName") ?? "",
+    city: textFormValue(formData, "city") ?? "",
+    county: textFormValue(formData, "county") ?? "",
     zip: textFormValue(formData, "zip") ?? ""
   };
-}
-
-function textFormValue(formData: FormData, key: string) {
-  const value = formData.get(key);
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed || null;
 }

@@ -25,7 +25,8 @@ import { useActionState, useEffect, useMemo, useRef, useState } from "react";
 import {
   createProjectAction,
   initialProjectCreateState,
-  type ProjectCreateActionState
+  type ProjectCreateActionState,
+  type ProjectCreateFormValues
 } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -542,19 +543,37 @@ function NewProjectDialog({
     createProjectAction,
     initialProjectCreateState
   );
-  const firstMarketId = data.facets.marketOptions[0]?.id ?? "";
-  const [selectedMarketId, setSelectedMarketId] = useState(firstMarketId);
-  const jurisdictionOptions = data.facets.jurisdictionOptions.filter(
-    (jurisdiction) => jurisdiction.marketId === selectedMarketId
+  const [formValues, setFormValues] = useState<ProjectCreateFormValues>(() =>
+    initialNewProjectFormValues(data)
   );
-  const [selectedJurisdictionId, setSelectedJurisdictionId] = useState(
-    jurisdictionOptions[0]?.id ?? ""
+  const jurisdictionOptions = data.facets.jurisdictionOptions.filter(
+    (jurisdiction) => jurisdiction.marketId === formValues.marketId
   );
   const effectiveJurisdictionId = jurisdictionOptions.some(
-    (jurisdiction) => jurisdiction.id === selectedJurisdictionId
+    (jurisdiction) => jurisdiction.id === formValues.jurisdictionId
   )
-    ? selectedJurisdictionId
+    ? formValues.jurisdictionId
     : (jurisdictionOptions[0]?.id ?? "");
+  const duplicateFormUnchanged =
+    state.duplicateCandidates.length > 0 &&
+    projectCreateFormsEqual(formValues, state.form);
+  const duplicateCandidates = duplicateFormUnchanged ? state.duplicateCandidates : [];
+
+  function updateFormValue(field: keyof ProjectCreateFormValues, value: string) {
+    setFormValues((current) => {
+      if (field !== "marketId") {
+        return { ...current, [field]: value };
+      }
+      return {
+        ...current,
+        marketId: value,
+        jurisdictionId:
+          data.facets.jurisdictionOptions.find(
+            (jurisdiction) => jurisdiction.marketId === value
+          )?.id ?? ""
+      };
+    });
+  }
 
   useEffect(() => {
     if (state.created && state.projectId) {
@@ -594,10 +613,11 @@ function NewProjectDialog({
             <span className="text-xs font-medium text-slate-600">Canonical address</span>
             <input
               className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-              defaultValue={state.form.canonicalAddress}
               maxLength={255}
               name="canonicalAddress"
               required
+              value={formValues.canonicalAddress}
+              onChange={(event) => updateFormValue("canonicalAddress", event.target.value)}
             />
           </label>
 
@@ -607,16 +627,8 @@ function NewProjectDialog({
               className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
               name="marketId"
               required
-              value={selectedMarketId}
-              onChange={(event) => {
-                const nextMarketId = event.target.value;
-                const nextJurisdictionId =
-                  data.facets.jurisdictionOptions.find(
-                    (jurisdiction) => jurisdiction.marketId === nextMarketId
-                  )?.id ?? "";
-                setSelectedMarketId(nextMarketId);
-                setSelectedJurisdictionId(nextJurisdictionId);
-              }}
+              value={formValues.marketId}
+              onChange={(event) => updateFormValue("marketId", event.target.value)}
             >
               {data.facets.marketOptions.map((market) => (
                 <option key={market.id} value={market.id}>
@@ -633,7 +645,7 @@ function NewProjectDialog({
               name="jurisdictionId"
               required
               value={effectiveJurisdictionId}
-              onChange={(event) => setSelectedJurisdictionId(event.target.value)}
+              onChange={(event) => updateFormValue("jurisdictionId", event.target.value)}
             >
               {jurisdictionOptions.map((jurisdiction) => (
                 <option key={jurisdiction.id} value={jurisdiction.id}>
@@ -647,9 +659,34 @@ function NewProjectDialog({
             <span className="text-xs font-medium text-slate-600">Project name</span>
             <input
               className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-              defaultValue={state.form.projectName}
               maxLength={255}
               name="projectName"
+              value={formValues.projectName}
+              onChange={(event) => updateFormValue("projectName", event.target.value)}
+            />
+          </label>
+
+          <label>
+            <span className="text-xs font-medium text-slate-600">City</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              maxLength={120}
+              name="city"
+              placeholder="Defaults from jurisdiction"
+              value={formValues.city}
+              onChange={(event) => updateFormValue("city", event.target.value)}
+            />
+          </label>
+
+          <label>
+            <span className="text-xs font-medium text-slate-600">County</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              maxLength={120}
+              name="county"
+              placeholder="Defaults from market"
+              value={formValues.county}
+              onChange={(event) => updateFormValue("county", event.target.value)}
             />
           </label>
 
@@ -657,9 +694,10 @@ function NewProjectDialog({
             <span className="text-xs font-medium text-slate-600">ZIP</span>
             <input
               className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-              defaultValue={state.form.zip}
               maxLength={10}
               name="zip"
+              value={formValues.zip}
+              onChange={(event) => updateFormValue("zip", event.target.value)}
             />
           </label>
 
@@ -672,11 +710,17 @@ function NewProjectDialog({
           </div>
         </form>
 
-        {state.duplicateCandidates.length ? (
+        {state.duplicateCandidates.length && !duplicateFormUnchanged ? (
+          <p className="border-t border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+            Project details changed. Check again before creating.
+          </p>
+        ) : null}
+
+        {duplicateCandidates.length ? (
           <div className="border-t border-amber-200 bg-amber-50 px-4 py-3">
             <p className="text-sm font-semibold text-amber-950">Possible duplicate</p>
             <div className="mt-2 grid gap-2">
-              {state.duplicateCandidates.map((candidate) => (
+              {duplicateCandidates.map((candidate) => (
                 <div
                   className="flex flex-col gap-2 rounded-md border border-amber-200 bg-white p-2 text-sm md:flex-row md:items-center md:justify-between"
                   key={candidate.projectId}
@@ -703,6 +747,8 @@ function NewProjectDialog({
               <input name="marketId" type="hidden" value={state.form.marketId} />
               <input name="jurisdictionId" type="hidden" value={state.form.jurisdictionId} />
               <input name="projectName" type="hidden" value={state.form.projectName} />
+              <input name="city" type="hidden" value={state.form.city} />
+              <input name="county" type="hidden" value={state.form.county} />
               <input name="zip" type="hidden" value={state.form.zip} />
               <input name="forceCreate" type="hidden" value="true" />
               <Button disabled={pending} type="submit" variant="outline">
@@ -726,6 +772,44 @@ function ActionMessage({ state }: { state: ProjectCreateActionState }) {
       {state.message}
     </p>
   );
+}
+
+function initialNewProjectFormValues(data: PipelineData): ProjectCreateFormValues {
+  const marketId = data.facets.marketOptions[0]?.id ?? "";
+  const jurisdictionId =
+    data.facets.jurisdictionOptions.find(
+      (jurisdiction) => jurisdiction.marketId === marketId
+    )?.id ?? "";
+  return {
+    canonicalAddress: "",
+    marketId,
+    jurisdictionId,
+    projectName: "",
+    city: "",
+    county: "",
+    zip: ""
+  };
+}
+
+function projectCreateFormsEqual(
+  current: ProjectCreateFormValues,
+  submitted: ProjectCreateFormValues
+) {
+  return (
+    normalizeFormValue(current.canonicalAddress) ===
+      normalizeFormValue(submitted.canonicalAddress) &&
+    normalizeFormValue(current.marketId) === normalizeFormValue(submitted.marketId) &&
+    normalizeFormValue(current.jurisdictionId) ===
+      normalizeFormValue(submitted.jurisdictionId) &&
+    normalizeFormValue(current.projectName) === normalizeFormValue(submitted.projectName) &&
+    normalizeFormValue(current.city) === normalizeFormValue(submitted.city) &&
+    normalizeFormValue(current.county) === normalizeFormValue(submitted.county) &&
+    normalizeFormValue(current.zip) === normalizeFormValue(submitted.zip)
+  );
+}
+
+function normalizeFormValue(value: string) {
+  return value.trim();
 }
 
 export function PipelineClient({ data, initialFilters }: PipelineClientProps) {

@@ -191,6 +191,27 @@ def test_create_project_rejects_jurisdiction_from_other_market(
     assert response.json()["detail"] == "jurisdiction_id must belong to market_id."
 
 
+def test_create_project_rejects_blank_address(postgres_session: Session) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    market, jurisdiction = _market_and_jurisdiction("blank")
+    postgres_session.add_all([market, jurisdiction])
+    postgres_session.flush()
+    client = _client(postgres_session)
+
+    response = client.post(
+        "/projects",
+        json={
+            "canonical_address": "   ",
+            "market_id": str(market.id),
+            "jurisdiction_id": str(jurisdiction.id),
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "canonical_address is required."
+
+
 def _client(postgres_session: Session) -> TestClient:
     app = create_app(
         settings=Settings(
