@@ -9,6 +9,8 @@ from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.db.models import (
+    DeveloperAlias,
+    DeveloperRegistry,
     PipelineStatus,
     Priority,
     Project,
@@ -21,7 +23,10 @@ from tcg_pipeline.db.models import (
     StatusConfidence,
 )
 from tcg_pipeline.resolution.fields import FieldResolution
-from tcg_pipeline.review.contradictions import detect_project_contradictions
+from tcg_pipeline.review.contradictions import (
+    detect_project_contradictions,
+    values_contradict,
+)
 
 
 def test_detect_project_contradictions_creates_and_updates_single_active_item(
@@ -123,6 +128,86 @@ def test_detect_project_contradictions_flags_baseline_less_legacy_override(
     assert result.created_count == 1
     assert review_item.payload["field_name"] == "developer"
     assert review_item.payload["proposed_value"] == "New Dev"
+
+
+def test_detect_project_contradictions_ignores_developer_legal_suffix_noise(
+    postgres_session: Session,
+) -> None:
+    _ensure_contradiction_tables(postgres_session)
+    project = _project("924 DEVELOPER SUFFIX WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(_override(project, field_name="developer", value="Helio Capital LLC"))
+    postgres_session.flush()
+
+    result = detect_project_contradictions(
+        postgres_session,
+        project=project,
+        field_resolutions={
+            "developer": _resolution(
+                field_name="developer",
+                override_value="Helio Capital LLC",
+                candidate_value="Helio Capital, LLC",
+            )
+        },
+    )
+    postgres_session.flush()
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalar_one_or_none()
+
+    assert result.created_count == 0
+    assert review_item is None
+
+
+def test_detect_project_contradictions_uses_developer_registry_aliases(
+    postgres_session: Session,
+) -> None:
+    _ensure_contradiction_tables(postgres_session)
+    project = _project("925 DEVELOPER ALIAS WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    developer = DeveloperRegistry(canonical_name="Helio Group")
+    postgres_session.add(developer)
+    postgres_session.flush()
+    postgres_session.add(
+        DeveloperAlias(
+            developer_id=developer.id,
+            alias_name="Helio Capital LLC",
+        )
+    )
+    postgres_session.add(_override(project, field_name="developer", value="Helio Capital LLC"))
+    postgres_session.flush()
+
+    result = detect_project_contradictions(
+        postgres_session,
+        project=project,
+        field_resolutions={
+            "developer": _resolution(
+                field_name="developer",
+                override_value="Helio Capital LLC",
+                candidate_value="Helio Group",
+            )
+        },
+    )
+    postgres_session.flush()
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalar_one_or_none()
+
+    assert result.created_count == 0
+    assert review_item is None
+
+
+def test_unit_string_and_integer_values_do_not_contradict_when_equal() -> None:
+    assert values_contradict("total_units", "120", 120) is False
+    assert values_contradict("total_units", "120", "126") is True
 
 
 def test_detect_project_contradictions_invalidates_stale_item_and_drops_staged_decision(

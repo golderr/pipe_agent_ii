@@ -131,10 +131,19 @@ or silently ignoring the manual edit.
 C.i contradiction detection applies the field-specific thresholds from
 `EVIDENCE_LAYER_DECISIONS.md` §22: unit deltas must exceed 5, delivery dates
 must differ by more than 30 days unless recent article evidence is involved,
-developers compare after normalization/canonicalization, and pipeline status
-disagreements are always reviewable. Legacy `until_newer_evidence` overrides
-now use the same review-protected behavior instead of silently yielding to newer
-evidence.
+developers compare after normalization and confident registry canonicalization,
+and pipeline status disagreements are always reviewable. Legacy
+`until_newer_evidence` overrides now use the same review-protected behavior
+instead of silently yielding to newer evidence.
+
+For operational checks before a large apply/backfill, run:
+
+```bash
+tcg-pipeline detect-contradictions --market los_angeles
+```
+
+This is a dry run by default. Add `--apply` only after reviewing the reported
+created/updated/invalidated counts.
 
 The preview-write block is enforced by the Next.js server action guard. The
 FastAPI service still trusts Supabase JWT validation plus `ALLOWED_EMAILS` for

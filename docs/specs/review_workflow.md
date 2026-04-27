@@ -207,8 +207,8 @@ Per `EVIDENCE_LAYER_DECISIONS.md` §22, researcher overrides are review-protecte
 
 Two triggers:
 
-1. **After evidence ingest.** Any collector or backfill that writes new `evidence` rows calls `detect_contradictions(affected_project_ids)` at the end of its run.
-2. **After resolution re-run.** `resolve_project` calls contradiction detection for the single project at the end of `apply=True` runs.
+1. **After resolution re-run.** `resolve_project(apply=True)` calls contradiction detection for the single project after applying resolved values. The normal collector persistence path uses this trigger because changed evidence rows immediately re-run resolution.
+2. **After direct/deferred evidence ingest.** Backfills or other paths that write `evidence` rows without immediately applying project resolution call `detect_contradictions(affected_project_ids)` at the end of the write boundary. `scripts/backfill_evidence.py` does this for affected projects, and the CLI exposes `detect-contradictions` for dry-run/apply audits.
 
 ### 5.3 Algorithm
 
@@ -262,7 +262,7 @@ CONTRADICTION_RULES = {
     'total_units':        lambda cur, new: cur != new and abs(cur - new) > 5,
     'affordable_units':   lambda cur, new: cur != new and abs(cur - new) > 5,
     'market_rate_units':  lambda cur, new: cur != new and abs(cur - new) > 5,
-    'developer':          lambda cur, new: canonicalize(cur) != canonicalize(new),
+    'developer':          lambda cur, new: confident_canonicalize(cur) != confident_canonicalize(new),
     'product_type':       lambda cur, new: cur != new,
     'age_restriction':    lambda cur, new: cur != new,
     'date_delivery':      lambda cur, new, evidence: (
@@ -283,8 +283,12 @@ def resolve_project(project_id, apply=True):
         commit_resolved_values(project, field_resolutions)
     write_resolution_log(project, field_resolutions)
     if apply:
-        detect_contradictions([project_id])
+        detect_project_contradictions(project, field_resolutions)
 ```
+
+For operational audits before large apply runs, use `tcg-pipeline detect-contradictions`
+without `--apply` to report would-be created/updated/invalidated contradiction rows.
+Add `--apply` only after reviewing the dry-run count.
 
 ---
 

@@ -31,6 +31,7 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
     SourceRun,
 )
+from tcg_pipeline.db.researcher_overrides import upsert_researcher_overrides
 from tcg_pipeline.db.review_workflow import (
     REVIEW_DECISION_STATE_COMMITTED,
     REVIEW_DECISION_STATE_STAGED,
@@ -943,6 +944,117 @@ def test_commit_staged_custom_decision_applies_override_and_audit_identity(
     assert total_units_change.reviewed_by == "reviewer@example.com"
     assert total_units_change.reviewed_by_user_id == reviewer_id
     assert total_units_change.reviewed_by_email == "reviewer@example.com"
+
+
+def test_commit_staged_override_contradiction_accept_new_does_not_invalidate_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    project = _build_project(
+        "714 CONTRADICTION ACCEPT WAY LOS ANGELES CA 90012",
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        Evidence(
+            project_id=project.id,
+            source_type="costar",
+            source_tier=3,
+            ingest_method="manual",
+            source_record_id="contradiction-accept-baseline",
+            collected_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+            evidence_date=date(2026, 4, 1),
+            extracted_fields={"total_units": {"value": 100, "confidence": "medium"}},
+        )
+    )
+    upsert_researcher_overrides(
+        postgres_session,
+        project,
+        {
+            "total_units": {
+                "value": 212,
+                "set_by": "reviewer@example.com",
+                "set_at": "2026-04-27T12:00:00+00:00",
+                "mode": "review_protected",
+                "baseline": {
+                    "evidence_date": "2026-04-01",
+                    "collected_at": "2026-04-01T12:00:00+00:00",
+                    "source_tier": 3,
+                    "source_type": "costar",
+                },
+            }
+        },
+        set_by_user_id=reviewer_id,
+    )
+    postgres_session.add(
+        Evidence(
+            project_id=project.id,
+            source_type="costar",
+            source_tier=3,
+            ingest_method="manual",
+            source_record_id="contradiction-accept-newer",
+            collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            evidence_date=date(2026, 5, 1),
+            extracted_fields={"total_units": {"value": 260, "confidence": "medium"}},
+        )
+    )
+    postgres_session.flush()
+    resolve_project(project.id, postgres_session, apply=True, write_resolution_log=False)
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalar_one()
+
+    assert project.total_units == 212
+    assert review_item.state == REVIEW_ITEM_STATE_OPEN
+
+    staged = stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="accept_new",
+        notes="Accept newer evidence.",
+    )
+    commit_result = commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    postgres_session.refresh(review_item)
+    decision = postgres_session.get(ReviewDecision, staged.decision_id)
+    active_override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "total_units",
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one_or_none()
+    active_contradiction = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+            ReviewItem.state.in_([REVIEW_ITEM_STATE_OPEN, REVIEW_ITEM_STATE_STAGED]),
+        )
+    ).scalar_one_or_none()
+
+    assert commit_result.committed_decisions == 1
+    assert project.total_units == 260
+    assert active_override is None
+    assert active_contradiction is None
+    assert review_item.state == REVIEW_ITEM_STATE_COMMITTED
+    assert review_item.status == ReviewItemStatus.ACCEPTED
+    assert review_item.resolved_by == "reviewer@example.com"
+    assert decision is not None
+    assert decision.state == REVIEW_DECISION_STATE_COMMITTED
 
 
 def test_commit_staged_decisions_rolls_back_all_decisions_when_one_fails(

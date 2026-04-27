@@ -409,8 +409,8 @@ Migration: extract current JSONB overrides into rows in this table. During C.c, 
 
 The detection service runs in two triggers:
 
-1. **After evidence ingest** (collector finishes writing rows): for every project with an active override, check whether any newly-ingested evidence contradicts per §22.2 thresholds. If yes, create `override_contradiction` review items.
-2. **After resolution re-run** (any path that calls `resolve_project`): confirm overrides are still consistent with newest evidence; create review items for new contradictions not already tracked.
+1. **After resolution re-run** (any path that calls `resolve_project(apply=True)`): confirm overrides are still consistent with newest evidence; create review items for new contradictions not already tracked. The normal collector path uses this trigger after changed evidence writes.
+2. **After direct/deferred evidence ingest** (backfills or other paths that write evidence without immediate apply): call `detect_contradictions(affected_project_ids)` at the write boundary. `scripts/backfill_evidence.py` does this for inserted evidence rows, and `tcg-pipeline detect-contradictions` supports dry-run/apply audits.
 
 The service produces at most one active `override_contradiction` review item per `(project_id, field_name)`. If one already exists and is `open` or `staged`, update it instead of duplicating it. If the contradiction disappears, mark the active item `invalidated`; any staged decision for that invalidated item is dropped unless the item is currently being committed.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import inspect, select
@@ -11,6 +12,7 @@ from scripts.backfill_evidence import (
     _backfill_pipedream_snapshots,
     _backfill_source_record_evidence,
     _derive_source_record_evidence_date,
+    _detect_backfill_contradictions,
 )
 from tcg_pipeline.db.models import (
     Evidence,
@@ -220,3 +222,41 @@ def test_source_record_evidence_date_ignores_future_delivery_projection() -> Non
     )
 
     assert _derive_source_record_evidence_date(source_record) == date(2026, 4, 16)
+
+
+def test_backfill_contradiction_detection_uses_affected_project_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="920 BACKFILL CONTRADICTION WAY LOS ANGELES CA 90012",
+        raw_addresses=["920 Backfill Contradiction Way"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    result = BackfillEvidenceResult()
+    result.affected_project_ids.add(project.id)
+    calls: dict[str, set[object]] = {}
+
+    def fake_detect_contradictions(
+        _session: Session,
+        project_ids,
+    ) -> SimpleNamespace:
+        calls["project_ids"] = set(project_ids)
+        return SimpleNamespace(created_count=2, updated_count=1, invalidated_count=0)
+
+    monkeypatch.setattr(
+        "scripts.backfill_evidence.detect_contradictions",
+        fake_detect_contradictions,
+    )
+
+    output = _detect_backfill_contradictions(postgres_session, result=result)
+
+    assert calls["project_ids"] == {project.id}
+    assert output.contradiction_review_items_created == 2
+    assert output.contradiction_review_items_updated == 1
+    assert output.contradiction_review_items_invalidated == 0

@@ -746,6 +746,6 @@ The priority of the contradiction review item reflects the strength of the contr
 
 #### 22.10 Implementation scope
 
-- C.i added `tcg_pipeline.review.contradictions` as the first-class contradiction service. It is invoked during `resolve_project(apply=True)` and exposes a batch `detect_contradictions(project_ids)` entrypoint for ingest/backfill paths. See `docs/specs/data_model_changes.md` for the `ReviewItem` extension.
+- C.i added `tcg_pipeline.review.contradictions` as the first-class contradiction service. It is invoked during `resolve_project(apply=True)` and exposes a batch `detect_contradictions(project_ids)` entrypoint for direct/deferred evidence ingest and backfill paths. The `detect-contradictions` CLI provides dry-run/apply audits before large resolve/backfill operations. See `docs/specs/data_model_changes.md` for the `ReviewItem` extension.
 - `review_workflow.py` accepts new, keep-old, defer, and custom decisions for contradiction rows. The old `researcher_override_superseded` flag path has been replaced by `override_contradiction` review item emission.
 - UI surfaces the review items as normal queue entries with the `⚠ contradicts your override` warning.

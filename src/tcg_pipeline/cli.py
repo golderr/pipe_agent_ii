@@ -39,6 +39,9 @@ from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIng
 from tcg_pipeline.market_config import get_market_config
 from tcg_pipeline.resolution import resolve_project
 from tcg_pipeline.resolution.engine import LOGGED_FIELDS
+from tcg_pipeline.review.contradictions import (
+    detect_contradictions as detect_override_contradictions,
+)
 from tcg_pipeline.settings import get_settings
 from tcg_pipeline.status_rules import get_status_evidence_rule
 from tcg_pipeline.utils.logging import configure_logging
@@ -566,10 +569,10 @@ def resolve_all_command(
         min=1,
         help="Projects to resolve per transaction.",
     ),
-    start_after: uuid.UUID | None = typer.Option(
-        None,
-        help="Resume after this Project.id using keyset pagination.",
-    ),
+    start_after: Annotated[
+        uuid.UUID | None,
+        typer.Option(help="Resume after this Project.id using keyset pagination."),
+    ] = None,
 ) -> None:
     """Resolve projects from evidence in shadow-mode or apply mode."""
     resolve_all(
@@ -693,6 +696,105 @@ def resolve_all(
             "Shadow mode note: resolution_log stores computed canonical developer values "
             "even though developer registry rows and aliases are not persisted."
         )
+
+
+@app.command("detect-contradictions")
+def detect_contradictions_command(
+    market: str | None = typer.Option(
+        None,
+        help="Optional market slug filter, e.g. los_angeles.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Commit detected contradiction review items. Defaults to dry-run rollback.",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        min=1,
+        help="Optional max project count to scan.",
+    ),
+    batch_size: int = typer.Option(
+        100,
+        min=1,
+        help="Projects to scan per transaction.",
+    ),
+    start_after: Annotated[
+        uuid.UUID | None,
+        typer.Option(help="Resume after this Project.id using keyset pagination."),
+    ] = None,
+) -> None:
+    """Detect override contradictions in dry-run or apply mode."""
+    detect_contradictions_for_projects(
+        market=market,
+        apply=apply,
+        limit=limit,
+        batch_size=batch_size,
+        start_after=start_after,
+    )
+
+
+def detect_contradictions_for_projects(
+    *,
+    market: str | None = None,
+    apply: bool = False,
+    limit: int | None = None,
+    batch_size: int = 100,
+    start_after: uuid.UUID | None = None,
+) -> None:
+    """Detect override contradictions in dry-run or apply mode."""
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        project_ids_to_process = _fetch_project_ids(
+            session,
+            market=market,
+            after_project_id=start_after,
+            limit=limit,
+        )
+
+    total_projects = 0
+    total_created = 0
+    total_updated = 0
+    total_invalidated = 0
+    last_project_id = start_after
+    batch_number = 0
+
+    for start_index in range(0, len(project_ids_to_process), batch_size):
+        project_ids = project_ids_to_process[start_index : start_index + batch_size]
+        if not project_ids:
+            break
+        with session_factory() as session:
+            batch_number += 1
+            try:
+                result = detect_override_contradictions(session, project_ids)
+                session.flush()
+                if apply:
+                    session.commit()
+                else:
+                    session.rollback()
+            except Exception:
+                session.rollback()
+                raise
+
+        total_projects += len(project_ids)
+        total_created += result.created_count
+        total_updated += result.updated_count
+        total_invalidated += result.invalidated_count
+        last_project_id = project_ids[-1]
+        typer.echo(
+            f"Batch {batch_number}: projects={len(project_ids)} "
+            f"created={result.created_count} "
+            f"updated={result.updated_count} "
+            f"invalidated={result.invalidated_count} "
+            f"last_project_id={last_project_id}"
+        )
+
+    typer.echo(f"Projects scanned: {total_projects}")
+    typer.echo(f"Contradiction review items created: {total_created}")
+    typer.echo(f"Contradiction review items updated: {total_updated}")
+    typer.echo(f"Contradiction review items invalidated: {total_invalidated}")
+    typer.echo(f"Last project id: {last_project_id or 'n/a'}")
+    typer.echo(f"Apply mode: {apply}")
 
 
 def _clear_resolution_log(session, *, market: str | None) -> None:

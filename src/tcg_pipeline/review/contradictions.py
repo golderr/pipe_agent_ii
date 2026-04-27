@@ -18,16 +18,22 @@ from tcg_pipeline.db.models import (
     ReviewItemStatus,
     ReviewItemType,
 )
+from tcg_pipeline.developer.registry import (
+    canonicalize_developer_name,
+    normalize_developer_name,
+)
 from tcg_pipeline.resolution.fields import FieldResolution, normalize_comparable
 
 ACTIVE_REVIEW_STATES = {"open", "staged"}
 REVIEW_PROTECTED_MODES = {"review_protected", "until_newer_evidence", "sticky", None}
+CONTRADICTION_DETECTION_ACTOR = "contradiction_detection"
 NEWS_SOURCE_TYPES = {"news_article", "news", "article", "bizjournals"}
 UNIT_FIELDS = {"total_units", "affordable_units", "market_rate_units"}
 LARGE_UNIT_DELTA = 50
 SMALL_UNIT_DELTA = 5
 DELIVERY_DATE_DELTA_DAYS = 30
 RECENT_ARTICLE_DAYS = 180
+CONFIDENT_DEVELOPER_MATCH_TYPES = {"exact_canonical", "exact_alias", "fuzzy_auto"}
 
 
 @dataclass(slots=True)
@@ -60,6 +66,7 @@ def detect_contradictions(
 ) -> ContradictionDetectionResult:
     """Detect override contradictions for projects using a dry-run resolution pass."""
 
+    # Circular import: resolve_project calls back into this module after apply=True runs.
     from tcg_pipeline.resolution import resolve_project
 
     result = ContradictionDetectionResult()
@@ -97,7 +104,7 @@ def detect_project_contradictions(
     contradicted_fields: set[str] = set()
 
     for field_name, resolution in field_resolutions.items():
-        if not is_override_contradiction(field_name, resolution):
+        if not is_override_contradiction(session, field_name, resolution):
             continue
 
         contradicted_fields.add(field_name)
@@ -136,7 +143,11 @@ def detect_project_contradictions(
     return result
 
 
-def is_override_contradiction(field_name: str, resolution: FieldResolution) -> bool:
+def is_override_contradiction(
+    session: Session,
+    field_name: str,
+    resolution: FieldResolution,
+) -> bool:
     if not resolution.rule_applied.startswith("researcher_override"):
         return False
     if resolution.metadata.get("mode") not in REVIEW_PROTECTED_MODES:
@@ -150,12 +161,15 @@ def is_override_contradiction(field_name: str, resolution: FieldResolution) -> b
         resolution.value,
         resolution.metadata.get("candidate_value"),
         resolution,
+        session=session,
     )
 
 
 def _candidate_can_reopen_review(resolution: FieldResolution) -> bool:
     if resolution.metadata.get("candidate_is_newer_than_baseline"):
         return True
+    # Baseline-less overrides are legacy rows. New C.d/C.h write paths should
+    # capture baselines; legacy rows must still surface divergent evidence once.
     return not isinstance(resolution.metadata.get("baseline"), Mapping)
 
 
@@ -164,6 +178,8 @@ def values_contradict(
     override_value: Any,
     candidate_value: Any,
     resolution: FieldResolution | None = None,
+    *,
+    session: Session | None = None,
 ) -> bool:
     override_normalized = normalize_comparable(override_value)
     candidate_normalized = normalize_comparable(candidate_value)
@@ -183,9 +199,37 @@ def values_contradict(
             return True
         return _candidate_is_recent_article(resolution)
     if field_name == "developer":
-        return str(override_normalized or "").strip().lower() != str(
-            candidate_normalized or ""
-        ).strip().lower()
+        return _developers_contradict(session, override_normalized, candidate_normalized)
+    return True
+
+
+def _developers_contradict(
+    session: Session | None,
+    override_value: Any,
+    candidate_value: Any,
+) -> bool:
+    override_text = _coerce_text(override_value)
+    candidate_text = _coerce_text(candidate_value)
+    if override_text is None or candidate_text is None:
+        return override_text != candidate_text
+
+    override_normalized = normalize_developer_name(override_text)
+    candidate_normalized = normalize_developer_name(candidate_text)
+    if override_normalized == candidate_normalized:
+        return False
+    if session is None:
+        return True
+
+    override_canonical = canonicalize_developer_name(session, override_text, persist=False)
+    candidate_canonical = canonicalize_developer_name(session, candidate_text, persist=False)
+    if (
+        override_canonical.match_type in CONFIDENT_DEVELOPER_MATCH_TYPES
+        and candidate_canonical.match_type in CONFIDENT_DEVELOPER_MATCH_TYPES
+        and override_canonical.canonical_developer_id is not None
+        and override_canonical.canonical_developer_id
+        == candidate_canonical.canonical_developer_id
+    ):
+        return False
     return True
 
 
@@ -283,9 +327,10 @@ def _invalidate_review_item(review_item: ReviewItem) -> None:
     review_item.state = "invalidated"
     review_item.status = ReviewItemStatus.OPEN
     review_item.resolved_at = now
-    review_item.resolved_by = "contradiction_detection"
+    review_item.resolved_by = CONTRADICTION_DETECTION_ACTOR
     session = object_session(review_item)
     for decision in list(review_item.decisions):
+        # TODO(C.j): expose dropped staged decisions as user-facing queue notifications.
         if decision.state == "staged" and session is not None:
             session.delete(decision)
 
@@ -334,3 +379,10 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
     return value
+
+
+def _coerce_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

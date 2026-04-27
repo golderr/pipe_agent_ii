@@ -6,6 +6,7 @@ import hashlib
 import json
 import sys
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from tcg_pipeline.db.models import (  # noqa: E402
     ProjectSourceRecord,
 )
 from tcg_pipeline.ingesters.pipedream import PIPEDREAM_CREATED_BY  # noqa: E402
+from tcg_pipeline.review.contradictions import detect_contradictions  # noqa: E402
 from tcg_pipeline.source_tiers import get_logical_source_type, get_source_tier  # noqa: E402
 
 PIPEDREAM_SNAPSHOT_FIELDS = (
@@ -95,6 +97,10 @@ class BackfillEvidenceResult:
     inserted_pipedream_snapshots: int = 0
     skipped_duplicates: int = 0
     skipped_pipedream_source_records: int = 0
+    affected_project_ids: set[Any] = dataclass_field(default_factory=set)
+    contradiction_review_items_created: int = 0
+    contradiction_review_items_updated: int = 0
+    contradiction_review_items_invalidated: int = 0
 
 
 def main() -> None:
@@ -113,6 +119,13 @@ def main() -> None:
     print(f"Inserted pipedream snapshot rows: {result.inserted_pipedream_snapshots}")
     print(f"Skipped duplicate evidence rows: {result.skipped_duplicates}")
     print(f"Skipped pipedream PSR rows: {result.skipped_pipedream_source_records}")
+    print(f"Affected projects scanned for contradictions: {len(result.affected_project_ids)}")
+    print(
+        "Contradiction review items: "
+        f"created={result.contradiction_review_items_created}, "
+        f"updated={result.contradiction_review_items_updated}, "
+        f"invalidated={result.contradiction_review_items_invalidated}"
+    )
     print(f"Committed: {not args.dry_run}")
 
 
@@ -122,6 +135,7 @@ def backfill_evidence(*, dry_run: bool = False) -> BackfillEvidenceResult:
         result = BackfillEvidenceResult()
         result = _backfill_source_record_evidence(session, result=result)
         result = _backfill_pipedream_snapshots(session, result=result)
+        result = _detect_backfill_contradictions(session, result=result)
         if dry_run:
             session.rollback()
         else:
@@ -180,6 +194,8 @@ def _backfill_source_record_evidence(
             )
         )
         result.inserted_source_record_rows += 1
+        if source_record.project_id is not None:
+            result.affected_project_ids.add(source_record.project_id)
 
     return result
 
@@ -257,7 +273,24 @@ def _backfill_pipedream_snapshots(
             )
         )
         result.inserted_pipedream_snapshots += 1
+        result.affected_project_ids.add(project.id)
 
+    return result
+
+
+def _detect_backfill_contradictions(
+    session: Session,
+    *,
+    result: BackfillEvidenceResult,
+) -> BackfillEvidenceResult:
+    if not result.affected_project_ids:
+        return result
+
+    session.flush()
+    contradiction_result = detect_contradictions(session, result.affected_project_ids)
+    result.contradiction_review_items_created = contradiction_result.created_count
+    result.contradiction_review_items_updated = contradiction_result.updated_count
+    result.contradiction_review_items_invalidated = contradiction_result.invalidated_count
     return result
 
 
