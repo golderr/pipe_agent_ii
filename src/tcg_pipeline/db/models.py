@@ -107,6 +107,7 @@ class ReviewItemType(str, enum.Enum):
     POSSIBLE_MATCH = "possible_match"
     POTENTIAL_STALL = "potential_stall"
     LOW_CONFIDENCE = "low_confidence"
+    OVERRIDE_CONTRADICTION = "override_contradiction"
 
 
 class ReviewItemStatus(str, enum.Enum):
@@ -831,6 +832,12 @@ class ReviewItem(Base):
     priority: Mapped[Priority] = mapped_column(PRIORITY_ENUM, nullable=False)
     match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    contradicted_override_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("researcher_overrides.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    contradiction_priority: Mapped[str | None] = mapped_column(String(20), nullable=True)
     assigned_to: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

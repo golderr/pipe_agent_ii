@@ -131,11 +131,12 @@ def apply_override(
 
     mode = override_payload.get("mode") or "sticky"
     baseline = override_payload.get("baseline")
-    if mode == "until_newer_evidence" and _candidate_is_newer(
+    candidate_is_newer = _candidate_is_newer(
         candidate,
         baseline,
         source_priority=source_priority,
-    ):
+    )
+    if mode == "until_newer_evidence" and candidate_is_newer:
         candidate.metadata = dict(candidate.metadata)
         candidate.metadata.update(
             {
@@ -169,6 +170,17 @@ def apply_override(
             "note": override_payload.get("note"),
             "mode": mode,
             "baseline": baseline,
+            "candidate_value": normalize_comparable(candidate.value),
+            "candidate_rule_applied": candidate.rule_applied,
+            "candidate_confidence": candidate.confidence.value,
+            "candidate_evidence_ids": [str(evidence_id) for evidence_id in candidate.evidence_ids],
+            "candidate_evidence_date": (
+                candidate.evidence_date.isoformat()
+                if candidate.evidence_date is not None
+                else None
+            ),
+            "candidate_evidence_frontier": candidate.metadata.get("evidence_frontier"),
+            "candidate_is_newer_than_baseline": candidate_is_newer,
         },
     )
 

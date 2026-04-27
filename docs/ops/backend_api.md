@@ -122,6 +122,21 @@ The API writes/clears `researcher_overrides`, keeps the legacy
 `resolve_project(apply=True)`, updates project edit metadata, and writes a
 `change_log` row with `change_type = researcher_override`.
 
+New manual Core-field edits use `mode = review_protected`. They are not
+permanent sticky locks: the manual value remains current, but when newer
+evidence would change that field under the resolver's field rules, the resolver
+creates an `override_contradiction` review item instead of silently overwriting
+or silently ignoring the manual edit.
+
+For C.d Core overrides, the trigger is intentionally strict: any newer
+auto-resolved value that differs from the manual value gets surfaced for review.
+Later C.i work can expand priority and batching rules without silently masking
+manual-field updates.
+
+The preview-write block is enforced by the Next.js server action guard. The
+FastAPI service still trusts Supabase JWT validation plus `ALLOWED_EMAILS` for
+direct API calls.
+
 ## C.c Migration Verification
 
 Before C.d write endpoints are enabled, verify the `researcher_overrides`

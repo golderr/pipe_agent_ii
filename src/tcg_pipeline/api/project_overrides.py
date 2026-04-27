@@ -62,6 +62,9 @@ def set_project_override(
     now = datetime.now(UTC)
     actor = _actor_for_audit(user)
     old_value = _project_field_value(project, field_name)
+    # Capture the resolver frontier before the manual value is written. For
+    # review-protected overrides this baseline is audit data and the point of
+    # comparison for future contradiction review items.
     pre_override_resolution = resolve_project(
         project.id,
         session,
@@ -78,7 +81,7 @@ def set_project_override(
                 "set_at": now.isoformat(),
                 "note": _clean_text(note),
                 "source_url": _clean_text(source_url),
-                "mode": "sticky",
+                "mode": "review_protected",
                 "baseline": _baseline_for_resolution(
                     pre_override_resolution.field_resolutions.get(field_name)
                 ),
@@ -203,6 +206,8 @@ def _coerce_override_value(field_name: str, value: Any) -> Any:
 
 def _coerce_nonnegative_int(field_name: str, value: Any) -> int:
     if isinstance(value, bool):
+        raise HTTPException(status_code=422, detail=f"{field_name} must be a non-negative integer.")
+    if isinstance(value, float) and not value.is_integer():
         raise HTTPException(status_code=422, detail=f"{field_name} must be a non-negative integer.")
     try:
         parsed = int(value)

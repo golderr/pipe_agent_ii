@@ -20,7 +20,10 @@ from tcg_pipeline.db.models import (
     PipelineStatus,
     Project,
     ResearcherOverride,
+    ReviewItem,
+    ReviewItemType,
 )
+from tcg_pipeline.resolution import resolve_project
 from tcg_pipeline.settings import Settings
 
 USER_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -91,7 +94,7 @@ def test_set_project_override_writes_table_resolves_and_logs(
     assert override.value == 212
     assert override.set_by_user_id == USER_ID
     assert override.set_by_label == "allowed@example.com"
-    assert override.mode == "sticky"
+    assert override.mode == "review_protected"
     assert override.note == "Confirmed by researcher."
     assert override.source_url == "https://example.com/source"
     assert override.baseline is not None
@@ -185,6 +188,126 @@ def test_set_project_override_rejects_invalid_value(postgres_session: Session) -
     assert response.json()["detail"] == "total_units must be a non-negative integer."
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected"),
+    [
+        ("pipeline_status", "Approved", "Approved"),
+        ("product_type", "Condo", "Condo"),
+        ("age_restriction", "Senior", "Senior"),
+        ("date_delivery", "2027-07-01", "2027-07-01"),
+        ("developer", "  Example Development  ", "Example Development"),
+    ],
+)
+def test_set_project_override_coerces_supported_core_values(
+    postgres_session: Session,
+    field_name: str,
+    value: str,
+    expected: str,
+) -> None:
+    _ensure_override_api_tables(postgres_session)
+    project = _project(f"914 {field_name} WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    client = _client(postgres_session)
+
+    response = client.post(
+        f"/projects/{project.id}/override",
+        json={"field_name": field_name, "value": value},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == field_name,
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert override.value == expected
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("pipeline_status", "approved", "pipeline_status must be one of:"),
+        ("product_type", "Mixed Use", "product_type must be one of:"),
+        ("age_restriction", "Adults", "age_restriction must be one of:"),
+        ("date_delivery", "2026/04/26", "date_delivery must be a YYYY-MM-DD date."),
+        ("developer", "   ", "developer must be a non-empty string."),
+        ("total_units", 212.7, "total_units must be a non-negative integer."),
+    ],
+)
+def test_set_project_override_rejects_invalid_core_values(
+    postgres_session: Session,
+    field_name: str,
+    value: Any,
+    message: str,
+) -> None:
+    _ensure_override_api_tables(postgres_session)
+    project = _project(f"915 INVALID {field_name} WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    client = _client(postgres_session)
+
+    response = client.post(
+        f"/projects/{project.id}/override",
+        json={"field_name": field_name, "value": value},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 422
+    assert message in response.json()["detail"]
+
+
+@pytest.mark.parametrize("newer_value", [216, 260])
+def test_newer_evidence_against_manual_override_creates_review_item(
+    postgres_session: Session,
+    newer_value: int,
+) -> None:
+    _ensure_override_api_tables(postgres_session)
+    project = _project("916 CONTRADICTION WAY LOS ANGELES CA 90012", total_units=100)
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(_total_units_evidence(project.id, 100, record_suffix="baseline"))
+    postgres_session.flush()
+    client = _client(postgres_session)
+
+    set_response = client.post(
+        f"/projects/{project.id}/override",
+        json={"field_name": "total_units", "value": 212},
+        headers=_auth_headers(),
+    )
+    assert set_response.status_code == 200
+    postgres_session.add(
+        _total_units_evidence(
+            project.id,
+            newer_value,
+            record_suffix="newer",
+            collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            evidence_date=date(2026, 5, 1),
+        )
+    )
+    postgres_session.flush()
+
+    resolve_project(project.id, postgres_session, apply=True, write_resolution_log=False)
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalar_one()
+
+    assert project.total_units == 212
+    assert review_item.priority.value == "medium"
+    assert review_item.contradiction_priority == "medium"
+    assert review_item.payload["field_name"] == "total_units"
+    assert review_item.payload["current_override"]["value"] == 212
+    assert review_item.payload["proposed_value"] == newer_value
+
+
 def test_set_project_override_returns_404_for_missing_project(
     postgres_session: Session,
 ) -> None:
@@ -246,14 +369,21 @@ def _project(canonical_address: str, **overrides: Any) -> Project:
     return Project(canonical_address=canonical_address, **defaults)
 
 
-def _total_units_evidence(project_id: uuid.UUID, value: int) -> Evidence:
+def _total_units_evidence(
+    project_id: uuid.UUID,
+    value: int,
+    *,
+    record_suffix: str | None = None,
+    collected_at: datetime | None = None,
+    evidence_date: date | None = None,
+) -> Evidence:
     return Evidence(
         project_id=project_id,
         source_type="costar",
         source_tier=3,
         ingest_method="manual",
-        source_record_id=f"costar-units-{project_id}",
-        collected_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
-        evidence_date=date(2026, 4, 26),
+        source_record_id=f"costar-units-{project_id}-{record_suffix or value}",
+        collected_at=collected_at or datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        evidence_date=evidence_date or date(2026, 4, 26),
         extracted_fields={"total_units": {"value": value, "confidence": "medium"}},
     )
