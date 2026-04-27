@@ -95,6 +95,15 @@ export type FieldProvenance = {
   evidence: EvidenceSummary[];
 };
 
+export type FieldEditConfig = {
+  enabled: boolean;
+  kind: "text" | "number" | "date" | "select";
+  value: string | null;
+  options: string[] | null;
+  isOverridden: boolean;
+  info: string;
+};
+
 export type ProjectField = {
   key: string;
   label: string;
@@ -103,6 +112,7 @@ export type ProjectField = {
   state: FieldState;
   note: string | null;
   provenance: FieldProvenance;
+  edit: FieldEditConfig | null;
 };
 
 export type ProjectDetailSection = {

@@ -46,3 +46,15 @@ export function requireSupabaseConfig() {
 
   return { url, anonKey };
 }
+
+export function requireApiBaseUrl() {
+  const rawUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.API_BASE_URL;
+  if (!rawUrl) {
+    throw new Error("API base URL missing. Set NEXT_PUBLIC_API_BASE_URL for Phase C write paths.");
+  }
+  return rawUrl.replace(/\/$/, "");
+}
+
+export function previewWritesEnabled() {
+  return process.env.ENABLE_PREVIEW_WRITES === "true";
+}

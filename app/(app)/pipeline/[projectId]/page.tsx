@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { AlertCircle, ArrowLeft, ChevronRight, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
+import { FieldEditControl } from "./field-edit-control";
 import { getProjectDetailData } from "@/lib/project-detail/data";
 import { compactStatus, statusStyle } from "@/lib/status";
 import type {
@@ -366,7 +367,7 @@ function SnapshotTab({ projectId, sections }: { projectId: string; sections: Pro
         <div className="mt-3 space-y-3 text-sm">
           <LegendItem className="bg-amber-50 text-amber-900" label="In review batch" />
           <LegendItem className="bg-white text-slate-700" label="Unchanged" />
-          <LegendItem className="bg-slate-50 text-slate-700" label="Read-only in Phase B" />
+          <LegendItem className="bg-slate-50 text-slate-700" label="Class-specific editing" />
         </div>
         <div className="mt-4 border-t border-slate-200 pt-3">
           <p className="text-xs font-medium uppercase text-slate-500">Source badges</p>
@@ -711,7 +712,7 @@ function OverridesTab({ overrideRows }: { overrideRows: ProjectOverrideRow[] }) 
       <section className="rounded-md border border-slate-200 bg-white">
         <div className="border-b border-slate-200 px-4 py-3">
           <h2 className="text-sm font-semibold text-slate-950">Overrides</h2>
-          <p className="mt-0.5 text-xs text-slate-500">Active researcher overrides from the legacy project JSONB column.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Active researcher overrides synchronized through the table-backed write path.</p>
         </div>
         {overrideRows.length ? (
           <div className="divide-y divide-slate-100">
@@ -725,10 +726,10 @@ function OverridesTab({ overrideRows }: { overrideRows: ProjectOverrideRow[] }) 
       </section>
 
       <aside className="h-fit rounded-md border border-slate-200 bg-white p-4 text-sm">
-        <h2 className="font-semibold text-slate-950">Phase B behavior</h2>
+        <h2 className="font-semibold text-slate-950">Override behavior</h2>
         <p className="mt-2 text-slate-600">
-          Overrides are read-only here. Edit, clear, superseded history, and per-override notes move to Phase C when
-          overrides are promoted into a dedicated table.
+          Core field edits write researcher overrides through FastAPI and re-run resolution. Superseded history and
+          contradiction queue items are still scheduled for later Phase C work.
         </p>
         <p className="mt-3 text-xs text-slate-500">
           Legacy scalar overrides may be treated as sticky by the resolver even when this tab labels the stored JSONB
@@ -1013,6 +1014,7 @@ function FieldRow({ field, projectId }: { field: ProjectField; projectId: string
         ) : (
           sourceBadge
         )}
+        <FieldEditControl field={field} projectId={projectId} />
       </div>
       <EvidencePopover field={field} />
     </div>

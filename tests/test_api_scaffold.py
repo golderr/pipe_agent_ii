@@ -151,8 +151,6 @@ def test_auth_errors_are_mapped_to_http_responses() -> None:
         ("POST", "/projects"),
         ("GET", f"/projects/{PROJECT_ID}"),
         ("POST", f"/projects/{PROJECT_ID}/field"),
-        ("POST", f"/projects/{PROJECT_ID}/override"),
-        ("DELETE", f"/projects/{PROJECT_ID}/override/total_units"),
         ("POST", f"/projects/{PROJECT_ID}/note"),
         ("POST", f"/projects/{PROJECT_ID}/relationship"),
         ("GET", "/review/queue"),

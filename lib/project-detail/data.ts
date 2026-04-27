@@ -11,6 +11,7 @@ import type {
   ProjectResolutionRow,
   ProjectStatusHistoryRow,
   ProjectDetailSection,
+  FieldEditConfig,
   ProjectField,
   SourceBadge
 } from "@/lib/project-detail/types";
@@ -123,7 +124,42 @@ type FieldDefinition = {
   label: string;
   className: FieldClass;
   note?: string;
+  edit?: Omit<FieldEditConfig, "enabled" | "value" | "isOverridden">;
 };
+
+const PIPELINE_STATUS_OPTIONS = [
+  "Conceptual",
+  "Proposed",
+  "Pending",
+  "Approved",
+  "Under Construction",
+  "Pre-Leasing/Pre-Selling",
+  "Complete",
+  "Stalled",
+  "Inactive",
+  "Delete-Duplicate",
+  "Delete-Outside Market Area",
+  "Delete-Not Residential"
+];
+
+const PRODUCT_TYPE_OPTIONS = [
+  "Apartment",
+  "Condo",
+  "Single-Family",
+  "Townhome",
+  "Micro/Co-Living",
+  "Other",
+  "Unknown"
+];
+
+const AGE_RESTRICTION_OPTIONS = [
+  "Non Age-Restricted",
+  "Senior",
+  "Student",
+  "Unknown"
+];
+
+const CORE_OVERRIDE_INFO = "Your edit holds the value. New contradicting evidence will create a review item.";
 
 const PROJECT_SELECT = [
   "id",
@@ -211,15 +247,55 @@ const PROJECT_SELECT = [
 ].join(", ");
 
 const CORE_FIELDS: FieldDefinition[] = [
-  { key: "pipeline_status", label: "Status", className: "evidence" },
+  {
+    key: "pipeline_status",
+    label: "Status",
+    className: "evidence",
+    edit: { kind: "select", options: PIPELINE_STATUS_OPTIONS, info: CORE_OVERRIDE_INFO }
+  },
   { key: "status_date", label: "Status date", className: "computed" },
-  { key: "total_units", label: "Total units", className: "evidence" },
-  { key: "affordable_units", label: "Affordable units", className: "evidence" },
-  { key: "market_rate_units", label: "Market-rate units", className: "evidence" },
-  { key: "developer", label: "Developer", className: "evidence" },
-  { key: "product_type", label: "Product type", className: "evidence" },
-  { key: "age_restriction", label: "Age restriction", className: "evidence" },
-  { key: "date_delivery", label: "Delivery", className: "evidence" }
+  {
+    key: "total_units",
+    label: "Total units",
+    className: "evidence",
+    edit: { kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+  },
+  {
+    key: "affordable_units",
+    label: "Affordable units",
+    className: "evidence",
+    edit: { kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+  },
+  {
+    key: "market_rate_units",
+    label: "Market-rate units",
+    className: "evidence",
+    edit: { kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+  },
+  {
+    key: "developer",
+    label: "Developer",
+    className: "evidence",
+    edit: { kind: "text", options: null, info: CORE_OVERRIDE_INFO }
+  },
+  {
+    key: "product_type",
+    label: "Product type",
+    className: "evidence",
+    edit: { kind: "select", options: PRODUCT_TYPE_OPTIONS, info: CORE_OVERRIDE_INFO }
+  },
+  {
+    key: "age_restriction",
+    label: "Age restriction",
+    className: "evidence",
+    edit: { kind: "select", options: AGE_RESTRICTION_OPTIONS, info: CORE_OVERRIDE_INFO }
+  },
+  {
+    key: "date_delivery",
+    label: "Delivery",
+    className: "evidence",
+    edit: { kind: "date", options: null, info: CORE_OVERRIDE_INFO }
+  }
 ];
 
 const SOURCE_FACT_FIELDS: FieldDefinition[] = [
@@ -531,15 +607,54 @@ function systemBadge(): SourceBadge {
   return { label: "System", tone: "system", sourceType: null, date: null };
 }
 
-function userBadge(): SourceBadge {
-  return { label: "TCG", tone: "user", sourceType: null, date: null };
+function userBadge(label = "TCG", date: string | null = null): SourceBadge {
+  return { label, tone: "user", sourceType: "researcher_override", date };
+}
+
+function activeOverridePayload(
+  overrides: Record<string, unknown> | null,
+  fieldName: string
+) {
+  if (!isObject(overrides)) {
+    return null;
+  }
+  const payload = overrides[fieldName];
+  return isObject(payload) ? payload : payload === undefined ? null : { value: payload };
+}
+
+function overrideBadgeLabel(payload: Record<string, unknown>) {
+  const setBy = typeof payload.set_by === "string" ? payload.set_by.trim() : "";
+  if (!setBy) {
+    return "TCG";
+  }
+  const emailLocalPart = setBy.split("@", 1)[0] ?? setBy;
+  const initials = emailLocalPart
+    .split(/[._\-\s]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+  return initials || "TCG";
 }
 
 function buildFieldProvenance(
   field: FieldDefinition,
   resolutionByField: Map<string, RawFieldResolution>,
-  evidenceById: Map<string, RawEvidence>
+  evidenceById: Map<string, RawEvidence>,
+  overrides: Record<string, unknown> | null
 ): FieldProvenance {
+  const activeOverride = activeOverridePayload(overrides, field.key);
+  if (activeOverride) {
+    return {
+      sourceBadge: userBadge(
+        overrideBadgeLabel(activeOverride),
+        typeof activeOverride.set_at === "string" ? activeOverride.set_at : null
+      ),
+      rule: "researcher_override",
+      confidence: "high",
+      evidence: []
+    };
+  }
+
   const resolution = resolutionByField.get(field.key);
   const evidence = (resolution?.evidence_ids ?? [])
     .map((id) => evidenceById.get(id))
@@ -744,13 +859,42 @@ function valueForField(project: RawProject, key: string, jurisdictionName: strin
   return project[key];
 }
 
+function editValueForField(project: RawProject, key: string) {
+  const value = project[key];
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (key === "date_delivery" && typeof value === "string") {
+    return value.slice(0, 10);
+  }
+  return String(value);
+}
+
+function editConfigForField(
+  definition: FieldDefinition,
+  project: RawProject,
+  overrides: Record<string, unknown> | null
+): FieldEditConfig | null {
+  if (!definition.edit) {
+    return null;
+  }
+
+  return {
+    ...definition.edit,
+    enabled: true,
+    value: editValueForField(project, definition.key),
+    isOverridden: Boolean(activeOverridePayload(overrides, definition.key))
+  };
+}
+
 function buildFields(
   definitions: FieldDefinition[],
   project: RawProject,
   jurisdictionName: string | null,
   pendingFields: Set<string>,
   resolutionByField: Map<string, RawFieldResolution>,
-  evidenceById: Map<string, RawEvidence>
+  evidenceById: Map<string, RawEvidence>,
+  overrides: Record<string, unknown> | null
 ): ProjectField[] {
   return definitions.map((definition) => ({
     key: definition.key,
@@ -759,7 +903,8 @@ function buildFields(
     fieldClass: definition.className,
     state: pendingFields.has(definition.key) ? "review" : "default",
     note: definition.note ?? null,
-    provenance: buildFieldProvenance(definition, resolutionByField, evidenceById)
+    provenance: buildFieldProvenance(definition, resolutionByField, evidenceById, overrides),
+    edit: editConfigForField(definition, project, overrides)
   }));
 }
 
@@ -803,7 +948,8 @@ function makeRelationshipField(key: string, label: string, value: string): Proje
       rule: null,
       confidence: null,
       evidence: []
-    }
+    },
+    edit: null
   };
 }
 
@@ -955,7 +1101,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById
+        evidenceById,
+        rawProject.researcher_override
       )
     },
     {
@@ -968,7 +1115,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById
+        evidenceById,
+        rawProject.researcher_override
       )
     },
     {
@@ -981,7 +1129,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById
+        evidenceById,
+        rawProject.researcher_override
       )
     },
     {
@@ -994,7 +1143,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById
+        evidenceById,
+        rawProject.researcher_override
       )
     },
     {
@@ -1018,7 +1168,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         jurisdictionName,
         pendingFields,
         resolutionByField,
-        evidenceById
+        evidenceById,
+        rawProject.researcher_override
       )
     }
   ].filter((section) => section.fields.length > 0);

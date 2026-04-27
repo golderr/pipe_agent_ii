@@ -37,6 +37,7 @@ API_CORS_ORIGINS=http://localhost:3000,https://tcg-pipeline.vercel.app
 API_AUTH_AUDIENCE=authenticated
 API_REQUIRED_ROLE=authenticated
 API_JWKS_CACHE_TTL_SECONDS=600
+ENABLE_PREVIEW_WRITES=false
 ```
 
 `DATABASE_URL` is the privileged server-side Postgres connection used by the API.
@@ -44,6 +45,9 @@ Browser clients must never receive it.
 
 `ALLOWED_EMAILS` is required in every environment. An empty allowlist fails
 closed, including local development, preview, and staging deployments.
+
+`ENABLE_PREVIEW_WRITES` only affects the Next.js server action guard. Keep it
+false unless a preview write session has an explicit target and owner.
 
 ## Local Run
 
@@ -98,6 +102,25 @@ Use this default until the team needs heavier staging infrastructure:
   caller's Vercel deployment and configured `NEXT_PUBLIC_API_BASE_URL`.
 - C.d write endpoints must preserve this policy when real mutation handlers
   replace the current `501` stubs.
+
+## C.d Core Field Overrides
+
+Project Detail Core-field edits call the FastAPI override boundary through
+Next.js server actions:
+
+```text
+POST   /projects/{project_id}/override
+DELETE /projects/{project_id}/override/{field_name}
+```
+
+Only evidence-derived Core fields are accepted: `pipeline_status`,
+`total_units`, `affordable_units`, `market_rate_units`, `developer`,
+`product_type`, `age_restriction`, and `date_delivery`.
+
+The API writes/clears `researcher_overrides`, keeps the legacy
+`projects.researcher_override` JSONB in sync during the transition, re-runs
+`resolve_project(apply=True)`, updates project edit metadata, and writes a
+`change_log` row with `change_type = researcher_override`.
 
 ## C.c Migration Verification
 

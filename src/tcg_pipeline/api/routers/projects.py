@@ -4,13 +4,25 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends
+from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
-from tcg_pipeline.api.deps import require_user
+from tcg_pipeline.api.deps import get_db_session, require_user
 from tcg_pipeline.api.errors import raise_not_implemented
+from tcg_pipeline.api.project_overrides import (
+    clear_project_override as clear_project_override_value,
+)
+from tcg_pipeline.api.project_overrides import (
+    set_project_override as set_project_override_value,
+)
+from tcg_pipeline.api.schemas import (
+    ProjectOverrideMutationResponse,
+    ProjectOverrideSetRequest,
+)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 AUTH_USER = Depends(require_user)
+DB_SESSION = Depends(get_db_session)
 JSON_BODY = Body(default_factory=dict)
 
 
@@ -42,19 +54,34 @@ def update_project_field(
 @router.post("/{project_id}/override")
 def set_project_override(
     project_id: uuid.UUID,
-    _payload: dict[str, Any] = JSON_BODY,
-    _user: AuthenticatedUser = AUTH_USER,
-) -> None:
-    raise_not_implemented(f"researcher override set for {project_id}")
+    payload: ProjectOverrideSetRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectOverrideMutationResponse:
+    return set_project_override_value(
+        session,
+        project_id=project_id,
+        field_name=payload.field_name,
+        value=payload.value,
+        note=payload.note,
+        source_url=payload.source_url,
+        user=user,
+    )
 
 
 @router.delete("/{project_id}/override/{field_name}")
 def clear_project_override(
     project_id: uuid.UUID,
     field_name: str,
-    _user: AuthenticatedUser = AUTH_USER,
-) -> None:
-    raise_not_implemented(f"researcher override clear for {project_id}.{field_name}")
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectOverrideMutationResponse:
+    return clear_project_override_value(
+        session,
+        project_id=project_id,
+        field_name=field_name,
+        user=user,
+    )
 
 
 @router.post("/{project_id}/note")
