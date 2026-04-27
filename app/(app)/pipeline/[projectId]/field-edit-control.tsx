@@ -170,6 +170,11 @@ function EditValueInput({ field }: { field: ProjectField }) {
           name="value"
           required
         >
+          {edit.value ? null : (
+            <option disabled value="">
+              Select value
+            </option>
+          )}
           {(edit.options ?? []).map((option) => (
             <option key={option} value={option}>
               {option}
@@ -187,6 +192,7 @@ function EditValueInput({ field }: { field: ProjectField }) {
         <textarea
           className="mt-1 min-h-24 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
           defaultValue={edit.mutation === "note" ? "" : edit.value ?? ""}
+          maxLength={edit.mutation === "note" ? 10000 : undefined}
           name="value"
           required={edit.mutation === "note"}
         />

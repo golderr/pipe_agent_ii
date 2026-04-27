@@ -206,7 +206,10 @@ def _coerce_optional_text(field_name: str, value: Any, *, max_length: int) -> st
 
 
 def _coerce_state(value: Any) -> str:
-    text = _coerce_required_text("state", value, max_length=255).upper()
+    text = _clean_text(value)
+    if text is None:
+        raise HTTPException(status_code=422, detail="state must be a non-empty string.")
+    text = text.upper()
     if len(text) != 2:
         raise HTTPException(
             status_code=422,

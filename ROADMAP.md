@@ -212,7 +212,7 @@ Source → Collector → RawRecord → match_raw_record()
 | C.k | Review Item detail view | `not_started` | Per `docs/specs/ui_requirements.md` §5. Split pane with current value / proposed value. Multi-conclusion sub-panes. Processed items section. Navigation with `[` / `]`. |
 | C.l | Coverage — scrape kickoff + CoStar upload | `not_started` | Per `docs/specs/ui_requirements.md` §3.5 and `docs/specs/data_model_changes.md` §8. Scrape jobs queue (RQ on Render). CoStar upload as file picker. Add `python-multipart` when implementing FastAPI `File(...)` upload handling. Progress polling via `/scrape_jobs/{id}`. |
 | C.m | Inclusion flags UI | `not_started` | Toggle `inclusion_in_analysis` and `inclusion_in_exhibit` per project with note field. Sticky. |
-| C.n | ChangeLog view | `not_started` | Project Detail → Changes tab wiring, filter by actor / date / field. |
+| C.n | ChangeLog view | `not_started` | Project Detail → Changes tab wiring, filter by actor / date / field. Include `project_notes` history visibility here or in a small Project Detail notes-history step; C.e captures append-only note rows but Snapshot currently shows only the latest synchronized note column. |
 | C.o | Reviewed tab in Review Queue | `not_started` | Secondary tab showing previously committed decisions with filters for audit. |
 
 ### Phase D: News Scraping & Deep Research

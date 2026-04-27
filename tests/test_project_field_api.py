@@ -117,7 +117,9 @@ def test_update_project_field_coerces_supported_values(
     [
         ("researcher_notes", "Use notes endpoint", "project note endpoint"),
         ("source_urls", "not-a-url", "valid HTTP(S) URLs"),
+        ("source_urls", "javascript:alert(1)", "valid HTTP(S) URLs"),
         ("state", "California", "2-character postal abbreviation"),
+        ("inclusion_note", "x" * 256, "255 characters or fewer"),
     ],
 )
 def test_update_project_field_rejects_invalid_fields_or_values(
@@ -140,6 +142,24 @@ def test_update_project_field_rejects_invalid_fields_or_values(
 
     assert response.status_code in {400, 422}
     assert message in response.json()["detail"]
+
+
+def test_update_project_field_accepts_inclusion_note(postgres_session: Session) -> None:
+    _ensure_project_write_api_tables(postgres_session)
+    project = _project("925 INCLUSION NOTE WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    client = _client(postgres_session)
+
+    response = client.post(
+        f"/projects/{project.id}/field",
+        json={"field_name": "inclusion_note", "value": " Keep in benchmark set. "},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    postgres_session.refresh(project)
+    assert project.inclusion_note == "Keep in benchmark set."
 
 
 def test_append_project_note_creates_history_updates_latest_and_logs(
