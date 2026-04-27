@@ -4,14 +4,16 @@ import { useActionState, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Info, Pencil, RotateCcw, X } from "lucide-react";
 import {
+  addProjectNoteAction,
   clearProjectOverrideAction,
+  setProjectFieldAction,
   setProjectOverrideAction,
-  type OverrideActionState
+  type ProjectMutationActionState
 } from "./actions";
-import type { ProjectField } from "@/lib/project-detail/types";
+import type { FieldEditConfig, ProjectField } from "@/lib/project-detail/types";
 import { cn } from "@/lib/utils";
 
-const initialState: OverrideActionState = {
+const initialState: ProjectMutationActionState = {
   ok: false,
   message: null
 };
@@ -34,13 +36,27 @@ export function FieldEditControl({
     clearProjectOverrideAction,
     initialState
   );
-  const pending = setPending || clearPending;
+  const [fieldState, fieldAction, fieldPending] = useActionState(
+    setProjectFieldAction,
+    initialState
+  );
+  const [noteState, noteAction, notePending] = useActionState(
+    addProjectNoteAction,
+    initialState
+  );
+  const saveAction =
+    edit?.mutation === "field"
+      ? fieldAction
+      : edit?.mutation === "note"
+        ? noteAction
+        : setAction;
+  const pending = setPending || clearPending || fieldPending || notePending;
 
   useEffect(() => {
-    if (setState.ok || clearState.ok) {
+    if (setState.ok || clearState.ok || fieldState.ok || noteState.ok) {
       router.refresh();
     }
-  }, [clearState.ok, router, setState.ok]);
+  }, [clearState.ok, fieldState.ok, noteState.ok, router, setState.ok]);
 
   if (!edit?.enabled) {
     return null;
@@ -76,35 +92,20 @@ export function FieldEditControl({
             </button>
           </div>
 
-          <form action={setAction} className="space-y-2">
+          <form action={saveAction} className="space-y-2">
             <HiddenFields fieldName={field.key} projectId={projectId} />
             <EditValueInput field={field} />
-            <label className="block">
-              <span className="font-medium text-slate-600">Note</span>
-              <textarea
-                className="mt-1 min-h-16 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-                defaultValue=""
-                name="note"
-              />
-            </label>
-            <label className="block">
-              <span className="font-medium text-slate-600">Source URL</span>
-              <input
-                className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-                name="sourceUrl"
-                type="url"
-              />
-            </label>
+            {edit.mutation === "override" ? <OverrideMetadataFields /> : null}
             <div className="flex items-center justify-between gap-2 pt-1">
               <span
                 className="inline-flex items-center gap-1 text-[11px] text-slate-500"
                 title={edit.info}
               >
                 <Info className="size-3" aria-hidden="true" />
-                Override
+                {mutationLabel(edit.mutation)}
               </span>
               <div className="flex items-center gap-1.5">
-                {edit.isOverridden ? (
+                {edit.mutation === "override" && edit.isOverridden ? (
                   <button
                     formAction={clearAction}
                     className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-600 hover:bg-slate-50"
@@ -129,6 +130,8 @@ export function FieldEditControl({
 
           <ActionMessage state={setState} />
           <ActionMessage state={clearState} />
+          <ActionMessage state={fieldState} />
+          <ActionMessage state={noteState} />
         </div>
       ) : null}
     </div>
@@ -155,11 +158,12 @@ function EditValueInput({ field }: { field: ProjectField }) {
   if (!edit) {
     return null;
   }
+  const label = edit.mutation === "note" ? "New note" : "Value";
 
   if (edit.kind === "select") {
     return (
       <label className="block">
-        <span className="font-medium text-slate-600">Value</span>
+        <span className="font-medium text-slate-600">{label}</span>
         <select
           className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
           defaultValue={edit.value ?? ""}
@@ -176,15 +180,29 @@ function EditValueInput({ field }: { field: ProjectField }) {
     );
   }
 
+  if (edit.kind === "textarea") {
+    return (
+      <label className="block">
+        <span className="font-medium text-slate-600">{label}</span>
+        <textarea
+          className="mt-1 min-h-24 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+          defaultValue={edit.mutation === "note" ? "" : edit.value ?? ""}
+          name="value"
+          required={edit.mutation === "note"}
+        />
+      </label>
+    );
+  }
+
   return (
     <label className="block">
-      <span className="font-medium text-slate-600">Value</span>
+      <span className="font-medium text-slate-600">{label}</span>
       <input
         className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
         defaultValue={edit.value ?? ""}
         min={edit.kind === "number" ? 0 : undefined}
         name="value"
-        required
+        required={edit.mutation === "override"}
         step={edit.kind === "number" ? 1 : undefined}
         type={edit.kind}
       />
@@ -192,7 +210,40 @@ function EditValueInput({ field }: { field: ProjectField }) {
   );
 }
 
-function ActionMessage({ state }: { state: OverrideActionState }) {
+function OverrideMetadataFields() {
+  return (
+    <>
+      <label className="block">
+        <span className="font-medium text-slate-600">Note</span>
+        <textarea
+          className="mt-1 min-h-16 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+          defaultValue=""
+          name="note"
+        />
+      </label>
+      <label className="block">
+        <span className="font-medium text-slate-600">Source URL</span>
+        <input
+          className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+          name="sourceUrl"
+          type="url"
+        />
+      </label>
+    </>
+  );
+}
+
+function mutationLabel(mutation: FieldEditConfig["mutation"]) {
+  if (mutation === "override") {
+    return "Override";
+  }
+  if (mutation === "note") {
+    return "Append note";
+  }
+  return "Direct edit";
+}
+
+function ActionMessage({ state }: { state: ProjectMutationActionState }) {
   if (!state.message) {
     return null;
   }

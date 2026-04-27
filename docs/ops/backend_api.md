@@ -137,6 +137,33 @@ The preview-write block is enforced by the Next.js server action guard. The
 FastAPI service still trusts Supabase JWT validation plus `ALLOWED_EMAILS` for
 direct API calls.
 
+## C.e Identity Fields + Project Notes
+
+Project Detail Identity and Notes edits call FastAPI through Next.js server
+actions:
+
+```text
+POST /projects/{project_id}/field
+POST /projects/{project_id}/note
+```
+
+`/field` is for researcher-authored direct fields on `projects`, not
+evidence-derived Core fields. It accepts identity/workflow fields such as
+`project_name`, `previous_names`, `raw_addresses`, city/state/county/ZIP,
+`tcg_region`, `source_urls`, planner contact fields, `inclusion_in_analysis`,
+`inclusion_in_exhibit`, and `inclusion_note`. The API updates the project row,
+updates edit metadata, and writes a `change_log` row with
+`change_type = researcher_confirmed`.
+
+`/note` is append-only for `researcher_notes`, `personal_notes`, and
+`change_notes`. Each write inserts a `project_notes` row and also updates the
+legacy latest-note column on `projects` so existing Project Detail reads stay
+stable during the transition.
+
+`project_notes` grants authenticated clients `SELECT` only under RLS. Direct
+PostgREST writes remain blocked; writes go through FastAPI with Supabase JWT
+validation and `ALLOWED_EMAILS`.
+
 ## C.c Migration Verification
 
 Before C.d write endpoints are enabled, verify the `researcher_overrides`

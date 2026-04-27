@@ -97,7 +97,8 @@ export type FieldProvenance = {
 
 export type FieldEditConfig = {
   enabled: boolean;
-  kind: "text" | "number" | "date" | "select";
+  mutation: "override" | "field" | "note";
+  kind: "text" | "textarea" | "number" | "date" | "select";
   value: string | null;
   options: string[] | null;
   isOverridden: boolean;

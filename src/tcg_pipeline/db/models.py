@@ -464,6 +464,37 @@ class Project(Base, TimestampMixin):
     researcher_overrides: Mapped[list[ResearcherOverride]] = relationship(
         back_populates="project"
     )
+    project_notes: Mapped[list["ProjectNote"]] = relationship(back_populates="project")
+
+
+class ProjectNote(Base):
+    __tablename__ = "project_notes"
+    __table_args__ = (
+        Index(
+            "ix_project_notes_project_id_type_created_at",
+            "project_id",
+            "note_type",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    note_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_by_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    project: Mapped[Project] = relationship(back_populates="project_notes")
 
 
 class StatusHistory(Base):

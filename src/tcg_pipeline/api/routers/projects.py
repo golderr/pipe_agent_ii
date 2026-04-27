@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.deps import get_db_session, require_user
 from tcg_pipeline.api.errors import raise_not_implemented
+from tcg_pipeline.api.project_fields import append_project_note as append_project_note_value
+from tcg_pipeline.api.project_fields import update_project_field as update_project_field_value
 from tcg_pipeline.api.project_overrides import (
     clear_project_override as clear_project_override_value,
 )
@@ -16,6 +18,10 @@ from tcg_pipeline.api.project_overrides import (
     set_project_override as set_project_override_value,
 )
 from tcg_pipeline.api.schemas import (
+    ProjectFieldMutationResponse,
+    ProjectFieldUpdateRequest,
+    ProjectNoteAppendRequest,
+    ProjectNoteAppendResponse,
     ProjectOverrideMutationResponse,
     ProjectOverrideSetRequest,
 )
@@ -45,10 +51,17 @@ def get_project(
 @router.post("/{project_id}/field")
 def update_project_field(
     project_id: uuid.UUID,
-    _payload: dict[str, Any] = JSON_BODY,
-    _user: AuthenticatedUser = AUTH_USER,
-) -> None:
-    raise_not_implemented(f"researcher-authored field update for {project_id}")
+    payload: ProjectFieldUpdateRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectFieldMutationResponse:
+    return update_project_field_value(
+        session,
+        project_id=project_id,
+        field_name=payload.field_name,
+        value=payload.value,
+        user=user,
+    )
 
 
 @router.post("/{project_id}/override")
@@ -87,10 +100,17 @@ def clear_project_override(
 @router.post("/{project_id}/note")
 def add_project_note(
     project_id: uuid.UUID,
-    _payload: dict[str, Any] = JSON_BODY,
-    _user: AuthenticatedUser = AUTH_USER,
-) -> None:
-    raise_not_implemented(f"project note append for {project_id}")
+    payload: ProjectNoteAppendRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectNoteAppendResponse:
+    return append_project_note_value(
+        session,
+        project_id=project_id,
+        note_type=payload.note_type,
+        body=payload.body,
+        user=user,
+    )
 
 
 @router.post("/{project_id}/relationship")

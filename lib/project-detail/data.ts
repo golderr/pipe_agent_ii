@@ -159,7 +159,9 @@ const AGE_RESTRICTION_OPTIONS = [
   "Unknown"
 ];
 
-const CORE_OVERRIDE_INFO = "Your edit holds the value. New contradicting evidence will create a review item.";
+const CORE_OVERRIDE_INFO = "Your edit stays current until reviewed. New differing evidence creates a review item.";
+const DIRECT_FIELD_INFO = "Your edit is the source of truth for this field.";
+const APPEND_NOTE_INFO = "Notes are append-only. New notes are added to the project history.";
 
 const PROJECT_SELECT = [
   "id",
@@ -251,50 +253,50 @@ const CORE_FIELDS: FieldDefinition[] = [
     key: "pipeline_status",
     label: "Status",
     className: "evidence",
-    edit: { kind: "select", options: PIPELINE_STATUS_OPTIONS, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "select", options: PIPELINE_STATUS_OPTIONS, info: CORE_OVERRIDE_INFO }
   },
   { key: "status_date", label: "Status date", className: "computed" },
   {
     key: "total_units",
     label: "Total units",
     className: "evidence",
-    edit: { kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "number", options: null, info: CORE_OVERRIDE_INFO }
   },
   {
     key: "affordable_units",
     label: "Affordable units",
     className: "evidence",
-    edit: { kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "number", options: null, info: CORE_OVERRIDE_INFO }
   },
   {
     key: "market_rate_units",
     label: "Market-rate units",
     className: "evidence",
-    edit: { kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "number", options: null, info: CORE_OVERRIDE_INFO }
   },
   {
     key: "developer",
     label: "Developer",
     className: "evidence",
-    edit: { kind: "text", options: null, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "text", options: null, info: CORE_OVERRIDE_INFO }
   },
   {
     key: "product_type",
     label: "Product type",
     className: "evidence",
-    edit: { kind: "select", options: PRODUCT_TYPE_OPTIONS, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "select", options: PRODUCT_TYPE_OPTIONS, info: CORE_OVERRIDE_INFO }
   },
   {
     key: "age_restriction",
     label: "Age restriction",
     className: "evidence",
-    edit: { kind: "select", options: AGE_RESTRICTION_OPTIONS, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "select", options: AGE_RESTRICTION_OPTIONS, info: CORE_OVERRIDE_INFO }
   },
   {
     key: "date_delivery",
     label: "Delivery",
     className: "evidence",
-    edit: { kind: "date", options: null, info: CORE_OVERRIDE_INFO }
+    edit: { mutation: "override", kind: "date", options: null, info: CORE_OVERRIDE_INFO }
   }
 ];
 
@@ -327,28 +329,28 @@ const SOURCE_FACT_FIELDS: FieldDefinition[] = [
 ];
 
 const IDENTITY_FIELDS: FieldDefinition[] = [
-  { key: "project_name", label: "Project name", className: "researcher" },
-  { key: "previous_names", label: "Previous names", className: "researcher" },
+  { key: "project_name", label: "Project name", className: "researcher", edit: { mutation: "field", kind: "text", options: null, info: DIRECT_FIELD_INFO } },
+  { key: "previous_names", label: "Previous names", className: "researcher", edit: { mutation: "field", kind: "textarea", options: null, info: DIRECT_FIELD_INFO } },
   { key: "canonical_address", label: "Canonical address", className: "computed" },
-  { key: "raw_addresses", label: "Raw addresses", className: "researcher" },
-  { key: "city", label: "City", className: "researcher" },
-  { key: "state", label: "State", className: "researcher" },
-  { key: "county", label: "County", className: "researcher" },
-  { key: "zip", label: "ZIP", className: "researcher" },
+  { key: "raw_addresses", label: "Raw addresses", className: "researcher", edit: { mutation: "field", kind: "textarea", options: null, info: DIRECT_FIELD_INFO } },
+  { key: "city", label: "City", className: "researcher", edit: { mutation: "field", kind: "text", options: null, info: DIRECT_FIELD_INFO } },
+  { key: "state", label: "State", className: "researcher", edit: { mutation: "field", kind: "text", options: null, info: DIRECT_FIELD_INFO } },
+  { key: "county", label: "County", className: "researcher", edit: { mutation: "field", kind: "text", options: null, info: DIRECT_FIELD_INFO } },
+  { key: "zip", label: "ZIP", className: "researcher", edit: { mutation: "field", kind: "text", options: null, info: DIRECT_FIELD_INFO } },
   { key: "market", label: "Market", className: "relationship" },
   { key: "jurisdiction_display", label: "Jurisdiction", className: "relationship" },
-  { key: "tcg_region", label: "Region", className: "researcher" },
+  { key: "tcg_region", label: "Region", className: "researcher", edit: { mutation: "field", kind: "text", options: null, info: DIRECT_FIELD_INFO } },
   { key: "lat_lng", label: "Coordinates", className: "researcher" },
-  { key: "source_urls", label: "Source URLs", className: "researcher" }
+  { key: "source_urls", label: "Source URLs", className: "researcher", edit: { mutation: "field", kind: "textarea", options: null, info: DIRECT_FIELD_INFO } }
 ];
 
 const NOTE_FIELDS: FieldDefinition[] = [
-  { key: "researcher_notes", label: "Researcher notes", className: "researcher" },
-  { key: "personal_notes", label: "Personal notes", className: "researcher" },
-  { key: "change_notes", label: "Change notes", className: "researcher" },
-  { key: "inclusion_in_analysis", label: "In analysis", className: "researcher" },
-  { key: "inclusion_in_exhibit", label: "In exhibit", className: "researcher" },
-  { key: "inclusion_note", label: "Inclusion note", className: "researcher" },
+  { key: "researcher_notes", label: "Researcher notes", className: "researcher", edit: { mutation: "note", kind: "textarea", options: null, info: APPEND_NOTE_INFO } },
+  { key: "personal_notes", label: "Personal notes", className: "researcher", edit: { mutation: "note", kind: "textarea", options: null, info: APPEND_NOTE_INFO } },
+  { key: "change_notes", label: "Change notes", className: "researcher", edit: { mutation: "note", kind: "textarea", options: null, info: APPEND_NOTE_INFO } },
+  { key: "inclusion_in_analysis", label: "In analysis", className: "researcher", edit: { mutation: "field", kind: "select", options: ["Yes", "No"], info: DIRECT_FIELD_INFO } },
+  { key: "inclusion_in_exhibit", label: "In exhibit", className: "researcher", edit: { mutation: "field", kind: "select", options: ["Yes", "No"], info: DIRECT_FIELD_INFO } },
+  { key: "inclusion_note", label: "Inclusion note", className: "researcher", edit: { mutation: "field", kind: "textarea", options: null, info: DIRECT_FIELD_INFO } },
   { key: "last_reviewed", label: "Last reviewed", className: "computed" },
   { key: "last_edited", label: "Last edited", className: "computed" }
 ];
@@ -863,6 +865,12 @@ function editValueForField(project: RawProject, key: string) {
   const value = project[key];
   if (value === null || value === undefined) {
     return "";
+  }
+  if (Array.isArray(value)) {
+    return value.join("\n");
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
   }
   if (key === "date_delivery" && typeof value === "string") {
     return value.slice(0, 10);

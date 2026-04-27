@@ -5,34 +5,48 @@ import { isEmailAllowed } from "@/lib/auth";
 import { previewWritesEnabled, requireApiBaseUrl } from "@/lib/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-export type OverrideActionState = {
+export type ProjectMutationActionState = {
   ok: boolean;
   message: string | null;
 };
 
-const initialErrorState: OverrideActionState = {
+const initialErrorState: ProjectMutationActionState = {
   ok: false,
   message: null
 };
 
 export async function setProjectOverrideAction(
-  _previousState: OverrideActionState,
+  _previousState: ProjectMutationActionState,
   formData: FormData
-): Promise<OverrideActionState> {
+): Promise<ProjectMutationActionState> {
   return mutateProjectOverride(formData, "POST");
 }
 
 export async function clearProjectOverrideAction(
-  _previousState: OverrideActionState,
+  _previousState: ProjectMutationActionState,
   formData: FormData
-): Promise<OverrideActionState> {
+): Promise<ProjectMutationActionState> {
   return mutateProjectOverride(formData, "DELETE");
+}
+
+export async function setProjectFieldAction(
+  _previousState: ProjectMutationActionState,
+  formData: FormData
+): Promise<ProjectMutationActionState> {
+  return mutateProjectField(formData);
+}
+
+export async function addProjectNoteAction(
+  _previousState: ProjectMutationActionState,
+  formData: FormData
+): Promise<ProjectMutationActionState> {
+  return mutateProjectNote(formData);
 }
 
 async function mutateProjectOverride(
   formData: FormData,
   method: "POST" | "DELETE"
-): Promise<OverrideActionState> {
+): Promise<ProjectMutationActionState> {
   const projectId = textFormValue(formData, "projectId");
   const fieldName = textFormValue(formData, "fieldName");
   if (!projectId || !fieldName) {
@@ -40,9 +54,8 @@ async function mutateProjectOverride(
   }
 
   try {
-    assertPreviewWritesAllowed();
+    const apiBaseUrl = await apiBaseUrlForWrite();
     const accessToken = await accessTokenForApi();
-    const apiBaseUrl = requireApiBaseUrl();
     const endpoint =
       method === "POST"
         ? `${apiBaseUrl}/projects/${projectId}/override`
@@ -79,6 +92,85 @@ async function mutateProjectOverride(
 
   revalidatePath(`/pipeline/${projectId}`);
   return { ok: true, message: method === "POST" ? "Saved." : "Cleared." };
+}
+
+async function mutateProjectField(formData: FormData): Promise<ProjectMutationActionState> {
+  const projectId = textFormValue(formData, "projectId");
+  const fieldName = textFormValue(formData, "fieldName");
+  const value = textFormValue(formData, "value") ?? "";
+  if (!projectId || !fieldName) {
+    return { ok: false, message: "Missing project or field." };
+  }
+
+  try {
+    const apiBaseUrl = await apiBaseUrlForWrite();
+    const response = await fetch(`${apiBaseUrl}/projects/${projectId}/field`, {
+      method: "POST",
+      headers: await jsonHeadersForApi(),
+      body: JSON.stringify({
+        field_name: fieldName,
+        value
+      })
+    });
+
+    if (!response.ok) {
+      return { ok: false, message: await responseErrorMessage(response) };
+    }
+  } catch (error) {
+    return {
+      ...initialErrorState,
+      message: error instanceof Error ? error.message : "Field update failed."
+    };
+  }
+
+  revalidatePath(`/pipeline/${projectId}`);
+  return { ok: true, message: "Saved." };
+}
+
+async function mutateProjectNote(formData: FormData): Promise<ProjectMutationActionState> {
+  const projectId = textFormValue(formData, "projectId");
+  const fieldName = textFormValue(formData, "fieldName");
+  const value = textFormValue(formData, "value");
+  if (!projectId || !fieldName || !value) {
+    return { ok: false, message: "Missing project, note type, or note text." };
+  }
+
+  try {
+    const apiBaseUrl = await apiBaseUrlForWrite();
+    const response = await fetch(`${apiBaseUrl}/projects/${projectId}/note`, {
+      method: "POST",
+      headers: await jsonHeadersForApi(),
+      body: JSON.stringify({
+        note_type: fieldName,
+        body: value
+      })
+    });
+
+    if (!response.ok) {
+      return { ok: false, message: await responseErrorMessage(response) };
+    }
+  } catch (error) {
+    return {
+      ...initialErrorState,
+      message: error instanceof Error ? error.message : "Note append failed."
+    };
+  }
+
+  revalidatePath(`/pipeline/${projectId}`);
+  return { ok: true, message: "Added." };
+}
+
+async function apiBaseUrlForWrite() {
+  assertPreviewWritesAllowed();
+  return requireApiBaseUrl();
+}
+
+async function jsonHeadersForApi() {
+  const accessToken = await accessTokenForApi();
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json"
+  };
 }
 
 function assertPreviewWritesAllowed() {
