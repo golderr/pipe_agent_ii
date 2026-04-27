@@ -19,6 +19,8 @@ from tcg_pipeline.db.models import (
     RelationshipType,
 )
 
+_MISSING = object()
+
 
 def add_project_relationship(
     session: Session,
@@ -44,6 +46,25 @@ def add_project_relationship(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        now = datetime.now(UTC)
+        actor = _actor_for_audit(user)
+        updated = False
+        change_log_entries_created = 0
+        if normalized_notes is not None and normalized_notes != existing.notes:
+            old_notes = existing.notes
+            existing.notes = normalized_notes
+            _mark_project_edited(project, actor=actor, timestamp=now)
+            change_log_entries_created = _write_relationship_change_log(
+                session,
+                project=project,
+                relationship=existing,
+                related_project=related_project,
+                actor=actor,
+                timestamp=now,
+                old_notes=old_notes,
+            )
+            updated = True
+            session.flush()
         return ProjectRelationshipMutationResponse(
             project_id=project.id,
             relationship_id=existing.id,
@@ -51,7 +72,8 @@ def add_project_relationship(
             related_project_id=existing.related_project_id,
             notes=existing.notes,
             created=False,
-            change_log_entries_created=0,
+            updated=updated,
+            change_log_entries_created=change_log_entries_created,
         )
 
     now = datetime.now(UTC)
@@ -80,6 +102,7 @@ def add_project_relationship(
         related_project_id=relationship.related_project_id,
         notes=relationship.notes,
         created=True,
+        updated=False,
         change_log_entries_created=change_log_entries_created,
     )
 
@@ -119,6 +142,7 @@ def _write_relationship_change_log(
     related_project: Project,
     actor: str,
     timestamp: datetime,
+    old_notes: str | None | object = _MISSING,
 ) -> int:
     session.add(
         ChangeLog(
@@ -126,22 +150,40 @@ def _write_relationship_change_log(
             timestamp=timestamp,
             source="project_relationship",
             field="relationships",
-            old_value=None,
-            new_value=serialize_json(
-                {
-                    "relationship_type": relationship.relationship_type.value,
-                    "related_project_id": str(related_project.id),
-                    "related_project_name": related_project.project_name
-                    or related_project.canonical_address,
-                    "notes": relationship.notes,
-                }
+            old_value=(
+                None
+                if old_notes is _MISSING
+                else serialize_json(
+                    _relationship_change_payload(
+                        relationship,
+                        related_project,
+                        notes=old_notes,
+                    )
+                )
             ),
+            new_value=serialize_json(_relationship_change_payload(relationship, related_project)),
             change_type=ChangeType.RESEARCHER_CONFIRMED,
             priority=Priority.LOW,
             reviewed_by=actor[:50],
         )
     )
     return 1
+
+
+def _relationship_change_payload(
+    relationship: ProjectRelationship,
+    related_project: Project,
+    *,
+    notes: str | None | object = _MISSING,
+) -> dict[str, str | None]:
+    relationship_notes = relationship.notes if notes is _MISSING else notes
+    return {
+        "relationship_type": relationship.relationship_type.value,
+        "related_project_id": str(related_project.id),
+        "related_project_name": related_project.project_name
+        or related_project.canonical_address,
+        "notes": relationship_notes if isinstance(relationship_notes, str) else None,
+    }
 
 
 def _clean_text(value: str | None) -> str | None:

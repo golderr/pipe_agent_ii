@@ -50,12 +50,21 @@ export function RelationshipPicker({
     addProjectRelationshipAction,
     initialMutationState
   );
+  const linkedCandidateIds = new Set(
+    relationships
+      .filter(
+        (relationship) =>
+          relationship.direction === "outgoing" &&
+          relationship.relationshipType === searchState.relationshipType
+      )
+      .map((relationship) => relationship.relatedProjectId)
+  );
 
   useEffect(() => {
-    if (linkState.ok) {
+    if (linkState.ok && linkState.changed !== false) {
       router.refresh();
     }
-  }, [linkState.ok, router]);
+  }, [linkState.changed, linkState.ok, router]);
 
   return (
     <div className="space-y-3 border-t border-slate-100 px-4 py-3">
@@ -110,45 +119,55 @@ export function RelationshipPicker({
 
         {searchState.candidates.length ? (
           <div className="mt-3 grid gap-2">
-            {searchState.candidates.map((candidate) => (
-              <form
-                action={linkAction}
-                className="grid gap-2 rounded-md border border-slate-200 bg-white p-2 md:grid-cols-[minmax(0,1fr)_12rem_auto]"
-                key={candidate.id}
-              >
-                <input name="projectId" type="hidden" value={projectId} />
-                <input name="relatedProjectId" type="hidden" value={candidate.id} />
-                <input
-                  name="relationshipType"
-                  type="hidden"
-                  value={searchState.relationshipType}
-                />
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-slate-950">
-                    {candidate.name}
-                  </p>
-                  <p className="truncate text-xs text-slate-500">
-                    {candidate.canonicalAddress}
-                  </p>
-                  <p className="text-xs text-slate-500">
-                    {[candidate.location, candidate.status].filter(Boolean).join(" | ")}
-                  </p>
-                </div>
-                <input
-                  className="h-8 rounded-md border border-slate-200 px-2 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-                  name="notes"
-                  placeholder="Optional note"
-                />
-                <button
-                  className="inline-flex h-8 items-center justify-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-                  disabled={linkPending}
-                  type="submit"
+            {searchState.candidates.map((candidate) => {
+              const isLinked = linkedCandidateIds.has(candidate.id);
+              return (
+                <form
+                  action={linkAction}
+                  className="grid gap-2 rounded-md border border-slate-200 bg-white p-2 md:grid-cols-[minmax(0,1fr)_12rem_auto]"
+                  key={candidate.id}
                 >
-                  <Check className="size-3.5" aria-hidden="true" />
-                  Link
-                </button>
-              </form>
-            ))}
+                  <input name="projectId" type="hidden" value={projectId} />
+                  <input name="relatedProjectId" type="hidden" value={candidate.id} />
+                  <input
+                    name="relationshipType"
+                    type="hidden"
+                    value={searchState.relationshipType}
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate text-sm font-medium text-slate-950">
+                        {candidate.name}
+                      </p>
+                      {isLinked ? (
+                        <span className="shrink-0 rounded border border-green-200 bg-green-50 px-1.5 py-0.5 text-[11px] text-green-800">
+                          Already linked
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="truncate text-xs text-slate-500">
+                      {candidate.canonicalAddress}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {[candidate.location, candidate.status].filter(Boolean).join(" | ")}
+                    </p>
+                  </div>
+                  <input
+                    className="h-8 rounded-md border border-slate-200 px-2 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+                    name="notes"
+                    placeholder={isLinked ? "Update note" : "Optional note"}
+                  />
+                  <button
+                    className="inline-flex h-8 items-center justify-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                    disabled={linkPending}
+                    type="submit"
+                  >
+                    <Check className="size-3.5" aria-hidden="true" />
+                    {isLinked ? "Update note" : "Link"}
+                  </button>
+                </form>
+              );
+            })}
           </div>
         ) : null}
       </div>

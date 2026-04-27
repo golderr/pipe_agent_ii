@@ -8,6 +8,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 export type ProjectMutationActionState = {
   ok: boolean;
   message: string | null;
+  changed?: boolean;
 };
 
 export type RelationshipSearchCandidate = {
@@ -22,6 +23,11 @@ export type RelationshipSearchActionState = ProjectMutationActionState & {
   query: string;
   relationshipType: string;
   candidates: RelationshipSearchCandidate[];
+};
+
+type ProjectRelationshipMutationApiResponse = {
+  created?: boolean;
+  updated?: boolean;
 };
 
 const initialErrorState: ProjectMutationActionState = {
@@ -82,21 +88,23 @@ export async function searchRelationshipCandidatesAction(
   }
 
   try {
-    assertPreviewWritesAllowed();
+    // Search is read-only, but it feeds the relationship write flow.
+    assertWriteFlowAllowed();
     await accessTokenForApi();
     const supabase = await createSupabaseServerClient();
     const select = "id, project_name, canonical_address, city, state, zip, pipeline_status";
+    const escapedQuery = escapeIlikeTerm(query);
     const addressQuery = supabase
       .from("projects")
       .select(select)
       .neq("id", projectId)
-      .ilike("canonical_address", `%${query}%`)
+      .ilike("canonical_address", `%${escapedQuery}%`)
       .limit(8);
     const nameQuery = supabase
       .from("projects")
       .select(select)
       .neq("id", projectId)
-      .ilike("project_name", `%${query}%`)
+      .ilike("project_name", `%${escapedQuery}%`)
       .limit(8);
     const [addressResults, nameResults] = await Promise.all([addressQuery, nameQuery]);
     const error = addressResults.error ?? nameResults.error;
@@ -161,15 +169,27 @@ export async function addProjectRelationshipAction(
     if (!response.ok) {
       return { ok: false, message: await responseErrorMessage(response) };
     }
+
+    const body = (await response.json().catch(() => null)) as
+      | ProjectRelationshipMutationApiResponse
+      | null;
+    const changed = !body || body.created === true || body.updated === true;
+    if (changed) {
+      revalidatePath(`/pipeline/${projectId}`);
+    }
+    if (body?.updated) {
+      return { ok: true, message: "Relationship note updated.", changed: true };
+    }
+    if (body?.created === false) {
+      return { ok: true, message: "Already linked.", changed: false };
+    }
+    return { ok: true, message: "Linked.", changed: true };
   } catch (error) {
     return {
       ...initialErrorState,
       message: error instanceof Error ? error.message : "Relationship link failed."
     };
   }
-
-  revalidatePath(`/pipeline/${projectId}`);
-  return { ok: true, message: "Linked." };
 }
 
 async function mutateProjectOverride(
@@ -290,7 +310,7 @@ async function mutateProjectNote(formData: FormData): Promise<ProjectMutationAct
 }
 
 async function apiBaseUrlForWrite() {
-  assertPreviewWritesAllowed();
+  assertWriteFlowAllowed();
   return requireApiBaseUrl();
 }
 
@@ -302,10 +322,14 @@ async function jsonHeadersForApi() {
   };
 }
 
-function assertPreviewWritesAllowed() {
+function assertWriteFlowAllowed() {
   if (process.env.VERCEL_ENV === "preview" && !previewWritesEnabled()) {
     throw new Error("Preview writes are disabled.");
   }
+}
+
+function escapeIlikeTerm(value: string) {
+  return value.replace(/[\\%_]/g, "\\$&");
 }
 
 function relationshipSearchState(

@@ -71,6 +71,7 @@ def test_add_project_relationship_creates_row_and_logs(postgres_session: Session
     ).scalar_one()
 
     assert body["created"] is True
+    assert body["updated"] is False
     assert body["relationship_type"] == "phase"
     assert body["related_project_id"] == str(related.id)
     assert body["notes"] == "Phase sibling"
@@ -106,6 +107,7 @@ def test_add_project_relationship_is_idempotent(postgres_session: Session) -> No
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.json()["created"] is False
+    assert second.json()["updated"] is False
     assert second.json()["change_log_entries_created"] == 0
     relationship_count = len(
         postgres_session.execute(
@@ -119,6 +121,57 @@ def test_add_project_relationship_is_idempotent(postgres_session: Session) -> No
     )
     assert relationship_count == 1
     assert change_log_count == 1
+
+
+def test_add_project_relationship_updates_existing_note(postgres_session: Session) -> None:
+    _ensure_relationship_api_tables(postgres_session)
+    project = _project("936 NOTE RELATIONSHIP WAY LOS ANGELES CA 90012")
+    related = _project("937 NOTE RELATED WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([project, related])
+    postgres_session.flush()
+    client = _client(postgres_session)
+    payload = {
+        "relationship_type": "phase",
+        "related_project_id": str(related.id),
+        "notes": "Original note",
+    }
+
+    first = client.post(
+        f"/projects/{project.id}/relationship",
+        json=payload,
+        headers=_auth_headers(),
+    )
+    second = client.post(
+        f"/projects/{project.id}/relationship",
+        json={**payload, "notes": "Updated note"},
+        headers=_auth_headers(),
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    body = second.json()
+    relationship = postgres_session.execute(
+        select(ProjectRelationship).where(ProjectRelationship.project_id == project.id)
+    ).scalar_one()
+    change_logs = postgres_session.execute(
+        select(ChangeLog).where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.field == "relationships",
+        )
+    ).scalars().all()
+
+    assert body["created"] is False
+    assert body["updated"] is True
+    assert body["notes"] == "Updated note"
+    assert body["change_log_entries_created"] == 1
+    assert relationship.notes == "Updated note"
+    assert len(change_logs) == 2
+    assert any(
+        row.old_value
+        and row.old_value["notes"] == "Original note"
+        and row.new_value["notes"] == "Updated note"
+        for row in change_logs
+    )
 
 
 @pytest.mark.parametrize(

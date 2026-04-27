@@ -189,15 +189,18 @@ The API validates both projects, rejects self-links, writes
 `project_relationships`, updates project edit metadata, and writes a
 `change_log` row with `change_type = researcher_confirmed`. Duplicate
 `project_id` / `related_project_id` / `relationship_type` submissions are
-idempotent and return the existing relationship without adding another audit
-row.
+idempotent. If a duplicate submission includes a non-empty changed note, the
+existing note is updated and audited; otherwise the API returns the existing
+relationship without adding another audit row.
 
 The picker search is read-only and runs as a Next.js server-action Supabase
 query by project name/address. Relationship mutation still goes through FastAPI.
 `project_relationships` remains authenticated SELECT-only under RLS for
 PostgREST clients; direct browser writes remain blocked.
 
-Relationship unlink/retype is not implemented in C.f.
+Relationship unlink/retype and explicit note clearing are not implemented in
+C.f. Incorrect links still require admin cleanup until a later relationship
+maintenance endpoint/UI exists.
 
 ## C.c Migration Verification
 

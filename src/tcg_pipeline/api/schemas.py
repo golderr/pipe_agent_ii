@@ -81,4 +81,5 @@ class ProjectRelationshipMutationResponse(BaseModel):
     related_project_id: uuid.UUID
     notes: str | None
     created: bool
+    updated: bool
     change_log_entries_created: int
