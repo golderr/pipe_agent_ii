@@ -132,8 +132,8 @@ function NeedsAttentionTile({ data }: { data: DashboardData }) {
       icon={<ClipboardList className="size-4" aria-hidden="true" />}
       value={number(data.needsAttention.total)}
       label="open review items"
-      href="/coverage"
-      linkLabel="Open Coverage"
+      href="/review"
+      linkLabel="Open Review"
     >
       <PriorityBars priorities={priorities} total={data.needsAttention.total} />
       {data.needsAttention.types.length ? (
@@ -185,8 +185,8 @@ function ContradictionsTile({ data }: { data: DashboardData }) {
         icon={<GitCompareArrows className="size-4" aria-hidden="true" />}
         value="Phase C"
         label="detection not active yet"
-        href="/coverage"
-        linkLabel="Open Coverage"
+        href="/review"
+        linkLabel="Open Review"
       >
         <p className="text-xs text-slate-500">
           This tile will show override-vs-evidence conflicts after the Phase C contradiction detector starts writing
@@ -202,8 +202,8 @@ function ContradictionsTile({ data }: { data: DashboardData }) {
       icon={<GitCompareArrows className="size-4" aria-hidden="true" />}
       value={number(data.contradictions.total)}
       label="override contradiction items"
-      href="/coverage"
-      linkLabel="Open Coverage"
+      href="/review"
+      linkLabel="Open Review"
     >
       <PriorityBars priorities={data.contradictions.priorities} total={data.contradictions.total} />
       <p className="mt-3 text-xs text-slate-500">

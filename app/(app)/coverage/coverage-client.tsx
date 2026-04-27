@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   ChevronDown,
   ChevronRight,
@@ -664,9 +665,12 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
                           <Metric label="Deferred" value={number(jurisdiction.queue.deferred)} />
                         </div>
                         <div className="flex flex-wrap gap-2">
-                          <Button disabled title="Available in Phase C" type="button">
+                          <Link
+                            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-transparent bg-teal-700 px-3 text-sm font-medium text-white hover:bg-teal-800"
+                            href={`/review?jurisdiction_id=${encodeURIComponent(jurisdiction.id)}`}
+                          >
                             Enter review session
-                          </Button>
+                          </Link>
                           <Button type="button" variant="outline" onClick={() => togglePin(jurisdiction.id)}>
                             <Star
                               className={cn("size-4", pinnedIds.has(jurisdiction.id) && "fill-current text-amber-500")}
