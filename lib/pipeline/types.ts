@@ -38,7 +38,21 @@ export type PipelineData = {
   facets: {
     statuses: string[];
     markets: string[];
+    marketOptions: Array<{
+      id: string;
+      slug: string;
+      name: string;
+      displayName: string;
+    }>;
     jurisdictions: string[];
+    jurisdictionOptions: Array<{
+      id: string;
+      marketId: string;
+      slug: string;
+      name: string;
+      displayName: string;
+      state: string;
+    }>;
     developers: string[];
     submarkets: string[];
     maxUnits: number;

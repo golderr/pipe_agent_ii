@@ -202,6 +202,45 @@ Relationship unlink/retype and explicit note clearing are not implemented in
 C.f. Incorrect links still require admin cleanup until a later relationship
 maintenance endpoint/UI exists.
 
+## C.g New Project Creation
+
+Pipeline new-project creation calls FastAPI through a Next.js server action:
+
+```text
+POST /projects
+```
+
+Body:
+
+```json
+{
+  "canonical_address": "123 W 1st St",
+  "market_id": "<market-uuid>",
+  "jurisdiction_id": "<jurisdiction-uuid>",
+  "project_name": "optional",
+  "zip": "90012",
+  "force_create": false
+}
+```
+
+`canonical_address`, `market_id`, and `jurisdiction_id` are required. The API
+validates that the jurisdiction belongs to the selected market, derives the
+legacy `projects.market` / `projects.jurisdiction` strings from those rows,
+normalizes the address, and runs the existing conservative matcher against the
+normalized address.
+
+If the matcher finds duplicate candidates and `force_create` is false, the API
+returns `created = false` with duplicate candidates and performs no write. The
+Pipeline modal lets the researcher open the existing project or resubmit with
+`force_create = true`.
+
+Confirmed creates insert a `projects` row, initial `Proposed` `status_history`,
+project edit metadata, and a `change_log` row with
+`change_type = researcher_confirmed`. Direct PostgREST project writes remain
+blocked; creation uses the privileged FastAPI database session.
+
+True merge into an existing project is not implemented in C.g.
+
 ## C.c Migration Verification
 
 Before C.d write endpoints are enabled, verify the `researcher_overrides`

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.deps import get_db_session, require_user
 from tcg_pipeline.api.errors import raise_not_implemented
+from tcg_pipeline.api.project_creation import create_project as create_project_value
 from tcg_pipeline.api.project_fields import append_project_note as append_project_note_value
 from tcg_pipeline.api.project_fields import update_project_field as update_project_field_value
 from tcg_pipeline.api.project_overrides import (
@@ -21,6 +21,8 @@ from tcg_pipeline.api.project_relationships import (
     add_project_relationship as add_project_relationship_value,
 )
 from tcg_pipeline.api.schemas import (
+    ProjectCreateRequest,
+    ProjectCreateResponse,
     ProjectFieldMutationResponse,
     ProjectFieldUpdateRequest,
     ProjectNoteAppendRequest,
@@ -34,15 +36,26 @@ from tcg_pipeline.api.schemas import (
 router = APIRouter(prefix="/projects", tags=["projects"])
 AUTH_USER = Depends(require_user)
 DB_SESSION = Depends(get_db_session)
-JSON_BODY = Body(default_factory=dict)
 
 
 @router.post("")
 def create_project(
-    _payload: dict[str, Any] = JSON_BODY,
-    _user: AuthenticatedUser = AUTH_USER,
-) -> None:
-    raise_not_implemented("project creation")
+    payload: ProjectCreateRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectCreateResponse:
+    return create_project_value(
+        session,
+        canonical_address=payload.canonical_address,
+        market_id=payload.market_id,
+        jurisdiction_id=payload.jurisdiction_id,
+        project_name=payload.project_name,
+        city=payload.city,
+        county=payload.county,
+        zip_code=payload.zip,
+        force_create=payload.force_create,
+        user=user,
+    )
 
 
 @router.get("/{project_id}")

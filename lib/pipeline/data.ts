@@ -29,6 +29,15 @@ type RawProject = {
 
 type RawJurisdiction = {
   id: string;
+  market_id: string;
+  slug: string;
+  name: string;
+  display_name: string | null;
+  state: string;
+};
+
+type RawMarket = {
+  id: string;
   slug: string;
   name: string;
   display_name: string | null;
@@ -95,7 +104,7 @@ function uniqueSorted(values: Array<string | null | undefined>) {
 export async function getPipelineData(): Promise<PipelineDataResult> {
   const supabase = await createSupabaseServerClient();
 
-  const [projects, jurisdictions, identifiers, evidenceRows] = await Promise.all([
+  const [projects, markets, jurisdictions, identifiers, evidenceRows] = await Promise.all([
     fetchAllRows<RawProject>(
       supabase,
       "projects",
@@ -121,7 +130,12 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
         "lng"
       ].join(", ")
     ),
-    fetchAllRows<RawJurisdiction>(supabase, "jurisdictions", "id, slug, name, display_name"),
+    fetchAllRows<RawMarket>(supabase, "markets", "id, slug, name, display_name"),
+    fetchAllRows<RawJurisdiction>(
+      supabase,
+      "jurisdictions",
+      "id, market_id, slug, name, display_name, state"
+    ),
     fetchAllRows<RawIdentifier>(supabase, "project_identifiers", "project_id, identifier_type, value"),
     fetchAllRows<RawLatestEvidence>(
       supabase,
@@ -130,7 +144,8 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
     )
   ]);
 
-  const error = projects.error ?? jurisdictions.error ?? identifiers.error ?? evidenceRows.error;
+  const error =
+    projects.error ?? markets.error ?? jurisdictions.error ?? identifiers.error ?? evidenceRows.error;
   if (error) {
     return {
       data: {
@@ -138,7 +153,9 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
         facets: {
           statuses: [],
           markets: [],
+          marketOptions: [],
           jurisdictions: [],
+          jurisdictionOptions: [],
           developers: [],
           submarkets: [],
           maxUnits: 0
@@ -216,7 +233,25 @@ export async function getPipelineData(): Promise<PipelineDataResult> {
       facets: {
         statuses: uniqueSorted(pipelineProjects.map((project) => project.pipelineStatus)),
         markets: uniqueSorted(pipelineProjects.map((project) => project.market)),
+        marketOptions: markets.rows
+          .map((market) => ({
+            id: market.id,
+            slug: market.slug,
+            name: market.name,
+            displayName: market.display_name ?? market.name
+          }))
+          .sort((a, b) => a.displayName.localeCompare(b.displayName)),
         jurisdictions: uniqueSorted(pipelineProjects.map((project) => project.jurisdiction?.displayName)),
+        jurisdictionOptions: jurisdictions.rows
+          .map((jurisdiction) => ({
+            id: jurisdiction.id,
+            marketId: jurisdiction.market_id,
+            slug: jurisdiction.slug,
+            name: jurisdiction.name,
+            displayName: jurisdiction.display_name ?? jurisdiction.name,
+            state: jurisdiction.state
+          }))
+          .sort((a, b) => a.displayName.localeCompare(b.displayName)),
         developers: uniqueSorted(pipelineProjects.map((project) => project.developer)).slice(0, 500),
         submarkets: uniqueSorted(pipelineProjects.map((project) => project.costarSubmarket)),
         maxUnits: Math.max(0, ...pipelineProjects.map((project) => project.totalUnits ?? 0))

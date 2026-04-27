@@ -21,7 +21,12 @@ import type { LayerProps, MapGeoJSONFeature, MapMouseEvent, MapRef } from "react
 import MapLibreMap, { Layer, NavigationControl, Popup, Source } from "react-map-gl/maplibre";
 import { Command } from "cmdk";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createProjectAction,
+  initialProjectCreateState,
+  type ProjectCreateActionState
+} from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { compactStatus, statusStyle, STATUS_STYLES } from "@/lib/status";
@@ -522,6 +527,207 @@ function CommandSearch({
   );
 }
 
+function NewProjectDialog({
+  data,
+  onCreated,
+  onOpenChange,
+  open
+}: {
+  data: PipelineData;
+  onCreated: (projectId: string) => void;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+}) {
+  const [state, action, pending] = useActionState(
+    createProjectAction,
+    initialProjectCreateState
+  );
+  const firstMarketId = data.facets.marketOptions[0]?.id ?? "";
+  const [selectedMarketId, setSelectedMarketId] = useState(firstMarketId);
+  const jurisdictionOptions = data.facets.jurisdictionOptions.filter(
+    (jurisdiction) => jurisdiction.marketId === selectedMarketId
+  );
+  const [selectedJurisdictionId, setSelectedJurisdictionId] = useState(
+    jurisdictionOptions[0]?.id ?? ""
+  );
+  const effectiveJurisdictionId = jurisdictionOptions.some(
+    (jurisdiction) => jurisdiction.id === selectedJurisdictionId
+  )
+    ? selectedJurisdictionId
+    : (jurisdictionOptions[0]?.id ?? "");
+
+  useEffect(() => {
+    if (state.created && state.projectId) {
+      onOpenChange(false);
+      onCreated(state.projectId);
+    }
+  }, [onCreated, onOpenChange, state.created, state.projectId]);
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/30 px-4 py-12"
+      onClick={() => onOpenChange(false)}
+    >
+      <div
+        className="w-full max-w-2xl rounded-md border border-slate-200 bg-white shadow-xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-4 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-slate-950">New project</h2>
+          </div>
+          <button
+            className="rounded px-2 py-1 text-sm text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+            type="button"
+            onClick={() => onOpenChange(false)}
+          >
+            Close
+          </button>
+        </div>
+
+        <form action={action} className="grid gap-3 px-4 py-4 md:grid-cols-2">
+          <label className="md:col-span-2">
+            <span className="text-xs font-medium text-slate-600">Canonical address</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              defaultValue={state.form.canonicalAddress}
+              maxLength={255}
+              name="canonicalAddress"
+              required
+            />
+          </label>
+
+          <label>
+            <span className="text-xs font-medium text-slate-600">Market</span>
+            <select
+              className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              name="marketId"
+              required
+              value={selectedMarketId}
+              onChange={(event) => {
+                const nextMarketId = event.target.value;
+                const nextJurisdictionId =
+                  data.facets.jurisdictionOptions.find(
+                    (jurisdiction) => jurisdiction.marketId === nextMarketId
+                  )?.id ?? "";
+                setSelectedMarketId(nextMarketId);
+                setSelectedJurisdictionId(nextJurisdictionId);
+              }}
+            >
+              {data.facets.marketOptions.map((market) => (
+                <option key={market.id} value={market.id}>
+                  {market.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            <span className="text-xs font-medium text-slate-600">Jurisdiction</span>
+            <select
+              className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              name="jurisdictionId"
+              required
+              value={effectiveJurisdictionId}
+              onChange={(event) => setSelectedJurisdictionId(event.target.value)}
+            >
+              {jurisdictionOptions.map((jurisdiction) => (
+                <option key={jurisdiction.id} value={jurisdiction.id}>
+                  {jurisdiction.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            <span className="text-xs font-medium text-slate-600">Project name</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              defaultValue={state.form.projectName}
+              maxLength={255}
+              name="projectName"
+            />
+          </label>
+
+          <label>
+            <span className="text-xs font-medium text-slate-600">ZIP</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-slate-200 px-2 text-sm text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              defaultValue={state.form.zip}
+              maxLength={10}
+              name="zip"
+            />
+          </label>
+
+          <div className="md:col-span-2 flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
+            <ActionMessage state={state} />
+            <Button disabled={pending} type="submit">
+              <Plus className="size-4" aria-hidden="true" />
+              Check and create
+            </Button>
+          </div>
+        </form>
+
+        {state.duplicateCandidates.length ? (
+          <div className="border-t border-amber-200 bg-amber-50 px-4 py-3">
+            <p className="text-sm font-semibold text-amber-950">Possible duplicate</p>
+            <div className="mt-2 grid gap-2">
+              {state.duplicateCandidates.map((candidate) => (
+                <div
+                  className="flex flex-col gap-2 rounded-md border border-amber-200 bg-white p-2 text-sm md:flex-row md:items-center md:justify-between"
+                  key={candidate.projectId}
+                >
+                  <div>
+                    <p className="font-medium text-slate-950">{candidate.projectName}</p>
+                    <p className="text-xs text-slate-500">{candidate.canonicalAddress}</p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {candidate.pipelineStatus} | {candidate.matchType}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => onCreated(candidate.projectId)}
+                  >
+                    Open existing
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <form action={action} className="mt-3 flex justify-end">
+              <input name="canonicalAddress" type="hidden" value={state.form.canonicalAddress} />
+              <input name="marketId" type="hidden" value={state.form.marketId} />
+              <input name="jurisdictionId" type="hidden" value={state.form.jurisdictionId} />
+              <input name="projectName" type="hidden" value={state.form.projectName} />
+              <input name="zip" type="hidden" value={state.form.zip} />
+              <input name="forceCreate" type="hidden" value="true" />
+              <Button disabled={pending} type="submit" variant="outline">
+                Create anyway
+              </Button>
+            </form>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ActionMessage({ state }: { state: ProjectCreateActionState }) {
+  if (!state.message) {
+    return <span />;
+  }
+
+  return (
+    <p className={cn("text-xs", state.ok ? "text-slate-600" : "text-red-700")}>
+      {state.message}
+    </p>
+  );
+}
+
 export function PipelineClient({ data, initialFilters }: PipelineClientProps) {
   const router = useRouter();
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -539,6 +745,7 @@ export function PipelineClient({ data, initialFilters }: PipelineClientProps) {
   const [hoveredProject, setHoveredProject] = useState<PipelineProject | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
   const [savedViewName, setSavedViewName] = useState("");
 
@@ -783,7 +990,7 @@ export function PipelineClient({ data, initialFilters }: PipelineClientProps) {
               Map
             </Button>
           </div>
-          <Button disabled title="Available in Phase C" type="button" variant="outline">
+          <Button type="button" variant="outline" onClick={() => setNewProjectOpen(true)}>
             <Plus className="size-4" aria-hidden="true" />
             New project
           </Button>
@@ -1053,6 +1260,12 @@ export function PipelineClient({ data, initialFilters }: PipelineClientProps) {
         projects={data.projects}
         onOpenChange={setCommandOpen}
         onSelectProject={(project) => router.push(`/pipeline/${project.id}`)}
+      />
+      <NewProjectDialog
+        data={data}
+        open={newProjectOpen}
+        onOpenChange={setNewProjectOpen}
+        onCreated={(projectId) => router.push(`/pipeline/${projectId}`)}
       />
     </main>
   );

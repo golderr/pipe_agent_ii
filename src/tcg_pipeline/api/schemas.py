@@ -68,6 +68,34 @@ class ProjectNoteAppendResponse(BaseModel):
     change_log_entries_created: int
 
 
+class ProjectCreateRequest(BaseModel):
+    canonical_address: str = Field(min_length=1, max_length=255)
+    market_id: uuid.UUID
+    jurisdiction_id: uuid.UUID
+    project_name: str | None = Field(default=None, max_length=255)
+    city: str | None = Field(default=None, max_length=120)
+    county: str | None = Field(default=None, max_length=120)
+    zip: str | None = Field(default=None, max_length=10)
+    force_create: bool = False
+
+
+class ProjectCreateCandidate(BaseModel):
+    project_id: uuid.UUID
+    project_name: str
+    canonical_address: str
+    pipeline_status: str
+    match_type: str
+    confidence: float | None
+
+
+class ProjectCreateResponse(BaseModel):
+    created: bool
+    project_id: uuid.UUID | None
+    canonical_address: str
+    duplicate_candidates: list[ProjectCreateCandidate]
+    change_log_entries_created: int
+
+
 class ProjectRelationshipCreateRequest(BaseModel):
     relationship_type: str = Field(min_length=1, max_length=50)
     related_project_id: uuid.UUID
