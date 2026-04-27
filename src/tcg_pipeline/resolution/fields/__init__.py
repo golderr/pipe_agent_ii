@@ -136,24 +136,6 @@ def apply_override(
         baseline,
         source_priority=source_priority,
     )
-    if mode == "until_newer_evidence" and candidate_is_newer:
-        candidate.metadata = dict(candidate.metadata)
-        candidate.metadata.update(
-            {
-                "override_superseded": True,
-                "override_value": normalize_comparable(override_value),
-                "override_set_by": override_payload.get("set_by"),
-                "override_set_at": override_payload.get("set_at"),
-                "override_note": override_payload.get("note"),
-                "override_mode": mode,
-                "override_baseline": baseline,
-            }
-        )
-        candidate.notes = list(candidate.notes)
-        candidate.notes.append(
-            "Researcher override yielded because newer evidence won for this field."
-        )
-        return candidate
 
     return build_resolution(
         field_name,

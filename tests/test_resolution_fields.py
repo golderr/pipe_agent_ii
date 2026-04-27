@@ -180,7 +180,7 @@ def test_resolve_developer_does_not_treat_future_projection_as_freshness() -> No
     assert resolution.value == "Researcher Developer"
 
 
-def test_resolve_developer_override_yields_to_higher_priority_source_on_temporal_tie() -> None:
+def test_resolve_developer_override_records_higher_priority_candidate_on_temporal_tie() -> None:
     project = _build_project()
     project.developer = "Current Dev"
     tied_timestamp = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
@@ -215,9 +215,11 @@ def test_resolve_developer_override_yields_to_higher_priority_source_on_temporal
         overrides=overrides,
     )
 
-    assert resolution.value == "News Dev"
-    assert resolution.metadata["override_superseded"] is True
-    assert resolution.metadata["override_value"] == "Reviewer Dev"
+    assert resolution.value == "Reviewer Dev"
+    assert resolution.rule_applied == "researcher_override_until_newer_evidence"
+    assert resolution.metadata["candidate_value"] == "News Dev"
+    assert resolution.metadata["candidate_is_newer_than_baseline"] is True
+    assert "override_superseded" not in resolution.metadata
 
 
 def test_sort_observations_prefers_collection_time_before_source_priority() -> None:
@@ -396,7 +398,7 @@ def test_resolve_delivery_year_override_sets_researcher_override_provenance() ->
     assert resolution.metadata["delivery_date_type"] == "researcher_override"
 
 
-def test_resolve_delivery_year_override_yields_to_newer_evidence_and_restores_provenance() -> None:
+def test_resolve_delivery_year_override_records_newer_candidate_and_keeps_override() -> None:
     project = _build_project()
     overrides = {
         "date_delivery": {
@@ -430,13 +432,17 @@ def test_resolve_delivery_year_override_yields_to_newer_evidence_and_restores_pr
         overrides=overrides,
     )
 
-    assert resolution.value == date(2030, 6, 1)
-    assert resolution.metadata["override_superseded"] is True
-    assert resolution.metadata["provenance"] == "explicit_government"
-    assert resolution.metadata["delivery_date_type"] == "explicit_government"
+    assert resolution.value == date(2029, 1, 1)
+    assert resolution.rule_applied == "researcher_override_until_newer_evidence"
+    assert resolution.metadata["candidate_value"] == "2030-06-01"
+    assert resolution.metadata["candidate_is_newer_than_baseline"] is True
+    assert resolution.metadata["provenance"] == "researcher_override"
+    assert resolution.metadata["delivery_date_type"] == "researcher_override"
+    assert "override_superseded" not in resolution.metadata
 
 
-def test_resolve_delivery_year_for_complete_rejects_future_explicit_date_and_keeps_prior_explicit() -> None:
+def test_resolve_delivery_year_for_complete_rejects_future_explicit_date_and_keeps_prior_explicit(
+) -> None:
     project = _build_project()
     project.date_delivery = date(2026, 3, 20)
     project.delivery_year_provenance = "explicit_costar"
@@ -579,7 +585,7 @@ def test_resolve_status_override_holds_until_newer_evidence() -> None:
     assert resolution.rule_applied == "researcher_override_until_newer_evidence"
 
 
-def test_resolve_status_override_yields_to_newer_evidence() -> None:
+def test_resolve_status_override_records_newer_candidate_and_keeps_override() -> None:
     project = _build_project()
     project.pipeline_status = PipelineStatus.APPROVED
     project.researcher_override = {
@@ -625,6 +631,8 @@ def test_resolve_status_override_yields_to_newer_evidence() -> None:
         overrides=project.researcher_override,
     )
 
-    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
-    assert resolution.metadata["override_superseded"] is True
-    assert resolution.metadata["override_value"] == PipelineStatus.PROPOSED.value
+    assert resolution.value == PipelineStatus.PROPOSED
+    assert resolution.rule_applied == "researcher_override_until_newer_evidence"
+    assert resolution.metadata["candidate_value"] == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert resolution.metadata["candidate_is_newer_than_baseline"] is True
+    assert "override_superseded" not in resolution.metadata

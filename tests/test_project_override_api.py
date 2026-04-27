@@ -260,10 +260,50 @@ def test_set_project_override_rejects_invalid_core_values(
     assert message in response.json()["detail"]
 
 
-@pytest.mark.parametrize("newer_value", [216, 260])
+def test_small_delta_newer_evidence_against_manual_override_does_not_create_review_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_override_api_tables(postgres_session)
+    project = _project("916 SMALL CONTRADICTION WAY LOS ANGELES CA 90012", total_units=100)
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(_total_units_evidence(project.id, 100, record_suffix="baseline"))
+    postgres_session.flush()
+    client = _client(postgres_session)
+
+    set_response = client.post(
+        f"/projects/{project.id}/override",
+        json={"field_name": "total_units", "value": 212},
+        headers=_auth_headers(),
+    )
+    assert set_response.status_code == 200
+    postgres_session.add(
+        _total_units_evidence(
+            project.id,
+            216,
+            record_suffix="newer",
+            collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            evidence_date=date(2026, 5, 1),
+        )
+    )
+    postgres_session.flush()
+
+    resolve_project(project.id, postgres_session, apply=True, write_resolution_log=False)
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalar_one_or_none()
+
+    assert project.total_units == 212
+    assert review_item is None
+
+
 def test_newer_evidence_against_manual_override_creates_review_item(
     postgres_session: Session,
-    newer_value: int,
 ) -> None:
     _ensure_override_api_tables(postgres_session)
     project = _project("916 CONTRADICTION WAY LOS ANGELES CA 90012", total_units=100)
@@ -282,7 +322,7 @@ def test_newer_evidence_against_manual_override_creates_review_item(
     postgres_session.add(
         _total_units_evidence(
             project.id,
-            newer_value,
+            260,
             record_suffix="newer",
             collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
             evidence_date=date(2026, 5, 1),
@@ -305,7 +345,7 @@ def test_newer_evidence_against_manual_override_creates_review_item(
     assert review_item.contradiction_priority == "medium"
     assert review_item.payload["field_name"] == "total_units"
     assert review_item.payload["current_override"]["value"] == 212
-    assert review_item.payload["proposed_value"] == newer_value
+    assert review_item.payload["proposed_value"] == 260
 
 
 def test_set_project_override_returns_404_for_missing_project(

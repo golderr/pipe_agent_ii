@@ -128,10 +128,13 @@ evidence would change that field under the resolver's field rules, the resolver
 creates an `override_contradiction` review item instead of silently overwriting
 or silently ignoring the manual edit.
 
-For C.d Core overrides, the trigger is intentionally strict: any newer
-auto-resolved value that differs from the manual value gets surfaced for review.
-Later C.i work can expand priority and batching rules without silently masking
-manual-field updates.
+C.i contradiction detection applies the field-specific thresholds from
+`EVIDENCE_LAYER_DECISIONS.md` §22: unit deltas must exceed 5, delivery dates
+must differ by more than 30 days unless recent article evidence is involved,
+developers compare after normalization/canonicalization, and pipeline status
+disagreements are always reviewable. Legacy `until_newer_evidence` overrides
+now use the same review-protected behavior instead of silently yielding to newer
+evidence.
 
 The preview-write block is enforced by the Next.js server action guard. The
 FastAPI service still trusts Supabase JWT validation plus `ALLOWED_EMAILS` for

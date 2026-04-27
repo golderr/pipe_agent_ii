@@ -394,8 +394,8 @@ CREATE TABLE researcher_overrides (
   cleared_by_user_id   UUID,                    -- Supabase auth.users id; no cross-schema FK in app migration
   note                 TEXT,
   source_url           TEXT,
-  mode                 TEXT,                    -- still honored until §22 contradiction handling replaces supersession
-  baseline             JSONB,                   -- still honored with mode until §22 contradiction handling lands
+  mode                 TEXT,                    -- audit/context only; no silent newer-evidence supersession
+  baseline             JSONB,                   -- audit/context for contradiction review payloads
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -412,7 +412,7 @@ The detection service runs in two triggers:
 1. **After evidence ingest** (collector finishes writing rows): for every project with an active override, check whether any newly-ingested evidence contradicts per §22.2 thresholds. If yes, create `override_contradiction` review items.
 2. **After resolution re-run** (any path that calls `resolve_project`): confirm overrides are still consistent with newest evidence; create review items for new contradictions not already tracked.
 
-The service produces at most one open `override_contradiction` review item per `(project_id, field_name)`. If one already exists and is `open` or `staged`, don't duplicate.
+The service produces at most one active `override_contradiction` review item per `(project_id, field_name)`. If one already exists and is `open` or `staged`, update it instead of duplicating it. If the contradiction disappears, mark the active item `invalidated`; any staged decision for that invalidated item is dropped unless the item is currently being committed.
 
 ### 6.6 Contradiction review item lifecycle
 

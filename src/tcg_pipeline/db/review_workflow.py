@@ -1122,6 +1122,11 @@ def _apply_field_or_contradiction_decision(
         session,
         apply=True,
         write_resolution_log=True,
+        skip_contradiction_review_item_ids=(
+            {review_item.id}
+            if review_item.item_type == ReviewItemType.OVERRIDE_CONTRADICTION
+            else None
+        ),
     )
     change_log_count = _write_commit_change_logs(
         session,

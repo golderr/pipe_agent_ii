@@ -1052,7 +1052,7 @@ def test_commit_staged_discovery_reject_preserves_dismiss_reason(
     assert dismissed.reason == DismissReason.NOT_RESIDENTIAL
 
 
-def test_reject_status_change_creates_expiring_override_and_newer_evidence_supersedes_it(
+def test_reject_status_change_creates_review_protected_override_and_newer_evidence_flags_it(
     postgres_session: Session,
 ) -> None:
     _ensure_review_tables(postgres_session)
@@ -1164,7 +1164,7 @@ def test_reject_status_change_creates_expiring_override_and_newer_evidence_super
         },
         source_row_hash="inspection-status-reject-hash",
     )
-    inspection_collect_result = persist_collected_records(
+    persist_collected_records(
         postgres_session,
         market="los_angeles",
         source_name="ladbs_inspections",
@@ -1174,28 +1174,32 @@ def test_reject_status_change_creates_expiring_override_and_newer_evidence_super
     postgres_session.flush()
     postgres_session.refresh(project)
 
-    follow_up_review_item = postgres_session.execute(
+    contradiction_review_item = postgres_session.execute(
         select(ReviewItem).where(
-            ReviewItem.source_run_id == inspection_collect_result.source_run_id,
             ReviewItem.project_id == project.id,
-            ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
         )
     ).scalar_one()
 
-    assert project.pipeline_status == PipelineStatus.UNDER_CONSTRUCTION
-    assert "pipeline_status" not in (project.researcher_override or {})
+    assert project.pipeline_status == PipelineStatus.PROPOSED
+    assert project.researcher_override["pipeline_status"]["value"] == PipelineStatus.PROPOSED.value
     postgres_session.refresh(table_override)
-    assert table_override.cleared_at is not None
-    assert {
-        "code": "researcher_override_superseded",
-        "message": (
-            "Newer evidence superseded the reviewer-selected pipeline_status value "
-            "'Proposed' set by nate."
-        ),
-        "priority": "high",
-    } in follow_up_review_item.payload["review_flags"]
+    assert table_override.cleared_at is None
+    assert contradiction_review_item.state == "open"
+    assert contradiction_review_item.status == ReviewItemStatus.OPEN
+    assert contradiction_review_item.priority == Priority.HIGH
+    assert contradiction_review_item.contradicted_override_id == table_override.id
+    assert contradiction_review_item.payload["field_name"] == "pipeline_status"
+    assert (
+        contradiction_review_item.payload["current_override"]["value"]
+        == PipelineStatus.PROPOSED.value
+    )
+    assert (
+        contradiction_review_item.payload["proposed_value"]
+        == PipelineStatus.UNDER_CONSTRUCTION.value
+    )
 
-    post_supersession_resolution = resolve_project(
+    post_contradiction_resolution = resolve_project(
         project.id,
         postgres_session,
         apply=True,
@@ -1204,8 +1208,17 @@ def test_reject_status_change_creates_expiring_override_and_newer_evidence_super
     postgres_session.flush()
     postgres_session.refresh(project)
 
-    assert "pipeline_status" not in (project.researcher_override or {})
+    contradiction_review_items = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalars().all()
+
+    assert project.pipeline_status == PipelineStatus.PROPOSED
+    assert project.researcher_override["pipeline_status"]["value"] == PipelineStatus.PROPOSED.value
+    assert len(contradiction_review_items) == 1
     assert not any(
         review_flag.code == "researcher_override_superseded"
-        for review_flag in post_supersession_resolution.review_flags
+        for review_flag in post_contradiction_resolution.review_flags
     )

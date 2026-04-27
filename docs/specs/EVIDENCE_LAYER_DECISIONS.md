@@ -558,13 +558,15 @@ Backward compatibility:
 
 Rejecting a status-change review item should block the same evidence from re-applying, but it must not block genuinely newer evidence.
 
+2026-04-27 implementation note: §22 supersedes the silent-supersession parts of this section. A rejected status still writes a researcher override, but newer contradictory evidence now opens an `override_contradiction` review item instead of clearing the override or emitting `researcher_override_superseded`.
+
 Decisions:
 
 - Rejecting a `STATUS_CHANGE` item writes a conditional override for `pipeline_status` using the review item's prior status as the override value.
 - The override baseline is copied from the current status field resolution at reject time.
 - The workflow immediately re-runs `resolve_project()` after writing the override so the project reverts in the same transaction.
 - If the review item is stale and the current status resolution no longer matches the rejected candidate, no override is written.
-- When newer evidence later supersedes the reviewer-selected status, the resolver emits a `researcher_override_superseded` review flag so collector-driven review items can surface that change back to the researcher.
+- When newer evidence later contradicts the reviewer-selected status, the resolver emits an `override_contradiction` review item so the researcher can accept the new value, keep the old value, defer, or enter a custom value.
 
 ### 21b. Observation Ordering Refinement
 
@@ -584,7 +586,7 @@ When `date_delivery` is currently supplied by a researcher override:
 - `project.date_delivery` still stores the override date
 - `project.delivery_year_provenance` is set to `researcher_override`
 
-If newer evidence later supersedes the override, provenance returns to the winning evidence-derived value such as `explicit_government`, `explicit_tcg`, `explicit_news`, `explicit_costar`, or `estimated_calc`.
+If the override is explicitly cleared or an `override_contradiction` accept-new decision clears it, provenance returns to the winning evidence-derived value such as `explicit_government`, `explicit_tcg`, `explicit_news`, `explicit_costar`, or `estimated_calc`. Newer evidence alone no longer silently supersedes delivery-date overrides.
 
 ### 21d. Delivery-Estimate Fill Policy
 
@@ -613,7 +615,7 @@ Decisions:
 
 - Any source may overwrite `project.total_units` when `abs(resolved_value - current_value) <= 5`.
 - Larger deltas require researcher review before apply.
-- The preferred hold primitive is a `researcher_override` in `until_newer_evidence` mode so genuinely newer evidence can still supersede the reviewer-held value.
+- The preferred hold primitive is a `researcher_override` reviewed through §22 semantics: the held value remains current, while genuinely newer contradictory evidence opens an `override_contradiction` review item.
 
 Rationale:
 
@@ -744,6 +746,6 @@ The priority of the contradiction review item reflects the strength of the contr
 
 #### 22.10 Implementation scope
 
-- Contradiction detection becomes a first-class service invoked during resolution and on new evidence ingest. See `docs/specs/data_model_changes.md` for the `contradiction_flags` / `ReviewItem` extension.
-- `review_workflow.py` must be updated to emit contradiction review items. The existing `researcher_override_superseded` flag path is replaced by the new review-item emission.
+- C.i added `tcg_pipeline.review.contradictions` as the first-class contradiction service. It is invoked during `resolve_project(apply=True)` and exposes a batch `detect_contradictions(project_ids)` entrypoint for ingest/backfill paths. See `docs/specs/data_model_changes.md` for the `ReviewItem` extension.
+- `review_workflow.py` accepts new, keep-old, defer, and custom decisions for contradiction rows. The old `researcher_override_superseded` flag path has been replaced by `override_contradiction` review item emission.
 - UI surfaces the review items as normal queue entries with the `⚠ contradicts your override` warning.

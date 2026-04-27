@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import date, datetime
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,17 +13,10 @@ from tcg_pipeline.db.models import (
     Evidence,
     Priority,
     Project,
-    ResearcherOverride,
     ResolutionLog,
-    ReviewItem,
-    ReviewItemStatus,
-    ReviewItemType,
     StatusHistory,
 )
-from tcg_pipeline.db.researcher_overrides import (
-    active_researcher_overrides_for_project,
-    clear_researcher_override_fields,
-)
+from tcg_pipeline.db.researcher_overrides import active_researcher_overrides_for_project
 from tcg_pipeline.matching.differ import ReviewFlag
 from tcg_pipeline.resolution.confidence import compute_overall_confidence
 from tcg_pipeline.resolution.fields import (
@@ -39,6 +31,7 @@ from tcg_pipeline.resolution.fields.product_type import resolve_product_type
 from tcg_pipeline.resolution.fields.status import resolve_status
 from tcg_pipeline.resolution.fields.units import resolve_unit_split, resolve_units
 from tcg_pipeline.resolution.likelihood import compute_likelihood
+from tcg_pipeline.review.contradictions import detect_project_contradictions
 
 LOGGED_FIELDS = {
     "pipeline_status",
@@ -77,6 +70,7 @@ def resolve_project(
     *,
     apply: bool = False,
     write_resolution_log: bool = True,
+    skip_contradiction_review_item_ids: set[Any] | None = None,
 ) -> ProjectResolutionResult:
     project = session.get(Project, project_id)
     if project is None:
@@ -232,15 +226,11 @@ def resolve_project(
         previous_status = project.pipeline_status
         for field_name, resolution in field_resolutions.items():
             setattr(project, field_name, resolution.value)
-        _clear_superseded_researcher_overrides(
+        detect_project_contradictions(
             session,
-            project,
-            field_resolutions,
-        )
-        _upsert_override_contradiction_review_items(
-            session,
-            project,
-            field_resolutions,
+            project=project,
+            field_resolutions=field_resolutions,
+            skip_review_item_ids=skip_contradiction_review_item_ids,
         )
         if previous_status != project.pipeline_status:
             status_source = status_resolution.metadata.get("source_type") or "resolution_engine"
@@ -312,7 +302,6 @@ def _build_review_flags(
     developer_resolution: FieldResolution,
 ) -> list[ReviewFlag]:
     review_flags: list[ReviewFlag] = []
-    review_flags.extend(_override_superseded_review_flags(field_resolutions))
     if status_resolution.metadata.get("requires_review") and (
         project.pipeline_status != status_resolution.value
         or status_resolution.metadata.get("candidate_status") is not None
@@ -392,224 +381,3 @@ def _build_review_flags(
             )
 
     return review_flags
-
-
-def _override_superseded_review_flags(
-    field_resolutions: dict[str, FieldResolution],
-) -> list[ReviewFlag]:
-    priorities = {
-        "pipeline_status": Priority.HIGH,
-    }
-    review_flags: list[ReviewFlag] = []
-    for field_name, resolution in field_resolutions.items():
-        if not resolution.metadata.get("override_superseded"):
-            continue
-        previous_value = resolution.metadata.get("override_value")
-        set_by = resolution.metadata.get("override_set_by") or "researcher"
-        review_flags.append(
-            ReviewFlag(
-                code="researcher_override_superseded",
-                message=(
-                    f"Newer evidence superseded the reviewer-selected {field_name} value "
-                    f"{previous_value!r} set by {set_by}."
-                ),
-                priority=priorities.get(field_name, Priority.MEDIUM),
-            )
-        )
-    return review_flags
-
-
-def _clear_superseded_researcher_overrides(
-    session: Session,
-    project: Project,
-    field_resolutions: dict[str, FieldResolution],
-) -> None:
-    superseded_fields = {
-        field_name
-        for field_name, resolution in field_resolutions.items()
-        if resolution.metadata.get("override_superseded")
-    }
-    clear_researcher_override_fields(session, project, superseded_fields)
-
-
-def _upsert_override_contradiction_review_items(
-    session: Session,
-    project: Project,
-    field_resolutions: dict[str, FieldResolution],
-) -> None:
-    active_override_ids = _active_override_ids_by_field(session, project)
-    existing_items = _existing_override_contradiction_items_by_field(session, project)
-    for field_name, resolution in field_resolutions.items():
-        if not _is_review_protected_override_contradiction(field_name, resolution):
-            continue
-        priority = _override_contradiction_priority(field_name, resolution)
-        payload = _override_contradiction_payload(field_name, resolution)
-        existing_item = existing_items.get(field_name)
-        if existing_item is not None:
-            existing_item.priority = priority
-            existing_item.contradiction_priority = priority.value
-            existing_item.payload = payload
-            existing_item.contradicted_override_id = active_override_ids.get(field_name)
-            continue
-        session.add(
-            ReviewItem(
-                project_id=project.id,
-                item_type=ReviewItemType.OVERRIDE_CONTRADICTION,
-                status=ReviewItemStatus.OPEN,
-                priority=priority,
-                payload=payload,
-                contradicted_override_id=active_override_ids.get(field_name),
-                contradiction_priority=priority.value,
-            )
-        )
-
-
-def _is_review_protected_override_contradiction(
-    field_name: str,
-    resolution: FieldResolution,
-) -> bool:
-    if not resolution.rule_applied.startswith("researcher_override"):
-        return False
-    if resolution.metadata.get("mode") != "review_protected":
-        return False
-    if not resolution.metadata.get("candidate_is_newer_than_baseline"):
-        return False
-    candidate_value = resolution.metadata.get("candidate_value")
-    if not resolution.metadata.get("candidate_evidence_ids"):
-        return False
-    return _values_contradict(field_name, resolution.value, candidate_value)
-
-
-def _values_contradict(field_name: str, override_value: Any, candidate_value: Any) -> bool:
-    override_normalized = normalize_comparable(override_value)
-    candidate_normalized = normalize_comparable(candidate_value)
-    if override_normalized == candidate_normalized:
-        return False
-    # Review-protected manual edits use a stricter trigger than generic
-    # contradiction detection: any newer auto-resolved value change needs review.
-    if field_name in {"total_units", "affordable_units", "market_rate_units"}:
-        try:
-            return int(override_normalized) != int(candidate_normalized)
-        except (TypeError, ValueError):
-            return True
-    if field_name == "date_delivery":
-        override_date = _date_from_comparable(override_normalized)
-        candidate_date = _date_from_comparable(candidate_normalized)
-        if override_date is None or candidate_date is None:
-            return True
-        return override_date != candidate_date
-    if field_name == "developer":
-        return str(override_normalized or "").strip().lower() != str(
-            candidate_normalized or ""
-        ).strip().lower()
-    return True
-
-
-def _override_contradiction_priority(
-    field_name: str,
-    resolution: FieldResolution,
-) -> Priority:
-    candidate_frontier = resolution.metadata.get("candidate_evidence_frontier")
-    if isinstance(candidate_frontier, dict) and candidate_frontier.get("source_tier") == 1:
-        return Priority.HIGH
-    if field_name in {"total_units", "affordable_units", "market_rate_units"}:
-        try:
-            delta = abs(
-                int(normalize_comparable(resolution.value))
-                - int(resolution.metadata.get("candidate_value"))
-            )
-        except (TypeError, ValueError):
-            delta = 0
-        if delta > 50:
-            return Priority.HIGH
-    if field_name == "pipeline_status":
-        return Priority.HIGH
-    return Priority.MEDIUM
-
-
-def _override_contradiction_payload(
-    field_name: str,
-    resolution: FieldResolution,
-) -> dict[str, Any]:
-    return {
-        "origin": "override_contradiction_detection",
-        "field_name": field_name,
-        "current_override": {
-            "value": normalize_comparable(resolution.value),
-            "set_by": resolution.metadata.get("set_by"),
-            "set_at": resolution.metadata.get("set_at"),
-            "note": resolution.metadata.get("note"),
-            "mode": resolution.metadata.get("mode"),
-            "baseline": resolution.metadata.get("baseline"),
-        },
-        "proposed_value": resolution.metadata.get("candidate_value"),
-        "candidate": {
-            "value": resolution.metadata.get("candidate_value"),
-            "rule_applied": resolution.metadata.get("candidate_rule_applied"),
-            "confidence": resolution.metadata.get("candidate_confidence"),
-            "evidence_ids": resolution.metadata.get("candidate_evidence_ids") or [],
-            "evidence_date": resolution.metadata.get("candidate_evidence_date"),
-            "evidence_frontier": _json_safe(
-                resolution.metadata.get("candidate_evidence_frontier")
-            ),
-        },
-        "message": f"Newer evidence contradicts the manually edited {field_name} value.",
-    }
-
-
-def _active_override_ids_by_field(
-    session: Session,
-    project: Project,
-) -> dict[str, Any]:
-    rows = session.execute(
-        select(ResearcherOverride.field_name, ResearcherOverride.id).where(
-            ResearcherOverride.project_id == project.id,
-            ResearcherOverride.cleared_at.is_(None),
-        )
-    ).all()
-    return {field_name: override_id for field_name, override_id in rows}
-
-
-def _existing_override_contradiction_items_by_field(
-    session: Session,
-    project: Project,
-) -> dict[str, ReviewItem]:
-    rows = session.execute(
-        select(ReviewItem).where(
-            ReviewItem.project_id == project.id,
-            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
-            ReviewItem.state.in_(["open", "staged"]),
-        )
-    ).scalars().all()
-    items_by_field: dict[str, ReviewItem] = {}
-    for item in rows:
-        payload = item.payload if isinstance(item.payload, dict) else {}
-        field_name = payload.get("field_name")
-        if isinstance(field_name, str):
-            items_by_field[field_name] = item
-    return items_by_field
-
-
-def _date_from_comparable(value: Any) -> date | None:
-    if isinstance(value, date):
-        return value
-    if not isinstance(value, str):
-        return None
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, enum.Enum):
-        return value.value
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    return value
