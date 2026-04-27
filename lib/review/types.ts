@@ -58,3 +58,11 @@ export type ReviewQueueData = {
   sourceRuns: Record<string, ReviewSourceRunSummary>;
   generatedAt: string;
 };
+
+export type ReviewItemDetailData = {
+  item: ReviewQueueItem;
+  project: ReviewProjectSummary | null;
+  candidateProjects: ReviewProjectSummary[];
+  sourceRun: ReviewSourceRunSummary | null;
+  generatedAt: string;
+};

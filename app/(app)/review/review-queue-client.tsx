@@ -124,12 +124,8 @@ export function ReviewQueueClient({
         normalizedValue = acceptDecisionValue(item);
       }
       if (decisionType === "custom" && normalizedValue === undefined) {
-        const proposedValue = proposedValueForItem(item);
-        const entered = window.prompt("Custom value", formatValue(proposedValue));
-        if (entered === null) {
-          return;
-        }
-        normalizedValue = { value: entered };
+        router.push(`/review/${item.id}`);
+        return;
       }
 
       setPendingItemId(item.id);
@@ -746,6 +742,14 @@ function ReviewItemRow({
             pending={pending}
             onClick={() => onStage(item, "custom")}
           />
+          <Link
+            className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
+            href={`/review/${item.id}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ExternalLink className="size-3.5" aria-hidden="true" />
+            Detail
+          </Link>
           {stagedByMe ? (
             <Button
               type="button"

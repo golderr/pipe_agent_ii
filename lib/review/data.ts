@@ -5,6 +5,7 @@ import { accessTokenForApi, responseErrorMessage } from "@/lib/server-actions";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type {
   ReviewDecisionSummary,
+  ReviewItemDetailData,
   ReviewProjectSummary,
   ReviewQueueData,
   ReviewQueueItem,
@@ -14,6 +15,11 @@ import type {
 type ReviewQueueDataResult =
   | { data: ReviewQueueData; error: null }
   | { data: null; error: string };
+
+type ReviewItemDetailDataResult =
+  | { data: ReviewItemDetailData; error: null; notFound?: false }
+  | { data: null; error: string; notFound?: false }
+  | { data: null; error: null; notFound: true };
 
 type ReviewDecisionApi = {
   decision_id: string;
@@ -117,6 +123,62 @@ export async function getReviewQueueData(options: {
     return {
       data: null,
       error: error instanceof Error ? error.message : "Review queue request failed."
+    };
+  }
+}
+
+export async function getReviewItemDetailData(
+  itemId: string
+): Promise<ReviewItemDetailDataResult> {
+  try {
+    const apiBaseUrl = requireApiBaseUrl();
+    const accessToken = await accessTokenForApi();
+    const response = await fetch(`${apiBaseUrl}/review/queue/${itemId}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      cache: "no-store"
+    });
+
+    if (response.status === 404) {
+      return { data: null, error: null, notFound: true };
+    }
+    if (!response.ok) {
+      return {
+        data: null,
+        error: await responseErrorMessage(response, "Review item request failed.")
+      };
+    }
+
+    const item = mapReviewItem((await response.json()) as ReviewQueueItemApi);
+    const [projects, sourceRuns] = await Promise.all([
+      fetchProjects([item]),
+      fetchSourceRuns([item])
+    ]);
+    const error = projects.error ?? sourceRuns.error;
+    if (error) {
+      return { data: null, error };
+    }
+
+    const projectById = new Map(projects.rows.map((project) => [project.id, project]));
+    const candidateProjects = candidateProjectIdsForItem(item)
+      .map((projectId) => projectById.get(projectId))
+      .filter((project): project is ReviewProjectSummary => Boolean(project));
+
+    return {
+      data: {
+        item,
+        project: item.projectId ? projectById.get(item.projectId) ?? null : null,
+        candidateProjects,
+        sourceRun: sourceRuns.rows[0] ?? null,
+        generatedAt: new Date().toISOString()
+      },
+      error: null
+    };
+  } catch (error) {
+    return {
+      data: null,
+      error: error instanceof Error ? error.message : "Review item request failed."
     };
   }
 }

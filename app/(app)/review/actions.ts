@@ -52,6 +52,7 @@ export async function stageReviewDecisionAction(
     }
 
     revalidateReviewSurfaces();
+    revalidatePath(`/review/${input.reviewItemId}`);
     return {
       ok: true,
       message: input.revise ? "Decision revised." : "Decision staged."
@@ -87,6 +88,7 @@ export async function unstageReviewDecisionAction(
     }
 
     revalidateReviewSurfaces();
+    revalidatePath(`/review/${reviewItemId}`);
     return { ok: true, message: "Decision unstaged." };
   } catch (error) {
     return {
