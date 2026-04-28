@@ -267,6 +267,17 @@ def test_scrape_job_status_serializes_job() -> None:
     assert response.json()["progress"] == {"message": "Queued for API background scrape."}
 
 
+def test_scrape_worker_health_reports_unconfigured_queue() -> None:
+    client = _client()
+
+    response = client.get("/scrape_workers/health", headers=_auth_headers())
+
+    assert response.status_code == 200
+    assert response.json()["configured"] is False
+    assert response.json()["available"] is False
+    assert response.json()["queue_name"] == "scrape_jobs"
+
+
 def test_costar_upload_uses_full_actor_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client()
     client.app.dependency_overrides[get_db_session] = lambda: object()

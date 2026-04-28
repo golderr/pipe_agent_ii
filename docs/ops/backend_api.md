@@ -40,6 +40,8 @@ API_AUTH_AUDIENCE=authenticated
 API_REQUIRED_ROLE=authenticated
 API_JWKS_CACHE_TTL_SECONDS=600
 ENABLE_PREVIEW_WRITES=false
+REDIS_URL=redis://...
+SCRAPE_JOB_QUEUE_NAME=scrape_jobs
 ```
 
 `DATABASE_URL` is the privileged server-side Postgres connection used by the API.
@@ -50,6 +52,9 @@ closed, including local development, preview, and staging deployments.
 
 `ENABLE_PREVIEW_WRITES` only affects the Next.js server action guard. Keep it
 false unless a preview write session has an explicit target and owner.
+
+`REDIS_URL` enables durable RQ-backed scrape execution. If it is unset, local
+Coverage Refresh falls back to FastAPI background tasks.
 
 `GEOCODIO_API_KEY` and `ESRI_API_KEY` are optional for local development, but
 production project creation should configure both. Manual project creation tries
@@ -85,6 +90,16 @@ Health check path:
 ```text
 /healthz
 ```
+
+Durable scrape worker command for a separate Render worker service:
+
+```powershell
+tcg-pipeline worker
+```
+
+Run one worker process per Render worker instance. RQ workers process one job at
+a time, so concurrency is controlled by the number of worker service instances
+rather than threads inside a single process.
 
 Set the same environment variables as local, with production values. The Render
 service should not be used by Vercel preview writes until the preview/staging
@@ -369,6 +384,8 @@ Coverage source actions now call FastAPI:
 POST /coverage/{jurisdiction_id}/scrape
 POST /coverage/{jurisdiction_id}/costar-upload
 GET  /scrape_jobs/{job_id}?jurisdiction_id={jurisdiction_id}
+GET  /coverage/{jurisdiction_id}/scrape_jobs?source_name={source_name}&limit=5
+GET  /scrape_workers/health
 ```
 
 `scrape` enqueues a tracked `scrape_jobs` row for an active non-CoStar source
@@ -381,21 +398,31 @@ registration. The body is:
 ```
 
 The response includes the job id, status, timestamps, actor identity, and
-progress payload. Implemented Socrata sources with local adapters currently run
-through a FastAPI background task immediately after enqueue:
+progress payload. When `REDIS_URL` is configured, implemented Socrata sources
+with local adapters are pushed to the RQ queue consumed by `tcg-pipeline worker`.
+When `REDIS_URL` is unset, local/dev still runs the existing FastAPI background
+task immediately after enqueue:
 
 - `ladbs_permits`
 - `ladbs_permit_activity`
 - `ladbs_inspections`
 - `ladbs_cofo`
 
-Unsupported sources return `400` with a worker-pending message instead of
+Unsupported sources return `400` with a collector-unavailable message instead of
 creating a job that nothing consumes. The Coverage UI polls the jurisdiction-
 scoped status URL while the status is `queued` or `running`. Active duplicate
 jobs are prevented by a partial unique index on `(jurisdiction_id, source_name)`
 for `queued` / `running` rows; a duplicate click returns the existing active job
 when visible to the request, or `409` if the database unique constraint wins a
 race.
+
+`GET /coverage/{jurisdiction_id}/scrape_jobs` returns the newest scrape jobs for
+a jurisdiction/source and powers the Coverage "History" expansion. `GET
+/scrape_workers/health` reports Redis/RQ queue availability, queued/started/failed
+job counts, and visible worker count for authenticated operators. Application-
+level collector and persistence failures are recorded on `scrape_jobs.status =
+failed`; unexpected RQ failures remain visible in the queue's failed registry
+until `SCRAPE_JOB_FAILURE_TTL_SECONDS` expires.
 
 `costar-upload` accepts multipart form data with a single `file` field. Uploads
 are capped at 50 MB. The API parses and persists the workbook through the
@@ -406,7 +433,8 @@ row count, status, and error text. Failed imports return a normal response with
 
 C.l requires the `202604270014` Alembic migration and the `python-multipart`
 runtime dependency before deployed code handles uploads. C.l-bis requires
-`202604270015` for active-job uniqueness.
+`202604270015` for active-job uniqueness. C.tail.1 adds the `redis` and `rq`
+runtime dependencies plus the Render worker service.
 
 ## C.c Migration Verification
 

@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     )
     geocoding_timeout_seconds: float = 8.0
     allowed_emails: str | None = None
+    redis_url: str | None = None
+    scrape_job_queue_name: str = "scrape_jobs"
+    scrape_job_timeout_seconds: int = 900
+    scrape_job_result_ttl_seconds: int = 86400
+    scrape_job_failure_ttl_seconds: int = 604800
 
     api_cors_origins: str = "http://localhost:3000"
     api_auth_audience: str = "authenticated"

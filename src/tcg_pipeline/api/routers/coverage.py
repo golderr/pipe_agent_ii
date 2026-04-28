@@ -24,12 +24,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
-from tcg_pipeline.api.deps import get_db_session, require_user
+from tcg_pipeline.api.deps import get_app_settings, get_db_session, require_user
 from tcg_pipeline.api.errors import raise_not_implemented
 from tcg_pipeline.api.schemas import (
     CoStarUploadResponse,
     CoverageScrapeRequest,
     ScrapeJobResponse,
+    ScrapeWorkerHealthResponse,
 )
 from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest, RawRecord
 from tcg_pipeline.collectors.factory import build_collector
@@ -48,11 +49,14 @@ from tcg_pipeline.db.models import (
 from tcg_pipeline.db.seed import CoStarPersistResult, seed_costar_workbooks
 from tcg_pipeline.ingesters.costar import COSTAR_SOURCE_NAME, CoStarImportResult
 from tcg_pipeline.market_config import SourceConfig, get_market_config
+from tcg_pipeline.settings import Settings
 from tcg_pipeline.source_adapters import ADAPTER_BUILDERS
+from tcg_pipeline.workers.scrape_jobs import enqueue_scrape_job_execution, scrape_queue_status
 
 router = APIRouter(tags=["coverage"])
 AUTH_USER = Depends(require_user)
 DB_SESSION = Depends(get_db_session)
+APP_SETTINGS = Depends(get_app_settings)
 JSON_BODY = Body(default_factory=dict)
 COSTAR_FILE = File(...)
 COSTAR_SOURCE_CLASS = "costar"
@@ -91,15 +95,18 @@ def enqueue_scrape(
     background_tasks: BackgroundTasks,
     user: AuthenticatedUser = AUTH_USER,
     session: Session = DB_SESSION,
+    settings: Settings = APP_SETTINGS,
 ) -> ScrapeJobResponse:
     job = enqueue_scrape_job(
         session,
         jurisdiction_id=jurisdiction_id,
         source_name=payload.source_name,
         user=user,
+        queue_backend="rq" if settings.redis_url else "background",
     )
     session.commit()
-    background_tasks.add_task(run_scrape_job, job.id)
+    if not enqueue_scrape_job_execution(job.id, settings=settings):
+        background_tasks.add_task(run_scrape_job, job.id)
     return _serialize_scrape_job(job)
 
 
@@ -134,12 +141,51 @@ def get_scrape_job(
     return _serialize_scrape_job(job)
 
 
+@router.get("/coverage/{jurisdiction_id}/scrape_jobs")
+def list_scrape_jobs(
+    jurisdiction_id: uuid.UUID,
+    source_name: str | None = None,
+    limit: int = 5,
+    _user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> list[ScrapeJobResponse]:
+    bounded_limit = min(max(limit, 1), 25)
+    query = (
+        select(ScrapeJob)
+        .where(ScrapeJob.jurisdiction_id == jurisdiction_id)
+        .order_by(ScrapeJob.queued_at.desc(), ScrapeJob.id.desc())
+        .limit(bounded_limit)
+    )
+    if source_name:
+        query = query.where(ScrapeJob.source_name == source_name)
+    return [_serialize_scrape_job(job) for job in session.execute(query).scalars().all()]
+
+
+@router.get("/scrape_workers/health")
+def get_scrape_worker_health(
+    _user: AuthenticatedUser = AUTH_USER,
+    settings: Settings = APP_SETTINGS,
+) -> ScrapeWorkerHealthResponse:
+    status = scrape_queue_status(settings=settings)
+    return ScrapeWorkerHealthResponse(
+        configured=status.configured,
+        available=status.available,
+        queue_name=status.queue_name,
+        queued_jobs=status.queued_jobs,
+        started_jobs=status.started_jobs,
+        failed_jobs=status.failed_jobs,
+        worker_count=status.worker_count,
+        error=status.error,
+    )
+
+
 def enqueue_scrape_job(
     session: Session,
     *,
     jurisdiction_id: uuid.UUID,
     source_name: str,
     user: AuthenticatedUser,
+    queue_backend: str = "background",
 ) -> ScrapeJob:
     jurisdiction = _load_jurisdiction(session, jurisdiction_id)
     registration = _load_source_registration(
@@ -166,7 +212,12 @@ def enqueue_scrape_job(
         initiated_by_user_id=user.user_id,
         initiated_by_email=user.email,
         status=ScrapeJobStatus.QUEUED,
-        progress={"message": "Queued for API background scrape."},
+        progress={
+            "message": "Queued for scraper worker."
+            if queue_backend == "rq"
+            else "Queued for API background scrape.",
+            "queue_backend": queue_backend,
+        },
     )
     session.add(job)
     try:

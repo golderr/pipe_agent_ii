@@ -14,6 +14,7 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   enqueueScrapeAction,
+  getScrapeJobHistoryAction,
   getScrapeJobAction,
   uploadCostarAction,
   type ScrapeJobStatus
@@ -266,6 +267,8 @@ function SourceDetail({
   const ActionIcon = source.sourceClass === "costar" ? Upload : RefreshCw;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [job, setJob] = useState<ScrapeJobStatus | null>(null);
+  const [history, setHistory] = useState<ScrapeJobStatus[] | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [pollAttempts, setPollAttempts] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [tone, setTone] = useState<"neutral" | "success" | "error">("neutral");
@@ -335,80 +338,140 @@ function SourceDetail({
     });
   }
 
+  function toggleHistory() {
+    const nextOpen = !historyOpen;
+    setHistoryOpen(nextOpen);
+    if (!nextOpen || history) {
+      return;
+    }
+    startTransition(async () => {
+      const result = await getScrapeJobHistoryAction(jurisdictionId, source.sourceName);
+      if (result.jobs) {
+        setHistory(result.jobs);
+      }
+      if (!result.ok) {
+        setTone("error");
+        setMessage(result.message);
+      }
+    });
+  }
+
   return (
-    <div className="grid grid-cols-[auto_minmax(12rem,1fr)_minmax(9rem,auto)_minmax(10rem,auto)_auto] items-center gap-3 border-t border-slate-100 py-2 text-sm first:border-t-0">
-      <SourceBadge sourceClass={source.sourceClass} />
-      <div>
-        <p className="font-medium text-slate-900">{titleFromSlug(source.sourceName)}</p>
-        <p className="text-xs text-slate-500">{source.active ? "Active" : "Inactive"}</p>
-      </div>
-      <div className="text-slate-700">
-        <p>{formatDate(source.lastRunAt)}</p>
-        <p className="text-xs text-slate-500">{freshnessText(source.lastRunAt)}</p>
-      </div>
-      <div className="text-xs text-slate-500">
-        {source.lastRunScope === "unknown"
-          ? "No run recorded"
-          : source.lastRunScope === "market_historical"
-            ? "Historical market run"
-            : "Jurisdiction run"}
-        {source.lastRunHadError ? <span className="ml-2 text-red-700">Error logged</span> : null}
-        {message ? (
-          <p
-            className={cn(
-              "mt-1",
-              tone === "success" && "text-teal-700",
-              tone === "error" && "text-red-700",
-              tone === "neutral" && "text-slate-500"
-            )}
-          >
-            {message}
-          </p>
-        ) : job ? (
-          <p className="mt-1 text-slate-500">
-            Job {job.status}
-            {pollAttempts >= MAX_POLL_ATTEMPTS && ["queued", "running"].includes(job.status)
-              ? " - worker will continue"
-              : ""}
-          </p>
-        ) : refreshUnavailable ? (
-          <p className="mt-1 text-slate-500">Worker pending for this source</p>
-        ) : isCostar ? (
-          <p className="mt-1 text-slate-500">Max 50 MB</p>
+    <>
+      <div className="grid grid-cols-[auto_minmax(12rem,1fr)_minmax(9rem,auto)_minmax(10rem,auto)_auto] items-center gap-3 border-t border-slate-100 py-2 text-sm first:border-t-0">
+        <SourceBadge sourceClass={source.sourceClass} />
+        <div>
+          <p className="font-medium text-slate-900">{titleFromSlug(source.sourceName)}</p>
+          <p className="text-xs text-slate-500">{source.active ? "Active" : "Inactive"}</p>
+        </div>
+        <div className="text-slate-700">
+          <p>{formatDate(source.lastRunAt)}</p>
+          <p className="text-xs text-slate-500">{freshnessText(source.lastRunAt)}</p>
+        </div>
+        <div className="text-xs text-slate-500">
+          {source.lastRunScope === "unknown"
+            ? "No run recorded"
+            : source.lastRunScope === "market_historical"
+              ? "Historical market run"
+              : "Jurisdiction run"}
+          {source.lastRunHadError ? <span className="ml-2 text-red-700">Error logged</span> : null}
+          {message ? (
+            <p
+              className={cn(
+                "mt-1",
+                tone === "success" && "text-teal-700",
+                tone === "error" && "text-red-700",
+                tone === "neutral" && "text-slate-500"
+              )}
+            >
+              {message}
+            </p>
+          ) : job ? (
+            <p className="mt-1 text-slate-500">
+              Job {job.status}
+              {pollAttempts >= MAX_POLL_ATTEMPTS && ["queued", "running"].includes(job.status)
+                ? " - worker will continue"
+                : ""}
+            </p>
+          ) : refreshUnavailable ? (
+            <p className="mt-1 text-slate-500">Collector not available</p>
+          ) : isCostar ? (
+            <p className="mt-1 text-slate-500">Max 50 MB</p>
+          ) : null}
+        </div>
+        {isCostar ? (
+          <input
+            ref={fileInputRef}
+            className="hidden"
+            type="file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            onChange={(event) => uploadFile(event.target.files?.[0])}
+          />
         ) : null}
+        <div className="flex items-center justify-end gap-2">
+          {!isCostar ? (
+            <Button disabled={isPending} type="button" variant="ghost" onClick={toggleHistory}>
+              {historyOpen ? "Hide" : "History"}
+            </Button>
+          ) : null}
+          <Button
+            disabled={disabled}
+            title={
+              !source.active
+                ? "Source registration is inactive"
+                : refreshUnavailable
+                  ? "Refresh is not available for this source yet"
+                  : undefined
+            }
+            type="button"
+            variant="outline"
+            onClick={() => {
+              if (isCostar) {
+                fileInputRef.current?.click();
+              } else {
+                queueScrape();
+              }
+            }}
+          >
+            <ActionIcon className="size-4" aria-hidden="true" />
+            {isPending ? "Working" : actionLabel}
+          </Button>
+        </div>
       </div>
-      {isCostar ? (
-        <input
-          ref={fileInputRef}
-          className="hidden"
-          type="file"
-          accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          onChange={(event) => uploadFile(event.target.files?.[0])}
-        />
+      {historyOpen && !isCostar ? (
+        <div className="border-t border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          {history === null ? (
+            <p>Loading recent jobs.</p>
+          ) : history.length === 0 ? (
+            <p>No recent jobs.</p>
+          ) : (
+            <div className="grid gap-1 md:grid-cols-2">
+              {history.map((entry) => (
+                <div
+                  className="flex items-center justify-between gap-3 rounded border border-slate-200 bg-white px-2 py-1"
+                  key={entry.id}
+                >
+                  <span className="truncate">
+                    {formatDate(entry.completedAt ?? entry.startedAt ?? entry.queuedAt)}
+                  </span>
+                  <span
+                    className={cn(
+                      "rounded border px-1.5 py-0.5",
+                      entry.status === "completed" && "border-teal-200 bg-teal-50 text-teal-800",
+                      entry.status === "failed" && "border-red-200 bg-red-50 text-red-700",
+                      ["queued", "running"].includes(entry.status) &&
+                        "border-amber-200 bg-amber-50 text-amber-800"
+                    )}
+                  >
+                    {entry.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       ) : null}
-      <Button
-        disabled={disabled}
-        title={
-          !source.active
-            ? "Source registration is inactive"
-            : refreshUnavailable
-              ? "Refresh will be enabled when worker support is deployed for this source"
-              : undefined
-        }
-        type="button"
-        variant="outline"
-        onClick={() => {
-          if (isCostar) {
-            fileInputRef.current?.click();
-          } else {
-            queueScrape();
-          }
-        }}
-      >
-        <ActionIcon className="size-4" aria-hidden="true" />
-        {isPending ? "Working" : actionLabel}
-      </Button>
-    </div>
+    </>
   );
 }
 

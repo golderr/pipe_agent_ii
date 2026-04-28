@@ -46,6 +46,7 @@ from tcg_pipeline.review.contradictions import (
 from tcg_pipeline.settings import get_settings
 from tcg_pipeline.status_rules import get_status_evidence_rule
 from tcg_pipeline.utils.logging import configure_logging
+from tcg_pipeline.workers.scrape_jobs import run_worker
 
 app = typer.Typer(help="TCG pipeline tracker CLI.")
 COLLECTION_MODE_OPTION = typer.Option(
@@ -77,6 +78,18 @@ def doctor() -> None:
             "Next required credential: DATABASE_URL from Supabase Project Settings -> Database.",
             err=True,
         )
+
+
+@app.command("worker")
+def worker(
+    queue_name: str | None = typer.Option(
+        None,
+        help="RQ queue name to consume. Defaults to SCRAPE_JOB_QUEUE_NAME.",
+    ),
+    burst: bool = typer.Option(False, help="Exit when the queue is empty."),
+) -> None:
+    """Run the durable scrape-job worker."""
+    run_worker(queue_name=queue_name, burst=burst)
 
 
 @app.command()

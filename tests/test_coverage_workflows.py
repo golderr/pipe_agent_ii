@@ -64,6 +64,25 @@ def test_enqueue_scrape_job_returns_existing_active_job(postgres_session: Sessio
     assert active_count == 1
 
 
+def test_enqueue_scrape_job_records_worker_queue_backend(postgres_session: Session) -> None:
+    _ensure_coverage_tables(postgres_session)
+    jurisdiction = _jurisdiction(postgres_session)
+    _source_registration(postgres_session, jurisdiction, "ladbs_permits")
+
+    job = coverage_router.enqueue_scrape_job(
+        postgres_session,
+        jurisdiction_id=jurisdiction.id,
+        source_name="ladbs_permits",
+        user=_user(postgres_session),
+        queue_backend="rq",
+    )
+
+    assert job.progress == {
+        "message": "Queued for scraper worker.",
+        "queue_backend": "rq",
+    }
+
+
 def test_enqueue_scrape_job_rejects_unsupported_inline_source(
     postgres_session: Session,
 ) -> None:
@@ -191,6 +210,46 @@ def test_mark_scrape_job_failed_records_error(postgres_session: Session) -> None
     assert job.error_text == "collector failed"
     assert job.completed_at is not None
     assert job.progress == {"message": "Scrape failed."}
+
+
+def test_list_scrape_jobs_filters_recent_source_history(postgres_session: Session) -> None:
+    _ensure_coverage_tables(postgres_session)
+    jurisdiction = _jurisdiction(postgres_session)
+    older = ScrapeJob(
+        jurisdiction_id=jurisdiction.id,
+        source_name="ladbs_permits",
+        status=ScrapeJobStatus.COMPLETED,
+        queued_at=datetime(2026, 4, 27, 10, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 4, 27, 10, 5, tzinfo=UTC),
+    )
+    newer = ScrapeJob(
+        jurisdiction_id=jurisdiction.id,
+        source_name="ladbs_permits",
+        status=ScrapeJobStatus.FAILED,
+        queued_at=datetime(2026, 4, 28, 10, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 4, 28, 10, 1, tzinfo=UTC),
+        error_text="source unavailable",
+    )
+    other_source = ScrapeJob(
+        jurisdiction_id=jurisdiction.id,
+        source_name="ladbs_inspections",
+        status=ScrapeJobStatus.COMPLETED,
+        queued_at=datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+    )
+    postgres_session.add_all([older, newer, other_source])
+    postgres_session.flush()
+
+    history = coverage_router.list_scrape_jobs(
+        jurisdiction.id,
+        source_name="ladbs_permits",
+        limit=10,
+        _user=_user(postgres_session),
+        session=postgres_session,
+    )
+
+    assert [job.id for job in history] == [newer.id, older.id]
+    assert history[0].status == "failed"
+    assert history[0].error_text == "source unavailable"
 
 
 def test_process_costar_upload_records_success_audit(

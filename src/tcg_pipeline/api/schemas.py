@@ -211,6 +211,17 @@ class ScrapeJobResponse(BaseModel):
     progress: Any | None
 
 
+class ScrapeWorkerHealthResponse(BaseModel):
+    configured: bool
+    available: bool
+    queue_name: str
+    queued_jobs: int
+    started_jobs: int
+    failed_jobs: int
+    worker_count: int
+    error: str | None = None
+
+
 class CoStarUploadResponse(BaseModel):
     id: uuid.UUID
     jurisdiction_id: uuid.UUID

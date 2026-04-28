@@ -126,6 +126,38 @@ export async function getScrapeJobAction(
   }
 }
 
+export async function getScrapeJobHistoryAction(
+  jurisdictionId: string,
+  sourceName: string
+): Promise<CoverageActionResult & { jobs?: ScrapeJobStatus[] }> {
+  if (!jurisdictionId || !sourceName) {
+    return { ok: false, message: "Missing jurisdiction or source." };
+  }
+
+  try {
+    const apiBaseUrl = await apiBaseUrlForWrite();
+    const accessToken = await accessTokenForApi();
+    const params = new URLSearchParams({ source_name: sourceName, limit: "5" });
+    const response = await fetch(`${apiBaseUrl}/coverage/${jurisdictionId}/scrape_jobs?${params}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store"
+    });
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: await responseErrorMessage(response, "Could not load scrape history.")
+      };
+    }
+    const jobs = ((await response.json()) as ScrapeJobApiResponse[]).map(mapScrapeJob);
+    return { ok: true, message: "Scrape history loaded.", jobs };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Could not load scrape history."
+    };
+  }
+}
+
 export async function uploadCostarAction(formData: FormData): Promise<CoverageActionResult> {
   const jurisdictionId = formData.get("jurisdictionId");
   const file = formData.get("file");
