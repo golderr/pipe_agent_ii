@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
-from tcg_pipeline.api.deps import get_db_session, require_user
+from tcg_pipeline.api.deps import get_app_settings, get_db_session, require_user
 from tcg_pipeline.api.errors import raise_not_implemented
 from tcg_pipeline.api.project_creation import create_project as create_project_value
 from tcg_pipeline.api.project_fields import append_project_note as append_project_note_value
@@ -32,10 +32,13 @@ from tcg_pipeline.api.schemas import (
     ProjectRelationshipCreateRequest,
     ProjectRelationshipMutationResponse,
 )
+from tcg_pipeline.geocoding.service import geocoder_from_settings
+from tcg_pipeline.settings import Settings
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 AUTH_USER = Depends(require_user)
 DB_SESSION = Depends(get_db_session)
+APP_SETTINGS = Depends(get_app_settings)
 
 
 @router.post("")
@@ -43,6 +46,7 @@ def create_project(
     payload: ProjectCreateRequest,
     user: AuthenticatedUser = AUTH_USER,
     session: Session = DB_SESSION,
+    settings: Settings = APP_SETTINGS,
 ) -> ProjectCreateResponse:
     return create_project_value(
         session,
@@ -55,6 +59,7 @@ def create_project(
         zip_code=payload.zip,
         force_create=payload.force_create,
         user=user,
+        geocoder=geocoder_from_settings(settings),
     )
 
 

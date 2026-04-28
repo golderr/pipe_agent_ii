@@ -88,12 +88,24 @@ class ProjectCreateCandidate(BaseModel):
     confidence: float | None
 
 
+class ProjectGeocodingResponse(BaseModel):
+    status: str
+    provider: str | None = None
+    confidence: str
+    formatted_address: str | None = None
+    accuracy_type: str | None = None
+    accuracy_score: float | None = None
+    fallback_used: bool = False
+    message: str | None = None
+
+
 class ProjectCreateResponse(BaseModel):
     created: bool
     project_id: uuid.UUID | None
     canonical_address: str
     duplicate_candidates: list[ProjectCreateCandidate]
     change_log_entries_created: int
+    geocoding: ProjectGeocodingResponse | None = None
 
 
 class ProjectRelationshipCreateRequest(BaseModel):

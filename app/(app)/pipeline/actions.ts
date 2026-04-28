@@ -41,6 +41,12 @@ type ProjectCreateApiResponse = {
   created: boolean;
   project_id: string | null;
   canonical_address: string;
+  geocoding?: {
+    status: string;
+    provider: string | null;
+    confidence: string;
+    message: string | null;
+  } | null;
   duplicate_candidates: Array<{
     project_id: string;
     project_name: string;
@@ -133,7 +139,7 @@ export async function createProjectAction(
     revalidatePath("/pipeline");
     return {
       ok: true,
-      message: "Project created.",
+      message: projectCreatedMessage(body.geocoding),
       created: true,
       projectId: body.project_id,
       canonicalAddress: body.canonical_address,
@@ -148,6 +154,16 @@ export async function createProjectAction(
       form
     };
   }
+}
+
+function projectCreatedMessage(geocoding: ProjectCreateApiResponse["geocoding"]) {
+  if (!geocoding || geocoding.status === "accepted") {
+    return "Project created.";
+  }
+  if (geocoding.status === "skipped") {
+    return "Project created. Geocoding is not configured for this environment.";
+  }
+  return "Project created. Geocoding did not return reliable coordinates.";
 }
 
 function projectCreateFormValues(formData: FormData): ProjectCreateFormValues {

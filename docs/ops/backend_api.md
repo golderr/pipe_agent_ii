@@ -32,6 +32,8 @@ APP_ENV=development
 DATABASE_URL=postgresql+psycopg://...
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_ANON_KEY=...
+GEOCODIO_API_KEY=...
+ESRI_API_KEY=...
 ALLOWED_EMAILS=ng@theconcordgroup.com
 API_CORS_ORIGINS=http://localhost:3000,https://tcg-pipeline.vercel.app
 API_AUTH_AUDIENCE=authenticated
@@ -48,6 +50,12 @@ closed, including local development, preview, and staging deployments.
 
 `ENABLE_PREVIEW_WRITES` only affects the Next.js server action guard. Keep it
 false unless a preview write session has an explicit target and owner.
+
+`GEOCODIO_API_KEY` and `ESRI_API_KEY` are optional for local development, but
+production project creation should configure both. Manual project creation tries
+Geocodio first and automatically falls back to Esri when the Geocodio result is
+not high-confidence. Keep these keys on the FastAPI service only; they are not
+`NEXT_PUBLIC_*` frontend variables.
 
 ## Local Run
 
@@ -256,18 +264,26 @@ returns `created = false` with duplicate candidates and performs no write. The
 Pipeline modal lets the researcher open the existing project or resubmit with
 `force_create = true`.
 
+Confirmed creates try server-side geocoding after duplicate checks and before
+the project row is inserted. The API calls Geocodio first. If Geocodio is not a
+high-confidence rooftop-style match, the API automatically retries with Esri
+ArcGIS geocoding and accepts reliable `PointAddress` / `StreetAddress` results.
+Reliable results populate `projects.lat`, `projects.lng`, `projects.location`,
+and `projects.geocode_confidence`; failures or low-confidence results do not
+block creation and leave coordinates null.
+
 Confirmed creates insert a `projects` row, initial `Proposed` `status_history`,
 project edit metadata, and a `change_log` row with
-`change_type = researcher_confirmed`. Direct PostgREST project writes remain
-blocked; creation uses the privileged FastAPI database session.
+`change_type = researcher_confirmed`. The `change_log.new_value` payload includes
+geocoding provider, confidence, fallback, and failure metadata for audit. Direct
+PostgREST project writes remain blocked; creation uses the privileged FastAPI
+database session.
 
 True merge into an existing project is not implemented in C.g.
 
-C.g does not geocode created projects or collect APNs, permit/case identifiers,
-or source URLs at creation time. Manually created projects may remain absent from
-the map until a geocoder or editable coordinates path exists. Concurrent
-duplicate creation is guarded by the matcher but not by a database unique
-constraint.
+C.g does not collect APNs, permit/case identifiers, or source URLs at creation
+time. Concurrent duplicate creation is guarded by the matcher but not by a
+database unique constraint.
 
 ## C.h Review Staging + Commit
 

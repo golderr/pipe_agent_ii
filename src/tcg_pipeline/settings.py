@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     supabase_anon_key: str | None = None
     supabase_service_role_key: str | None = None
     socrata_app_token: str | None = None
+    geocodio_api_key: str | None = None
+    geocodio_base_url: str = "https://api.geocod.io/v1.9"
+    esri_api_key: str | None = None
+    esri_geocode_base_url: str = (
+        "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer"
+    )
+    geocoding_timeout_seconds: float = 8.0
     allowed_emails: str | None = None
 
     api_cors_origins: str = "http://localhost:3000"

@@ -12,6 +12,7 @@ from tcg_pipeline.api.auth import (
     TokenVerifier,
 )
 from tcg_pipeline.db.connection import get_session_factory
+from tcg_pipeline.settings import Settings
 
 bearer_auth = HTTPBearer(auto_error=False)
 BEARER_CREDENTIALS = Depends(bearer_auth)
@@ -22,6 +23,13 @@ def get_jwt_verifier(request: Request) -> TokenVerifier:
         return request.app.state.jwt_verifier
     except AttributeError as exc:
         raise RuntimeError("JWT verifier missing from FastAPI app state.") from exc
+
+
+def get_app_settings(request: Request) -> Settings:
+    try:
+        return request.app.state.settings
+    except AttributeError as exc:
+        raise RuntimeError("Settings missing from FastAPI app state.") from exc
 
 
 JWT_VERIFIER = Depends(get_jwt_verifier)

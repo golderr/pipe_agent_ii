@@ -15,12 +15,14 @@ from tcg_pipeline.api.main import create_app
 from tcg_pipeline.db.models import (
     ChangeLog,
     ChangeType,
+    GeocodeConfidence,
     Jurisdiction,
     Market,
     PipelineStatus,
     Project,
     StatusHistory,
 )
+from tcg_pipeline.geocoding.types import GeocodeAddress, GeocodeResult
 from tcg_pipeline.settings import Settings
 
 USER_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -91,8 +93,110 @@ def test_create_project_creates_project_and_audit_rows(postgres_session: Session
     assert change_log.reviewed_by_email == "allowed@example.com"
 
 
+def test_create_project_geocodes_manual_project(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    market, jurisdiction = _market_and_jurisdiction("geocode")
+    postgres_session.add_all([market, jurisdiction])
+    postgres_session.flush()
+    fake_geocoder = _FakeProjectGeocoder(
+        GeocodeResult(
+            status="accepted",
+            provider="geocodio",
+            latitude=34.0522,
+            longitude=-118.2437,
+            formatted_address="123 W 1st St, Los Angeles, CA 90012",
+            accuracy_type="rooftop",
+            accuracy_score=1.0,
+            confidence=GeocodeConfidence.HIGH,
+        )
+    )
+    _patch_project_geocoder(monkeypatch, fake_geocoder)
+    client = _client(postgres_session)
+
+    response = client.post(
+        "/projects",
+        json={
+            "canonical_address": "123 w first st",
+            "market_id": str(market.id),
+            "jurisdiction_id": str(jurisdiction.id),
+            "zip": "90012",
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    project = postgres_session.get(Project, uuid.UUID(body["project_id"]))
+    change_log = postgres_session.execute(
+        select(ChangeLog).where(ChangeLog.project_id == project.id)
+    ).scalar_one()
+
+    assert project is not None
+    assert project.lat == 34.0522
+    assert project.lng == -118.2437
+    assert project.location is not None
+    assert project.geocode_confidence == GeocodeConfidence.HIGH
+    assert body["geocoding"]["status"] == "accepted"
+    assert body["geocoding"]["provider"] == "geocodio"
+    assert change_log.new_value["geocoding"]["provider"] == "geocodio"
+    assert change_log.new_value["geocoding"]["confidence"] == "high"
+    assert fake_geocoder.calls[0] == GeocodeAddress(
+        address="123 WEST 1ST STREET",
+        city="Los Angeles",
+        state="CA",
+        zip_code="90012",
+    )
+
+
+def test_create_project_geocoding_failure_does_not_block_create(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    market, jurisdiction = _market_and_jurisdiction("geocode-fail")
+    postgres_session.add_all([market, jurisdiction])
+    postgres_session.flush()
+    _patch_project_geocoder(
+        monkeypatch,
+        _FakeProjectGeocoder(
+            GeocodeResult(
+                status="low_confidence",
+                message="No reliable Geocodio or Esri geocode result.",
+            )
+        ),
+    )
+    client = _client(postgres_session)
+
+    response = client.post(
+        "/projects",
+        json={
+            "canonical_address": "222 uncertain way",
+            "market_id": str(market.id),
+            "jurisdiction_id": str(jurisdiction.id),
+            "zip": "90012",
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    project = postgres_session.get(Project, uuid.UUID(body["project_id"]))
+
+    assert body["created"] is True
+    assert body["geocoding"]["status"] == "low_confidence"
+    assert project is not None
+    assert project.lat is None
+    assert project.lng is None
+    assert project.location is None
+    assert project.geocode_confidence == GeocodeConfidence.NONE
+
+
 def test_create_project_returns_duplicate_candidate_without_force(
     postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_project_creation_api_tables(postgres_session)
     market, jurisdiction = _market_and_jurisdiction("dupe")
@@ -104,6 +208,10 @@ def test_create_project_returns_duplicate_candidate_without_force(
     )
     postgres_session.add_all([market, jurisdiction, existing])
     postgres_session.flush()
+    fake_geocoder = _FakeProjectGeocoder(
+        GeocodeResult(status="accepted", provider="geocodio", latitude=1, longitude=2)
+    )
+    _patch_project_geocoder(monkeypatch, fake_geocoder)
     client = _client(postgres_session)
 
     response = client.post(
@@ -129,7 +237,9 @@ def test_create_project_returns_duplicate_candidate_without_force(
     assert body["duplicate_candidates"][0]["project_id"] == str(existing.id)
     assert body["duplicate_candidates"][0]["match_type"] == "address"
     assert body["change_log_entries_created"] == 0
+    assert body["geocoding"] is None
     assert project_count == 1
+    assert fake_geocoder.calls == []
 
 
 def test_create_project_force_creates_despite_duplicate(postgres_session: Session) -> None:
@@ -236,6 +346,25 @@ def _client(postgres_session: Session) -> TestClient:
 
 def _auth_headers() -> dict[str, str]:
     return {"Authorization": "Bearer valid-token"}
+
+
+class _FakeProjectGeocoder:
+    def __init__(self, result: GeocodeResult) -> None:
+        self.result = result
+        self.calls: list[GeocodeAddress] = []
+
+    def geocode(self, address: GeocodeAddress) -> GeocodeResult:
+        self.calls.append(address)
+        return self.result
+
+
+def _patch_project_geocoder(
+    monkeypatch: pytest.MonkeyPatch,
+    geocoder: _FakeProjectGeocoder,
+) -> None:
+    from tcg_pipeline.api.routers import projects
+
+    monkeypatch.setattr(projects, "geocoder_from_settings", lambda _settings: geocoder)
 
 
 def _ensure_project_creation_api_tables(postgres_session: Session) -> None:

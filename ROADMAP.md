@@ -218,14 +218,44 @@ Source → Collector → RawRecord → match_raw_record()
 | C.o | Reviewed tab in Review Queue | `done` | 2026-04-28: Added a Reviewed tab to `/review` backed by committed `ReviewItem` / `ReviewDecision` state. `GET /review/queue?state=committed` now returns the latest committed decision summary for each committed item, ordered by commit time for audit use. The frontend loads active and reviewed items together, preserves jurisdiction scoping, and provides reviewed filters for search, field, outcome, and decider plus sorting by date, decider, or project. Reviewed rows link to the review item detail and the project ChangeLog filtered to the decided field. Added backend serialization coverage and Vitest coverage for reviewed-row filtering/sorting helpers. |
 
 #### Phase C Tail Cleanup (non-blocking)
+> **Goal:** Close deferred Phase C work without reopening Phase C completion. These steps are either Phase D runway, transitional-storage retirement, safety hardening, or UX/policy polish.
+> **Sequencing:** Do C.tail.4 before Phase D paste/link intake work, and C.tail.1 before scheduled article collection. C.tail.2/C.tail.3 are best after one final production verifier run. The remaining rows can be scheduled opportunistically.
 
-- Replace inline/API-background scrape execution with a durable Render/RQ worker for long-running scheduled collection.
-- Drop legacy `projects.researcher_override` after deployed table-backed override reads/writes have remained stable.
-- Drop legacy `projects.researcher_notes`, `personal_notes`, and `change_notes` columns after deployed `project_notes` history reads have remained stable.
-- Extend manual project creation with geocoding, identifiers, source URLs, and a DB-level duplicate lock.
-- Add relationship unlink/retype flows and explicit relationship note clearing.
-- Add Reviewed-tab API date range and/or pagination before committed decision history grows beyond the current newest-500 audit window.
-- Add a repository `.gitattributes` line-ending policy to remove recurring CRLF warning noise.
+##### Phase D runway
+
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| C.tail.1 | Durable Render worker (RQ + Redis) | `not_started` | High priority because D.6 scheduled article collection needs durable background execution. C.l-bis inline/API-background LADBS Socrata execution is only a stopgap. Build a dedicated worker service consuming `scrape_jobs`, backed by Redis/RQ, with per-worker concurrency caps, job heartbeat/health, retry/dead-letter handling, and a Coverage job-history surface so researchers can see past attempts after polling stops. |
+| C.tail.4 | Geocoding for manually-created projects | `done` | 2026-04-28: Added a reusable FastAPI-side Geocodio-first / Esri-fallback geocoder based on the `tcg-project-search` approach. Manual `POST /projects` now geocodes after duplicate checks, accepts high-confidence Geocodio results, automatically retries with Esri when Geocodio is not high-confidence, writes reliable coordinates to `lat`/`lng`/`location` with `geocode_confidence`, and records provider/fallback metadata in `change_log`. Geocoding failures do not block project creation; D.7 paste-a-link can reuse the same backend module. |
+| C.tail.4-bis | Geocoding remediation path | `not_started` | Medium priority before geocoded creates become frequent. Add a Project Detail recovery path for projects with missing coordinates, preferably `POST /projects/{project_id}/geocode` plus a Snapshot action that re-runs the backend geocoder and audits success/failure. A simpler manual coordinate editor is acceptable if re-geocoding is deferred, but researchers need an in-app way to recover projects that were created while provider keys were missing or while both providers returned low confidence. |
+
+##### Transitional storage retirement
+
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| C.tail.2 | Drop legacy `projects.researcher_override` JSONB | `not_started` | Medium priority. First make Project Detail Overrides and any remaining read paths use `researcher_overrides`; then run `verify_researcher_overrides_migration.py --verbose` against production and require `legacy_only_pair_count == 0` and `mismatched_pair_count == 0`. After that, add an Alembic drop-column migration, remove dual-write/legacy-normalization branches in `db/researcher_overrides.py`, and delete the verifier/runbook once no longer useful. |
+| C.tail.3 | Drop legacy project note columns | `not_started` | Medium priority. C.n now surfaces `project_notes` history, but Snapshot still needs latest-note previews derived from `project_notes` before dropping `projects.researcher_notes`, `personal_notes`, and `change_notes`. Add a verifier comparing each legacy latest-note column to the latest `project_notes` row per type, run it with zero divergence, then drop the columns and remove note dual-write logic from `append_project_note`. |
+
+##### Safety and correctness hardening
+
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| C.tail.6 | DB-level duplicate lock for project creation | `not_started` | Low priority at current single-researcher scale, but it closes the concurrent-create race from C.g. Audit existing `(market_id, canonical_address)` duplicates first, add a unique index or constraint for active projects, and translate resulting `IntegrityError` in `create_project` into the existing duplicate-candidate response rather than a 500. |
+
+##### UX and audit polish
+
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| C.tail.5 | Relationship unlink, retype, and note clear | `not_started` | Low priority. Add DELETE and update endpoints for `project_relationships`, audit all changes through `change_log`, and expose inline UI actions for unlink, relationship-type edit, and explicit note clearing. No schema change expected. |
+| C.tail.7 | Reviewed tab date range and history scaling | `not_started` | Low priority. The active/reviewed fetch parallelization landed in C.o; remaining work is API-backed `committed_after` / `committed_before` filters, an explicit newest-N cap message or pagination for committed history beyond the current 500-row limit, and optional date dividers for skimability. |
+
+##### Operational policy decisions
+
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| C.tail.8 | Cleared override retention policy | `not_started` | Low priority and mostly a decision. After C.tail.2 removes the dual-write era, decide whether cleared `researcher_overrides` rows are retained indefinitely, archived after N years, or moved to cold storage. If indefinite is chosen, document it explicitly to avoid future re-litigation. |
+| C.tail.9 | Symmetric relationship semantics | `not_started` | Lowest priority. Decide whether symmetric relationship types (`phase`, `counterpart`, `duplicate`) should auto-create reverse rows or remain one-way with incoming/outgoing display. Asymmetric types (`master_plan`, `supersedes`) stay one-way. Document the decision before relationship volume grows. |
+| C.tail.10 | Repository line-ending policy | `not_started` | Lowest priority repository hygiene. Add `.gitattributes` line-ending rules to remove recurring CRLF warning noise from future diffs. |
 
 ### Phase D: News Scraping & Deep Research
 > **Goal:** Automated collection of news articles about development projects. First source: BizJournals LA. Enriches the evidence layer with Tier 2 signals.

@@ -11,12 +11,14 @@ from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.schemas import (
     ProjectCreateCandidate,
     ProjectCreateResponse,
+    ProjectGeocodingResponse,
 )
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.evidence import serialize_json
 from tcg_pipeline.db.models import (
     ChangeLog,
     ChangeType,
+    GeocodeConfidence,
     Jurisdiction,
     Market,
     PipelineStatus,
@@ -24,6 +26,8 @@ from tcg_pipeline.db.models import (
     Project,
     StatusHistory,
 )
+from tcg_pipeline.geocoding.types import GeocodeAddress, GeocodeResult, ProjectGeocoder
+from tcg_pipeline.ingesters._common import build_location
 from tcg_pipeline.matching.matcher import match_raw_record
 from tcg_pipeline.matching.normalizer import normalize_address
 
@@ -40,6 +44,7 @@ def create_project(
     zip_code: str | None,
     force_create: bool,
     user: AuthenticatedUser,
+    geocoder: ProjectGeocoder | None = None,
 ) -> ProjectCreateResponse:
     market = _load_market(session, market_id)
     jurisdiction = _load_jurisdiction(session, jurisdiction_id)
@@ -96,11 +101,28 @@ def create_project(
             change_log_entries_created=0,
         )
 
+    geocoding_result = _geocode_manual_project(
+        geocoder,
+        address=GeocodeAddress(
+            address=normalized_address.canonical_street_line or raw_address,
+            city=normalized_city,
+            state=jurisdiction.state,
+            zip_code=normalized_address.postal_code or normalized_zip,
+        ),
+    )
     now = datetime.now(UTC)
     actor = _actor_for_audit(user)
     project = Project(
         canonical_address=normalized_address.canonical_address,
         raw_addresses=_unique_texts([raw_address, normalized_address.canonical_address]),
+        lat=geocoding_result.latitude if geocoding_result.is_accepted else None,
+        lng=geocoding_result.longitude if geocoding_result.is_accepted else None,
+        location=build_location(geocoding_result.latitude, geocoding_result.longitude)
+        if geocoding_result.is_accepted
+        else None,
+        geocode_confidence=geocoding_result.confidence
+        if geocoding_result.is_accepted
+        else GeocodeConfidence.NONE,
         market=market.slug,
         market_id=market.id,
         city=normalized_city,
@@ -133,6 +155,7 @@ def create_project(
         user=user,
         timestamp=now,
         duplicate_candidates=duplicate_candidates,
+        geocoding_result=geocoding_result,
     )
     session.flush()
     return ProjectCreateResponse(
@@ -141,6 +164,7 @@ def create_project(
         canonical_address=project.canonical_address,
         duplicate_candidates=duplicate_candidates,
         change_log_entries_created=1,
+        geocoding=_geocoding_response(geocoding_result),
     )
 
 
@@ -200,6 +224,7 @@ def _write_project_created_change_log(
     user: AuthenticatedUser,
     timestamp: datetime,
     duplicate_candidates: list[ProjectCreateCandidate],
+    geocoding_result: GeocodeResult,
 ) -> None:
     session.add(
         ChangeLog(
@@ -220,6 +245,7 @@ def _write_project_created_change_log(
                     "duplicate_candidate_ids": [
                         str(candidate.project_id) for candidate in duplicate_candidates
                     ],
+                    "geocoding": geocoding_result.as_audit_dict(),
                 }
             ),
             change_type=ChangeType.RESEARCHER_CONFIRMED,
@@ -228,6 +254,33 @@ def _write_project_created_change_log(
             reviewed_by_user_id=user.user_id,
             reviewed_by_email=user.email,
         )
+    )
+
+
+def _geocode_manual_project(
+    geocoder: ProjectGeocoder | None,
+    *,
+    address: GeocodeAddress,
+) -> GeocodeResult:
+    if geocoder is None:
+        return GeocodeResult(
+            status="skipped",
+            message="Geocoding service is not configured.",
+            fallback_reason="geocoding_not_configured",
+        )
+    return geocoder.geocode(address)
+
+
+def _geocoding_response(result: GeocodeResult) -> ProjectGeocodingResponse:
+    return ProjectGeocodingResponse(
+        status=result.status,
+        provider=result.provider,
+        confidence=result.confidence.value,
+        formatted_address=result.formatted_address,
+        accuracy_type=result.accuracy_type,
+        accuracy_score=result.accuracy_score,
+        fallback_used=result.fallback_used,
+        message=result.message,
     )
 
 
