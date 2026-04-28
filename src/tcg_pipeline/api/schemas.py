@@ -177,3 +177,34 @@ class ReviewCommitResponse(BaseModel):
     jurisdictions_touched: list[uuid.UUID]
     queue_cleared: bool
     dry_run: bool
+
+
+class CoverageScrapeRequest(BaseModel):
+    source_name: str = Field(min_length=1, max_length=120)
+
+
+class ScrapeJobResponse(BaseModel):
+    id: uuid.UUID
+    jurisdiction_id: uuid.UUID
+    source_name: str
+    trigger_type: str
+    initiated_by_user_id: uuid.UUID | None
+    initiated_by_email: str | None
+    status: str
+    queued_at: str
+    started_at: str | None
+    completed_at: str | None
+    source_run_id: uuid.UUID | None
+    error_text: str | None
+    progress: Any | None
+
+
+class CoStarUploadResponse(BaseModel):
+    id: uuid.UUID
+    jurisdiction_id: uuid.UUID
+    file_name: str
+    file_size_bytes: int | None
+    row_count: int | None
+    source_run_id: uuid.UUID | None
+    status: str
+    error_text: str | None

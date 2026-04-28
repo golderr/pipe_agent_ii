@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,7 +12,9 @@ from fastapi.testclient import TestClient
 from tcg_pipeline.api.auth import AuthenticatedUser, AuthError, _is_email_allowed
 from tcg_pipeline.api.deps import get_db_session
 from tcg_pipeline.api.main import create_app
+from tcg_pipeline.api.routers import coverage as coverage_router
 from tcg_pipeline.api.routers import review as review_router
+from tcg_pipeline.db.models import CoStarUploadStatus, ScrapeJobStatus, ScrapeTriggerType
 from tcg_pipeline.db.review_workflow import ReviewItemAlreadyStagedError, ReviewStageResult
 from tcg_pipeline.settings import Settings
 
@@ -20,6 +24,7 @@ ITEM_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 JURISDICTION_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
 JOB_ID = uuid.UUID("55555555-5555-5555-5555-555555555555")
 EVIDENCE_ID = uuid.UUID("66666666-6666-6666-6666-666666666666")
+UPLOAD_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
 
 
 class FakeVerifier:
@@ -153,9 +158,6 @@ def test_auth_errors_are_mapped_to_http_responses() -> None:
     [
         ("GET", f"/projects/{PROJECT_ID}"),
         ("POST", f"/coverage/{JURISDICTION_ID}/pin"),
-        ("POST", f"/coverage/{JURISDICTION_ID}/scrape"),
-        ("POST", f"/coverage/{JURISDICTION_ID}/costar-upload"),
-        ("GET", f"/scrape_jobs/{JOB_ID}"),
     ],
 )
 def test_phase_c_routes_are_protected_stubs(method: str, path: str) -> None:
@@ -179,6 +181,7 @@ def test_phase_c_routes_are_protected_stubs(method: str, path: str) -> None:
         "/projects",
         f"/review/{ITEM_ID}/decide",
         f"/review/{ITEM_ID}/revise",
+        f"/coverage/{JURISDICTION_ID}/scrape",
     ],
 )
 def test_phase_c_project_write_routes_are_implemented_and_body_validated(path: str) -> None:
@@ -187,6 +190,98 @@ def test_phase_c_project_write_routes_are_implemented_and_body_validated(path: s
     response = client.post(path, json={}, headers=_auth_headers())
 
     assert response.status_code == 422
+
+
+def test_costar_upload_route_requires_multipart_file() -> None:
+    client = _client()
+
+    response = client.post(f"/coverage/{JURISDICTION_ID}/costar-upload", headers=_auth_headers())
+
+    assert response.status_code == 422
+
+
+def test_coverage_scrape_enqueue_uses_full_actor_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client()
+    client.app.dependency_overrides[get_db_session] = lambda: object()
+    calls: dict[str, Any] = {}
+
+    def fake_enqueue_scrape_job(_session: object, **kwargs: Any) -> object:
+        calls.update(kwargs)
+        return _fake_scrape_job()
+
+    monkeypatch.setattr(coverage_router, "enqueue_scrape_job", fake_enqueue_scrape_job)
+
+    response = client.post(
+        f"/coverage/{JURISDICTION_ID}/scrape",
+        json={"source_name": "ladbs_permits"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(JOB_ID)
+    assert response.json()["status"] == "queued"
+    assert calls["jurisdiction_id"] == JURISDICTION_ID
+    assert calls["source_name"] == "ladbs_permits"
+    assert calls["user"].user_id == USER_ID
+    assert calls["user"].email == "allowed@example.com"
+
+
+def test_scrape_job_status_serializes_job() -> None:
+    client = _client()
+
+    class FakeSession:
+        def get(self, _model: object, job_id: uuid.UUID) -> object | None:
+            return _fake_scrape_job() if job_id == JOB_ID else None
+
+    client.app.dependency_overrides[get_db_session] = lambda: FakeSession()
+
+    response = client.get(f"/scrape_jobs/{JOB_ID}", headers=_auth_headers())
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(JOB_ID)
+    assert response.json()["source_name"] == "ladbs_permits"
+    assert response.json()["progress"] == {"message": "Queued for scraper worker."}
+
+
+def test_costar_upload_uses_full_actor_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client()
+    client.app.dependency_overrides[get_db_session] = lambda: object()
+    calls: dict[str, Any] = {}
+
+    def fake_process_costar_upload(_session: object, **kwargs: Any) -> object:
+        calls.update(kwargs)
+        return SimpleNamespace(
+            id=UPLOAD_ID,
+            jurisdiction_id=kwargs["jurisdiction_id"],
+            file_name=kwargs["upload_file"].filename,
+            file_size_bytes=11,
+            row_count=2,
+            source_run_id=None,
+            status=CoStarUploadStatus.COMPLETED,
+            error_text=None,
+        )
+
+    monkeypatch.setattr(coverage_router, "process_costar_upload", fake_process_costar_upload)
+
+    response = client.post(
+        f"/coverage/{JURISDICTION_ID}/costar-upload",
+        files={
+            "file": (
+                "costar.xlsx",
+                b"fake xlsx bytes",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(UPLOAD_ID)
+    assert response.json()["status"] == "completed"
+    assert calls["jurisdiction_id"] == JURISDICTION_ID
+    assert calls["user"].user_id == USER_ID
+    assert calls["user"].email == "allowed@example.com"
+    assert calls["upload_file"].filename == "costar.xlsx"
 
 
 def test_review_decide_stages_with_full_actor_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,6 +365,24 @@ def test_phase_c_stubs_do_not_run_without_auth() -> None:
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing bearer token."
+
+
+def _fake_scrape_job() -> object:
+    return SimpleNamespace(
+        id=JOB_ID,
+        jurisdiction_id=JURISDICTION_ID,
+        source_name="ladbs_permits",
+        trigger_type=ScrapeTriggerType.USER_INITIATED,
+        initiated_by_user_id=USER_ID,
+        initiated_by_email="allowed@example.com",
+        status=ScrapeJobStatus.QUEUED,
+        queued_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        started_at=None,
+        completed_at=None,
+        source_run_id=None,
+        error_text=None,
+        progress={"message": "Queued for scraper worker."},
+    )
 
 
 def test_evidence_snippet_requires_auth_before_database_access() -> None:

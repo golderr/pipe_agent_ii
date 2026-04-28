@@ -328,6 +328,40 @@ legacy deferred count by mirroring `review_items.status`; open work is read from
 `review_items.state = open`, while non-deferred staged work is surfaced as an
 `In review` count.
 
+## C.l Coverage Scrape + CoStar Upload
+
+Coverage source actions now call FastAPI:
+
+```text
+POST /coverage/{jurisdiction_id}/scrape
+POST /coverage/{jurisdiction_id}/costar-upload
+GET  /scrape_jobs/{job_id}
+```
+
+`scrape` enqueues a tracked `scrape_jobs` row for an active non-CoStar source
+registration. The body is:
+
+```json
+{
+  "source_name": "ladbs_permits"
+}
+```
+
+The response includes the job id, status, timestamps, actor identity, and
+progress payload. Jobs currently start in `queued` state for the external worker
+to consume; the Coverage UI polls `GET /scrape_jobs/{job_id}` while the status
+is `queued` or `running`.
+
+`costar-upload` accepts multipart form data with a single `file` field. The API
+parses and persists the workbook through the existing CoStar seed importer,
+records a jurisdiction-scoped `source_runs` row, and writes a `costar_uploads`
+audit row with uploader id/email, file metadata, row count, status, and error
+text. Failed imports return a normal response with `status = failed` so the
+audit row can commit.
+
+C.l requires the `202604270014` Alembic migration and the `python-multipart`
+runtime dependency before deployed code handles uploads.
+
 ## C.c Migration Verification
 
 Before C.d write endpoints are enabled, verify the `researcher_overrides`

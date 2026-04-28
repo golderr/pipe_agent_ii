@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 from geoalchemy2 import Geography
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -148,6 +149,25 @@ class DismissReason(str, enum.Enum):
     OTHER = "other"
 
 
+class ScrapeJobStatus(enum.StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ScrapeTriggerType(enum.StrEnum):
+    USER_INITIATED = "user_initiated"
+    SCHEDULED = "scheduled"
+
+
+class CoStarUploadStatus(enum.StrEnum):
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 PIPELINE_STATUS_ENUM = SAEnum(
     PipelineStatus,
     name="pipeline_status_enum",
@@ -200,6 +220,21 @@ PRIORITY_ENUM = SAEnum(Priority, name="priority_enum", values_callable=_enum_val
 DISMISS_REASON_ENUM = SAEnum(
     DismissReason,
     name="dismiss_reason_enum",
+    values_callable=_enum_values,
+)
+SCRAPE_JOB_STATUS_ENUM = SAEnum(
+    ScrapeJobStatus,
+    name="scrape_job_status_enum",
+    values_callable=_enum_values,
+)
+SCRAPE_TRIGGER_TYPE_ENUM = SAEnum(
+    ScrapeTriggerType,
+    name="scrape_trigger_type_enum",
+    values_callable=_enum_values,
+)
+COSTAR_UPLOAD_STATUS_ENUM = SAEnum(
+    CoStarUploadStatus,
+    name="costar_upload_status_enum",
     values_callable=_enum_values,
 )
 
@@ -291,6 +326,8 @@ class Jurisdiction(Base, TimestampMixin):
         back_populates="jurisdiction",
     )
     source_runs: Mapped[list["SourceRun"]] = relationship(back_populates="jurisdiction")
+    scrape_jobs: Mapped[list["ScrapeJob"]] = relationship(back_populates="jurisdiction")
+    costar_uploads: Mapped[list["CoStarUpload"]] = relationship(back_populates="jurisdiction")
 
 
 class Project(Base, TimestampMixin):
@@ -836,6 +873,99 @@ class SourceRun(Base):
 
     jurisdiction: Mapped[Jurisdiction | None] = relationship(back_populates="source_runs")
     review_items: Mapped[list["ReviewItem"]] = relationship(back_populates="source_run")
+    scrape_jobs: Mapped[list["ScrapeJob"]] = relationship(back_populates="source_run")
+    costar_uploads: Mapped[list["CoStarUpload"]] = relationship(back_populates="source_run")
+
+
+class ScrapeJob(Base):
+    __tablename__ = "scrape_jobs"
+    __table_args__ = (
+        Index("ix_scrape_jobs_jurisdiction_id_status", "jurisdiction_id", "status"),
+        Index(
+            "ix_scrape_jobs_status_queued_at",
+            "status",
+            "queued_at",
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    jurisdiction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jurisdictions.id"),
+        nullable=False,
+    )
+    source_name: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger_type: Mapped[ScrapeTriggerType] = mapped_column(
+        SCRAPE_TRIGGER_TYPE_ENUM,
+        nullable=False,
+        default=ScrapeTriggerType.USER_INITIATED,
+    )
+    initiated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    initiated_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[ScrapeJobStatus] = mapped_column(
+        SCRAPE_JOB_STATUS_ENUM,
+        nullable=False,
+        default=ScrapeJobStatus.QUEUED,
+    )
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("source_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    progress: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    jurisdiction: Mapped[Jurisdiction] = relationship(back_populates="scrape_jobs")
+    source_run: Mapped[SourceRun | None] = relationship(back_populates="scrape_jobs")
+
+
+class CoStarUpload(Base):
+    __tablename__ = "costar_uploads"
+    __table_args__ = (
+        Index("ix_costar_uploads_jurisdiction_id", "jurisdiction_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    jurisdiction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jurisdictions.id"),
+        nullable=False,
+    )
+    uploaded_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    uploaded_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("source_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    status: Mapped[CoStarUploadStatus] = mapped_column(
+        COSTAR_UPLOAD_STATUS_ENUM,
+        nullable=False,
+        default=CoStarUploadStatus.PROCESSING,
+    )
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    jurisdiction: Mapped[Jurisdiction] = relationship(back_populates="costar_uploads")
+    source_run: Mapped[SourceRun | None] = relationship(back_populates="costar_uploads")
 
 
 class ReviewItem(Base):

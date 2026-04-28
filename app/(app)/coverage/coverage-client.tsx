@@ -11,7 +11,13 @@ import {
   Star,
   Upload
 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import {
+  enqueueScrapeAction,
+  getScrapeJobAction,
+  uploadCostarAction,
+  type ScrapeJobStatus
+} from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -241,9 +247,81 @@ function SelectControl({
   );
 }
 
-function SourceDetail({ source }: { source: CoverageSourceSummary }) {
+function SourceDetail({
+  jurisdictionId,
+  source
+}: {
+  jurisdictionId: string;
+  source: CoverageSourceSummary;
+}) {
   const actionLabel = source.sourceClass === "costar" ? "Upload" : "Refresh";
   const ActionIcon = source.sourceClass === "costar" ? Upload : RefreshCw;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [job, setJob] = useState<ScrapeJobStatus | null>(null);
+  const [pollAttempts, setPollAttempts] = useState(0);
+  const [message, setMessage] = useState<string | null>(null);
+  const [tone, setTone] = useState<"neutral" | "success" | "error">("neutral");
+  const [isPending, startTransition] = useTransition();
+  const isCostar = source.sourceClass === "costar";
+  const isPolling = job ? ["queued", "running"].includes(job.status) && pollAttempts < 20 : false;
+  const disabled = isPending || !source.active;
+
+  useEffect(() => {
+    if (!isPolling || !job) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      startTransition(async () => {
+        const result = await getScrapeJobAction(job.id);
+        setPollAttempts((current) => current + 1);
+        if (result.job) {
+          setJob(result.job);
+        }
+        if (!result.ok) {
+          setTone("error");
+          setMessage(result.message);
+        } else if (result.job && !["queued", "running"].includes(result.job.status)) {
+          setTone(result.job.status === "completed" ? "success" : "error");
+          setMessage(result.job.errorText ?? `Scrape ${result.job.status}.`);
+        }
+      });
+    }, 3000);
+
+    return () => window.clearTimeout(timeout);
+  }, [isPolling, job]);
+
+  function queueScrape() {
+    setTone("neutral");
+    setMessage(null);
+    startTransition(async () => {
+      const result = await enqueueScrapeAction(jurisdictionId, source.sourceName);
+      setTone(result.ok ? "success" : "error");
+      setMessage(result.message);
+      if (result.job) {
+        setJob(result.job);
+        setPollAttempts(0);
+      }
+    });
+  }
+
+  function uploadFile(file: File | null | undefined) {
+    if (!file) {
+      return;
+    }
+    setTone("neutral");
+    setMessage(null);
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set("jurisdictionId", jurisdictionId);
+      formData.set("file", file);
+      const result = await uploadCostarAction(formData);
+      setTone(result.ok ? "success" : "error");
+      setMessage(result.message);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    });
+  }
 
   return (
     <div className="grid grid-cols-[auto_minmax(12rem,1fr)_minmax(9rem,auto)_minmax(10rem,auto)_auto] items-center gap-3 border-t border-slate-100 py-2 text-sm first:border-t-0">
@@ -263,10 +341,50 @@ function SourceDetail({ source }: { source: CoverageSourceSummary }) {
             ? "Historical market run"
             : "Jurisdiction run"}
         {source.lastRunHadError ? <span className="ml-2 text-red-700">Error logged</span> : null}
+        {message ? (
+          <p
+            className={cn(
+              "mt-1",
+              tone === "success" && "text-teal-700",
+              tone === "error" && "text-red-700",
+              tone === "neutral" && "text-slate-500"
+            )}
+          >
+            {message}
+          </p>
+        ) : job ? (
+          <p className="mt-1 text-slate-500">
+            Job {job.status}
+            {pollAttempts >= 20 && ["queued", "running"].includes(job.status)
+              ? " - worker will continue"
+              : ""}
+          </p>
+        ) : null}
       </div>
-      <Button disabled title="Available in Phase C" type="button" variant="outline">
+      {isCostar ? (
+        <input
+          ref={fileInputRef}
+          className="hidden"
+          type="file"
+          accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          onChange={(event) => uploadFile(event.target.files?.[0])}
+        />
+      ) : null}
+      <Button
+        disabled={disabled}
+        title={source.active ? undefined : "Source registration is inactive"}
+        type="button"
+        variant="outline"
+        onClick={() => {
+          if (isCostar) {
+            fileInputRef.current?.click();
+          } else {
+            queueScrape();
+          }
+        }}
+      >
         <ActionIcon className="size-4" aria-hidden="true" />
-        {actionLabel}
+        {isPending ? "Working" : actionLabel}
       </Button>
     </div>
   );
@@ -682,7 +800,13 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
                       </div>
                       <div className="rounded-md border border-slate-200 bg-white px-3">
                         {jurisdiction.sources.length > 0 ? (
-                          jurisdiction.sources.map((source) => <SourceDetail key={source.id} source={source} />)
+                          jurisdiction.sources.map((source) => (
+                            <SourceDetail
+                              key={source.id}
+                              jurisdictionId={jurisdiction.id}
+                              source={source}
+                            />
+                          ))
                         ) : (
                           <p className="py-3 text-sm text-slate-500">No registered sources.</p>
                         )}
