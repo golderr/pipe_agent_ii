@@ -241,9 +241,21 @@ query by project name/address. Relationship mutation still goes through FastAPI.
 `project_relationships` remains authenticated SELECT-only under RLS for
 PostgREST clients; direct browser writes remain blocked.
 
-Relationship unlink/retype and explicit note clearing are not implemented in
-C.f. Incorrect links still require admin cleanup until a later relationship
-maintenance endpoint/UI exists.
+C.tail.5 adds relationship maintenance for outgoing links:
+
+```text
+PATCH /projects/{project_id}/relationship/{relationship_id}
+DELETE /projects/{project_id}/relationship/{relationship_id}
+```
+
+`PATCH` accepts `relationship_type` and/or `notes`. Sending `notes: null` or an
+empty note clears the stored note. Retyping fails with `409` if the new
+`project_id` / `related_project_id` / `relationship_type` tuple already exists.
+`DELETE` removes the outgoing relationship. Both endpoints require the
+relationship to belong to the `project_id` in the path, update project edit
+metadata, and write `change_log` rows containing the old and new relationship
+payloads. Incoming links are displayed on Project Detail but must be edited from
+their source project.
 
 ## C.g New Project Creation
 
@@ -444,6 +456,16 @@ C.tail.2/C.tail.3 retire the transitional project columns with Alembic
 value lacks a matching active `researcher_overrides` row, or if any non-empty
 legacy latest-note column differs from the latest `project_notes` row for that
 project/type.
+
+Before applying `202604280017` to production:
+
+1. Snapshot the production database and capture the dump SHA256.
+2. Restore that snapshot to a scratch database and run `alembic upgrade head`.
+3. Run the full Python test suite against the upgraded scratch database.
+4. Apply to production when no Pipedream re-seed or other bulk write is running.
+5. Smoke-check Coverage override counts against active `researcher_overrides`
+   rows, Project Detail notes for a project with note history, and Project
+   Detail Overrides for a project with active overrides.
 
 ## Auth Notes
 

@@ -176,6 +176,194 @@ def test_add_project_relationship_updates_existing_note(postgres_session: Sessio
     )
 
 
+def test_update_project_relationship_clears_note(postgres_session: Session) -> None:
+    _ensure_relationship_api_tables(postgres_session)
+    project = _project("938 CLEAR RELATIONSHIP WAY LOS ANGELES CA 90012")
+    related = _project("939 CLEAR RELATED WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([project, related])
+    postgres_session.flush()
+    client = _client(postgres_session)
+    created = client.post(
+        f"/projects/{project.id}/relationship",
+        json={
+            "relationship_type": "phase",
+            "related_project_id": str(related.id),
+            "notes": "Clear me",
+        },
+        headers=_auth_headers(),
+    )
+    relationship_id = created.json()["relationship_id"]
+
+    response = client.patch(
+        f"/projects/{project.id}/relationship/{relationship_id}",
+        json={"notes": ""},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    relationship = postgres_session.get(ProjectRelationship, uuid.UUID(relationship_id))
+    change_logs = postgres_session.execute(
+        select(ChangeLog)
+        .where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.field == "relationships",
+        )
+        .order_by(ChangeLog.timestamp)
+    ).scalars().all()
+
+    assert body["updated"] is True
+    assert body["notes"] is None
+    assert relationship is not None
+    assert relationship.notes is None
+    assert len(change_logs) == 2
+    assert change_logs[-1].old_value["notes"] == "Clear me"
+    assert change_logs[-1].new_value["notes"] is None
+
+
+def test_update_project_relationship_retypes_row(postgres_session: Session) -> None:
+    _ensure_relationship_api_tables(postgres_session)
+    project = _project("940 RETYPE RELATIONSHIP WAY LOS ANGELES CA 90012")
+    related = _project("941 RETYPE RELATED WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([project, related])
+    postgres_session.flush()
+    client = _client(postgres_session)
+    created = client.post(
+        f"/projects/{project.id}/relationship",
+        json={
+            "relationship_type": "phase",
+            "related_project_id": str(related.id),
+            "notes": "Same note",
+        },
+        headers=_auth_headers(),
+    )
+    relationship_id = created.json()["relationship_id"]
+
+    response = client.patch(
+        f"/projects/{project.id}/relationship/{relationship_id}",
+        json={"relationship_type": "counterpart"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    relationship = postgres_session.get(ProjectRelationship, uuid.UUID(relationship_id))
+    change_logs = postgres_session.execute(
+        select(ChangeLog)
+        .where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.field == "relationships",
+        )
+        .order_by(ChangeLog.timestamp)
+    ).scalars().all()
+
+    assert body["relationship_type"] == "counterpart"
+    assert body["notes"] == "Same note"
+    assert relationship is not None
+    assert relationship.relationship_type == RelationshipType.COUNTERPART
+    assert change_logs[-1].old_value["relationship_type"] == "phase"
+    assert change_logs[-1].new_value["relationship_type"] == "counterpart"
+
+
+def test_update_project_relationship_rejects_duplicate_type(
+    postgres_session: Session,
+) -> None:
+    _ensure_relationship_api_tables(postgres_session)
+    project = _project("942 DUP RETYPE WAY LOS ANGELES CA 90012")
+    related = _project("943 DUP RETYPE RELATED WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([project, related])
+    postgres_session.flush()
+    client = _client(postgres_session)
+    client.post(
+        f"/projects/{project.id}/relationship",
+        json={"relationship_type": "phase", "related_project_id": str(related.id)},
+        headers=_auth_headers(),
+    )
+    counterpart = client.post(
+        f"/projects/{project.id}/relationship",
+        json={"relationship_type": "counterpart", "related_project_id": str(related.id)},
+        headers=_auth_headers(),
+    )
+
+    response = client.patch(
+        f"/projects/{project.id}/relationship/{counterpart.json()['relationship_id']}",
+        json={"relationship_type": "phase"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Relationship already exists with that type."
+
+
+def test_delete_project_relationship_removes_row_and_logs(postgres_session: Session) -> None:
+    _ensure_relationship_api_tables(postgres_session)
+    project = _project("944 DELETE RELATIONSHIP WAY LOS ANGELES CA 90012")
+    related = _project("945 DELETE RELATED WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([project, related])
+    postgres_session.flush()
+    client = _client(postgres_session)
+    created = client.post(
+        f"/projects/{project.id}/relationship",
+        json={
+            "relationship_type": "supersedes",
+            "related_project_id": str(related.id),
+            "notes": "Delete me",
+        },
+        headers=_auth_headers(),
+    )
+    relationship_id = created.json()["relationship_id"]
+
+    response = client.delete(
+        f"/projects/{project.id}/relationship/{relationship_id}",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    relationship = postgres_session.get(ProjectRelationship, uuid.UUID(relationship_id))
+    change_logs = postgres_session.execute(
+        select(ChangeLog)
+        .where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.field == "relationships",
+        )
+        .order_by(ChangeLog.timestamp)
+    ).scalars().all()
+
+    assert body["updated"] is True
+    assert body["relationship_type"] == "supersedes"
+    assert relationship is None
+    assert change_logs[-1].old_value["relationship_type"] == "supersedes"
+    assert change_logs[-1].old_value["notes"] == "Delete me"
+    assert change_logs[-1].new_value is None
+
+
+def test_delete_project_relationship_requires_outgoing_owner(
+    postgres_session: Session,
+) -> None:
+    _ensure_relationship_api_tables(postgres_session)
+    project = _project("946 OWNER RELATIONSHIP WAY LOS ANGELES CA 90012")
+    related = _project("947 OWNER RELATED WAY LOS ANGELES CA 90012")
+    postgres_session.add_all([project, related])
+    postgres_session.flush()
+    client = _client(postgres_session)
+    created = client.post(
+        f"/projects/{project.id}/relationship",
+        json={"relationship_type": "phase", "related_project_id": str(related.id)},
+        headers=_auth_headers(),
+    )
+    relationship_id = uuid.UUID(created.json()["relationship_id"])
+
+    response = client.delete(
+        f"/projects/{related.id}/relationship/{relationship_id}",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Relationship not found."
+    assert postgres_session.get(ProjectRelationship, relationship_id) is not None
+
+
 @pytest.mark.parametrize(
     ("relationship_type", "expected_status", "message"),
     [

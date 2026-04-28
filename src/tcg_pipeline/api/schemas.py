@@ -114,6 +114,11 @@ class ProjectRelationshipCreateRequest(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
 
 
+class ProjectRelationshipUpdateRequest(BaseModel):
+    relationship_type: str | None = Field(default=None, min_length=1, max_length=50)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
 class ProjectRelationshipMutationResponse(BaseModel):
     project_id: uuid.UUID
     relationship_id: uuid.UUID

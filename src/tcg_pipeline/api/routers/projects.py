@@ -20,6 +20,12 @@ from tcg_pipeline.api.project_overrides import (
 from tcg_pipeline.api.project_relationships import (
     add_project_relationship as add_project_relationship_value,
 )
+from tcg_pipeline.api.project_relationships import (
+    delete_project_relationship as delete_project_relationship_value,
+)
+from tcg_pipeline.api.project_relationships import (
+    update_project_relationship as update_project_relationship_value,
+)
 from tcg_pipeline.api.schemas import (
     ProjectCreateRequest,
     ProjectCreateResponse,
@@ -31,6 +37,7 @@ from tcg_pipeline.api.schemas import (
     ProjectOverrideSetRequest,
     ProjectRelationshipCreateRequest,
     ProjectRelationshipMutationResponse,
+    ProjectRelationshipUpdateRequest,
 )
 from tcg_pipeline.geocoding.service import geocoder_from_settings
 from tcg_pipeline.settings import Settings
@@ -149,5 +156,42 @@ def add_project_relationship(
         relationship_type=payload.relationship_type,
         related_project_id=payload.related_project_id,
         notes=payload.notes,
+        user=user,
+    )
+
+
+@router.patch("/{project_id}/relationship/{relationship_id}")
+def update_project_relationship(
+    project_id: uuid.UUID,
+    relationship_id: uuid.UUID,
+    payload: ProjectRelationshipUpdateRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectRelationshipMutationResponse:
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
+    return update_project_relationship_value(
+        session,
+        project_id=project_id,
+        relationship_id=relationship_id,
+        relationship_type=payload.relationship_type,
+        notes=payload.notes,
+        notes_provided="notes" in fields_set,
+        user=user,
+    )
+
+
+@router.delete("/{project_id}/relationship/{relationship_id}")
+def delete_project_relationship(
+    project_id: uuid.UUID,
+    relationship_id: uuid.UUID,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ProjectRelationshipMutationResponse:
+    return delete_project_relationship_value(
+        session,
+        project_id=project_id,
+        relationship_id=relationship_id,
         user=user,
     )

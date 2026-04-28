@@ -3,10 +3,12 @@
 import { useActionState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, Link2, Search } from "lucide-react";
+import { Check, Link2, Save, Search, Trash2 } from "lucide-react";
 import {
   addProjectRelationshipAction,
+  deleteProjectRelationshipAction,
   searchRelationshipCandidatesAction,
+  updateProjectRelationshipAction,
   type ProjectMutationActionState,
   type RelationshipSearchActionState
 } from "./actions";
@@ -75,7 +77,11 @@ export function RelationshipPicker({
         {relationships.length ? (
           <div className="mt-2 grid gap-2">
             {relationships.map((relationship) => (
-              <RelationshipRow relationship={relationship} key={relationship.id} />
+              <RelationshipRow
+                projectId={projectId}
+                relationship={relationship}
+                key={relationship.id}
+              />
             ))}
           </div>
         ) : (
@@ -175,12 +181,50 @@ export function RelationshipPicker({
   );
 }
 
-function RelationshipRow({ relationship }: { relationship: ProjectRelationshipRow }) {
+function RelationshipRow({
+  projectId,
+  relationship
+}: {
+  projectId: string;
+  relationship: ProjectRelationshipRow;
+}) {
+  const router = useRouter();
+  const [updateState, updateAction, updatePending] = useActionState(
+    updateProjectRelationshipAction,
+    initialMutationState
+  );
+  const [deleteState, deleteAction, deletePending] = useActionState(
+    deleteProjectRelationshipAction,
+    initialMutationState
+  );
+  const canEdit = relationship.direction === "outgoing";
+
+  useEffect(() => {
+    if (
+      (updateState.ok && updateState.changed !== false) ||
+      (deleteState.ok && deleteState.changed !== false)
+    ) {
+      router.refresh();
+    }
+  }, [deleteState.changed, deleteState.ok, router, updateState.changed, updateState.ok]);
+
   return (
     <div className="grid gap-2 rounded-md border border-slate-200 bg-white p-2 text-sm md:grid-cols-[8rem_minmax(0,1fr)_auto]">
-      <span className="w-fit rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[11px] text-indigo-800">
-        {relationshipLabel(relationship.relationshipType)}
-      </span>
+      <div className="flex flex-wrap items-start gap-1.5 md:block">
+        <span className="w-fit rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[11px] text-indigo-800">
+          {relationshipLabel(relationship.relationshipType)}
+        </span>
+        <span
+          className={cn(
+            "h-fit rounded border px-1.5 py-0.5 text-[11px] md:mt-1 md:block md:w-fit",
+            relationship.direction === "outgoing"
+              ? "border-slate-200 bg-slate-50 text-slate-700"
+              : "border-blue-200 bg-blue-50 text-blue-800"
+          )}
+        >
+          {relationship.direction}
+        </span>
+      </div>
       <div className="min-w-0">
         <Link
           className="inline-flex max-w-full items-center gap-1 font-medium text-slate-950 hover:text-teal-800"
@@ -199,16 +243,77 @@ function RelationshipRow({ relationship }: { relationship: ProjectRelationshipRo
           <p className="mt-1 text-xs text-slate-600">{relationship.notes}</p>
         ) : null}
       </div>
-      <span
-        className={cn(
-          "h-fit rounded border px-1.5 py-0.5 text-[11px]",
-          relationship.direction === "outgoing"
-            ? "border-slate-200 bg-slate-50 text-slate-700"
-            : "border-blue-200 bg-blue-50 text-blue-800"
-        )}
-      >
-        {relationship.direction}
-      </span>
+      {canEdit ? (
+        <div className="grid gap-2 md:col-span-3">
+          <form
+            action={updateAction}
+            className="grid gap-2 rounded-md bg-slate-50 p-2 md:grid-cols-[10rem_minmax(0,1fr)_auto]"
+          >
+            <input name="projectId" type="hidden" value={projectId} />
+            <input name="relationshipId" type="hidden" value={relationship.id} />
+            <select
+              className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              defaultValue={relationship.relationshipType}
+              name="relationshipType"
+            >
+              {RELATIONSHIP_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <input
+              className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              defaultValue={relationship.notes ?? ""}
+              name="notes"
+              placeholder="Optional note"
+            />
+            <button
+              className="inline-flex h-8 items-center justify-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+              disabled={updatePending}
+              type="submit"
+            >
+              <Save className="size-3.5" aria-hidden="true" />
+              Save
+            </button>
+          </form>
+          <div className="flex flex-wrap items-center gap-2">
+            {relationship.notes ? (
+              <form action={updateAction}>
+                <input name="projectId" type="hidden" value={projectId} />
+                <input name="relationshipId" type="hidden" value={relationship.id} />
+                <input name="notes" type="hidden" value="" />
+                <button
+                  className="inline-flex h-8 items-center justify-center rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+                  disabled={updatePending}
+                  type="submit"
+                >
+                  Clear note
+                </button>
+              </form>
+            ) : null}
+            <form action={deleteAction}>
+              <input name="projectId" type="hidden" value={projectId} />
+              <input name="relationshipId" type="hidden" value={relationship.id} />
+              <button
+                className="inline-flex h-8 items-center justify-center gap-1 rounded-md border border-red-200 px-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
+                disabled={deletePending}
+                onClick={(event) => {
+                  if (!window.confirm("Unlink this project relationship?")) {
+                    event.preventDefault();
+                  }
+                }}
+                type="submit"
+              >
+                <Trash2 className="size-3.5" aria-hidden="true" />
+                Unlink
+              </button>
+            </form>
+          </div>
+          <ActionMessage state={updateState} />
+          <ActionMessage state={deleteState} />
+        </div>
+      ) : null}
     </div>
   );
 }

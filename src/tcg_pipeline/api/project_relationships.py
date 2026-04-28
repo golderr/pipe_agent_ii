@@ -51,18 +51,17 @@ def add_project_relationship(
         updated = False
         change_log_entries_created = 0
         if normalized_notes is not None and normalized_notes != existing.notes:
-            old_notes = existing.notes
+            old_value = _relationship_change_payload(existing, related_project)
             existing.notes = normalized_notes
             _mark_project_edited(project, actor=actor, timestamp=now)
             change_log_entries_created = _write_relationship_change_log(
                 session,
                 project=project,
-                relationship=existing,
-                related_project=related_project,
+                old_value=old_value,
+                new_value=_relationship_change_payload(existing, related_project),
                 actor=actor,
                 user=user,
                 timestamp=now,
-                old_notes=old_notes,
             )
             updated = True
             session.flush()
@@ -90,8 +89,8 @@ def add_project_relationship(
     change_log_entries_created = _write_relationship_change_log(
         session,
         project=project,
-        relationship=relationship,
-        related_project=related_project,
+        old_value=None,
+        new_value=_relationship_change_payload(relationship, related_project),
         actor=actor,
         user=user,
         timestamp=now,
@@ -109,11 +108,138 @@ def add_project_relationship(
     )
 
 
+def update_project_relationship(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    relationship_id: uuid.UUID,
+    relationship_type: str | None,
+    notes: str | None,
+    notes_provided: bool,
+    user: AuthenticatedUser,
+) -> ProjectRelationshipMutationResponse:
+    relationship = _load_owned_relationship(session, project_id, relationship_id)
+    project = _load_project(session, project_id)
+    related_project = _load_project(session, relationship.related_project_id)
+    parsed_type = (
+        _coerce_relationship_type(relationship_type)
+        if relationship_type is not None
+        else relationship.relationship_type
+    )
+    normalized_notes = _clean_text(notes) if notes_provided else relationship.notes
+
+    if (
+        parsed_type == relationship.relationship_type
+        and normalized_notes == relationship.notes
+    ):
+        return ProjectRelationshipMutationResponse(
+            project_id=project.id,
+            relationship_id=relationship.id,
+            relationship_type=relationship.relationship_type.value,
+            related_project_id=relationship.related_project_id,
+            notes=relationship.notes,
+            created=False,
+            updated=False,
+            change_log_entries_created=0,
+        )
+
+    if parsed_type != relationship.relationship_type:
+        existing = session.execute(
+            select(ProjectRelationship).where(
+                ProjectRelationship.project_id == project.id,
+                ProjectRelationship.related_project_id == relationship.related_project_id,
+                ProjectRelationship.relationship_type == parsed_type,
+                ProjectRelationship.id != relationship.id,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Relationship already exists with that type.",
+            )
+
+    now = datetime.now(UTC)
+    actor = _actor_for_audit(user)
+    old_value = _relationship_change_payload(relationship, related_project)
+    relationship.relationship_type = parsed_type
+    relationship.notes = normalized_notes
+    _mark_project_edited(project, actor=actor, timestamp=now)
+    change_log_entries_created = _write_relationship_change_log(
+        session,
+        project=project,
+        old_value=old_value,
+        new_value=_relationship_change_payload(relationship, related_project),
+        actor=actor,
+        user=user,
+        timestamp=now,
+    )
+    session.flush()
+    return ProjectRelationshipMutationResponse(
+        project_id=project.id,
+        relationship_id=relationship.id,
+        relationship_type=relationship.relationship_type.value,
+        related_project_id=relationship.related_project_id,
+        notes=relationship.notes,
+        created=False,
+        updated=True,
+        change_log_entries_created=change_log_entries_created,
+    )
+
+
+def delete_project_relationship(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    relationship_id: uuid.UUID,
+    user: AuthenticatedUser,
+) -> ProjectRelationshipMutationResponse:
+    relationship = _load_owned_relationship(session, project_id, relationship_id)
+    project = _load_project(session, project_id)
+    related_project = _load_project(session, relationship.related_project_id)
+    now = datetime.now(UTC)
+    actor = _actor_for_audit(user)
+    old_value = _relationship_change_payload(relationship, related_project)
+    response = ProjectRelationshipMutationResponse(
+        project_id=project.id,
+        relationship_id=relationship.id,
+        relationship_type=relationship.relationship_type.value,
+        related_project_id=relationship.related_project_id,
+        notes=relationship.notes,
+        created=False,
+        updated=True,
+        change_log_entries_created=1,
+    )
+    _mark_project_edited(project, actor=actor, timestamp=now)
+    _write_relationship_change_log(
+        session,
+        project=project,
+        old_value=old_value,
+        new_value=None,
+        actor=actor,
+        user=user,
+        timestamp=now,
+    )
+    session.delete(relationship)
+    session.flush()
+    return response
+
+
 def _load_project(session: Session, project_id: uuid.UUID) -> Project:
     project = session.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     return project
+
+
+def _load_owned_relationship(
+    session: Session,
+    project_id: uuid.UUID,
+    relationship_id: uuid.UUID,
+) -> ProjectRelationship:
+    relationship = session.get(ProjectRelationship, relationship_id)
+    if relationship is None or relationship.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Relationship not found.")
+    return relationship
 
 
 def _coerce_relationship_type(value: str) -> RelationshipType:
@@ -140,12 +266,11 @@ def _write_relationship_change_log(
     session: Session,
     *,
     project: Project,
-    relationship: ProjectRelationship,
-    related_project: Project,
+    old_value: dict[str, str | None] | None,
+    new_value: dict[str, str | None] | None,
     actor: str,
     user: AuthenticatedUser,
     timestamp: datetime,
-    old_notes: str | None | object = _MISSING,
 ) -> int:
     session.add(
         ChangeLog(
@@ -153,18 +278,8 @@ def _write_relationship_change_log(
             timestamp=timestamp,
             source="project_relationship",
             field="relationships",
-            old_value=(
-                None
-                if old_notes is _MISSING
-                else serialize_json(
-                    _relationship_change_payload(
-                        relationship,
-                        related_project,
-                        notes=old_notes,
-                    )
-                )
-            ),
-            new_value=serialize_json(_relationship_change_payload(relationship, related_project)),
+            old_value=serialize_json(old_value) if old_value is not None else None,
+            new_value=serialize_json(new_value) if new_value is not None else None,
             change_type=ChangeType.RESEARCHER_CONFIRMED,
             priority=Priority.LOW,
             reviewed_by=actor[:50],

@@ -199,6 +199,97 @@ export async function addProjectRelationshipAction(
   }
 }
 
+export async function updateProjectRelationshipAction(
+  _previousState: ProjectMutationActionState,
+  formData: FormData
+): Promise<ProjectMutationActionState> {
+  const projectId = textFormValue(formData, "projectId");
+  const relationshipId = textFormValue(formData, "relationshipId");
+  if (!projectId || !relationshipId) {
+    return { ok: false, message: "Missing relationship." };
+  }
+
+  const payload: { relationship_type?: string; notes?: string | null } = {};
+  const relationshipType = textFormValue(formData, "relationshipType");
+  if (relationshipType) {
+    payload.relationship_type = relationshipType;
+  }
+  if (formData.has("notes")) {
+    payload.notes = textFormValue(formData, "notes");
+  }
+  if (!Object.keys(payload).length) {
+    return { ok: false, message: "No relationship changes submitted." };
+  }
+
+  try {
+    const apiBaseUrl = await apiBaseUrlForWrite();
+    const response = await fetch(
+      `${apiBaseUrl}/projects/${projectId}/relationship/${relationshipId}`,
+      {
+        method: "PATCH",
+        headers: await jsonHeadersForApi(),
+        body: JSON.stringify(payload)
+      }
+    );
+
+    if (!response.ok) {
+      return { ok: false, message: await responseErrorMessage(response) };
+    }
+
+    const body = (await response.json().catch(() => null)) as
+      | ProjectRelationshipMutationApiResponse
+      | null;
+    const changed = body?.updated === true;
+    if (changed) {
+      revalidatePath(`/pipeline/${projectId}`);
+    }
+    return {
+      ok: true,
+      message: changed ? "Relationship updated." : "No relationship changes.",
+      changed
+    };
+  } catch (error) {
+    return {
+      ...initialErrorState,
+      message: error instanceof Error ? error.message : "Relationship update failed."
+    };
+  }
+}
+
+export async function deleteProjectRelationshipAction(
+  _previousState: ProjectMutationActionState,
+  formData: FormData
+): Promise<ProjectMutationActionState> {
+  const projectId = textFormValue(formData, "projectId");
+  const relationshipId = textFormValue(formData, "relationshipId");
+  if (!projectId || !relationshipId) {
+    return { ok: false, message: "Missing relationship." };
+  }
+
+  try {
+    const apiBaseUrl = await apiBaseUrlForWrite();
+    const response = await fetch(
+      `${apiBaseUrl}/projects/${projectId}/relationship/${relationshipId}`,
+      {
+        method: "DELETE",
+        headers: await jsonHeadersForApi()
+      }
+    );
+
+    if (!response.ok) {
+      return { ok: false, message: await responseErrorMessage(response) };
+    }
+  } catch (error) {
+    return {
+      ...initialErrorState,
+      message: error instanceof Error ? error.message : "Relationship unlink failed."
+    };
+  }
+
+  revalidatePath(`/pipeline/${projectId}`);
+  return { ok: true, message: "Unlinked.", changed: true };
+}
+
 async function mutateProjectOverride(
   formData: FormData,
   method: "POST" | "DELETE"
