@@ -1,6 +1,6 @@
 # Review Workflow — Backend Specification
 
-Updated: 2026-04-24
+Updated: 2026-04-28
 
 This document specifies the backend state machine, API surface, and orchestration logic that supports the review queue UI. It is the backend counterpart to `docs/specs/ui_requirements.md` (frontend spec) and depends on the schema in `docs/specs/data_model_changes.md`.
 
@@ -9,6 +9,7 @@ Read alongside:
 - `docs/specs/ui_requirements.md` — frontend behavior.
 - `docs/specs/data_model_changes.md` — schema.
 - `docs/specs/EVIDENCE_LAYER_DECISIONS.md` §22 — review-protected override semantics.
+- `docs/specs/review_decision_cards.md` — decision-card consolidation design (`C.tail.11` backend, `C.tail.12` frontend). This document and the consolidation spec must stay in sync; the consolidation spec is canonical for the schema and payload shape introduced by `C.tail.11`.
 - `src/tcg_pipeline/db/review_workflow.py` — existing review workflow code this spec extends.
 
 ---
@@ -55,17 +56,15 @@ The `ReviewItemType` database enum values are lowercase. Existing values remain 
 
 Review item priorities are computed by rules per type (see §3).
 
-### 2.3 Review item payload
+### 2.3 Review item shape
 
-`ReviewItem.payload` stores the structured data the UI needs to render the row and the detail view:
+Per `C.tail.11`, `field_name` and `winning_evidence_id` are first-class columns on `review_items` (not buried in payload), so they can participate in the partial unique index that enforces §2.4 and in joins. `payload` carries the rest:
 
 ```json
 {
-  "field_name": "pipeline_status",
   "current_value": "Pending",
   "proposed_value": "Approved",
-  "winning_evidence_id": "uuid...",
-  "supporting_evidence_ids": ["uuid1", "uuid2"],
+  "evidence_ids": ["uuid1", "uuid2", "uuid3", "..."],
   "rule_applied": "highest_status_wins",
   "resolution_confidence": "medium",
   "candidates": [
@@ -77,11 +76,22 @@ Review item priorities are computed by rules per type (see §3).
 }
 ```
 
-The UI reads this to render the row, hover evidence, and multi-candidate options.
+`evidence_ids[]` is **membership only** — every evidence row that has touched this field for this item. The split into "supporting" and "against" is computed at **read time** by normalizing each evidence row's extracted value for `field_name` and comparing against the item's normalized `proposed_value` (status enum normalization, `canonicalize_developer_name`, `±5` unit threshold, `±30` day delivery threshold, etc., reusing the resolution engine's helpers). This means rule tweaks take effect without a backfill. See `docs/specs/review_decision_cards.md` §2.3 for the classification rules.
+
+The UI reads this to render the decision card, the support/against sections, and the multi-candidate options. Source-specific evidence detail (permit number, inspection result, article highlight) is **not** stored on the ReviewItem — it is hydrated at read time from the `evidence` table via the renderers in §7.
 
 ### 2.4 Deduplication
 
-At most one open review item per `(project_id, field_name, item_type)` combination exists at a time. If the resolution engine re-runs and a review item would be a duplicate of an existing open item, update the existing row (refresh payload, bump timestamp) rather than creating a new one. Prevents queue pollution from repeated resolves.
+At most one **active** (`open` or `staged`) review item per `(project_id, field_name, item_type)` combination exists at a time. Enforced by a partial unique index on `review_items (project_id, field_name, item_type) WHERE state IN ('open', 'staged') AND field_name IS NOT NULL`.
+
+When the resolution engine re-runs and produces a result for the same tuple:
+
+- **Same `proposed_value`** — update the existing active row (append new evidence IDs to `payload.evidence_ids`, refresh `winning_evidence_id`, refresh `priority` / `flags`, bump `updated_at`). Do not create a new row.
+- **Different `proposed_value`** — invalidate the existing active row (transition to `invalidated`, see §4.2) and insert a fresh `open` row with the new `proposed_value`. **Never silently mutate `proposed_value` on a live item**, because that would change the meaning of any decision a researcher has already staged.
+
+The ingest path catches integrity errors from the partial unique index on race and retries against the now-existing row.
+
+This invariant does **not** apply to discovery item types (`new_candidate`, `possible_match`), which retain per-record semantics — they have no `field_name` and are excluded from the unique index by the `field_name IS NOT NULL` clause.
 
 ---
 
@@ -137,8 +147,9 @@ Per `data_model_changes.md` §5, review items have a four-state queue lifecycle.
 | `staged` | `open` | User revises a staged decision back to undecided. |
 | `staged` | `staged` | User revises a staged decision to a different choice. |
 | `staged` | `committed` | User commits the queue; the decision applies. |
-| `open` | `invalidated` | Evidence changes so that the original proposal no longer makes sense (e.g., project was deleted; field was otherwise changed). |
-| `staged` | `invalidated` | Same as above; staged decisions are silently dropped if the underlying situation has changed. Notify the user post-commit. |
+| `open` | `invalidated` | Project deleted, field already at proposed value, or item otherwise no longer applicable. |
+| `staged` | `invalidated` | Same as above; staged decisions are silently dropped. Notify the user post-commit. |
+| `open` or `staged` | `invalidated` (paired with new `open` item) | Resolution produces a different `proposed_value` for the same `(project_id, field_name, item_type)` tuple (§2.4). Existing item invalidated; a fresh `open` item is created with the new proposal. Any staged decision on the invalidated item is dropped, not migrated — its value applied to a different proposal. The user is notified post-commit. |
 
 ### 4.3 Per-user scoping
 
@@ -226,17 +237,35 @@ def detect_contradictions(project_ids: list[UUID]) -> list[ReviewItem]:
             )
             if not contradicting_evidence:
                 continue
+            # Per C.tail.11: contradiction items use the same evidence_ids[]
+            # shape as status_change/field_change items. Both supporting (rows
+            # that agree with the override) and contradicting (rows that
+            # disagree) evidence are surfaced on the card; support/against
+            # is categorized at read time, not stored.
+            supporting_evidence = find_supporting_evidence(
+                project_id=project_id,
+                field_name=override.field_name,
+                override_value=override.value,
+            )
+            evidence_ids = [e.id for e in supporting_evidence + contradicting_evidence]
             priority = compute_contradiction_priority(
                 field_name=override.field_name,
                 evidence_rows=contradicting_evidence,
             )
-            existing = find_open_review_item(
+            existing = find_active_review_item(
                 project_id=project_id,
                 field_name=override.field_name,
                 item_type='override_contradiction',
             )
+            payload = build_contradiction_payload(
+                override,
+                evidence_ids=evidence_ids,
+                contradiction_baseline=override.baseline,
+            )
+            winning_evidence_id = pick_strongest(contradicting_evidence).id
             if existing:
-                existing.payload = build_contradiction_payload(override, contradicting_evidence)
+                existing.payload = payload
+                existing.winning_evidence_id = winning_evidence_id
                 existing.priority = priority
                 existing.updated_at = now()
             else:
@@ -244,13 +273,16 @@ def detect_contradictions(project_ids: list[UUID]) -> list[ReviewItem]:
                     project_id=project_id,
                     item_type='override_contradiction',
                     field_name=override.field_name,
+                    winning_evidence_id=winning_evidence_id,
                     priority=priority,
-                    payload=build_contradiction_payload(override, contradicting_evidence),
+                    payload=payload,
                     contradicted_override_id=override.id,
                 )
                 review_items.append(item)
     return review_items
 ```
+
+`override_contradiction` cards render with the same support/against split as `status_change` / `field_change` cards. The override value is the card's `current_value`; the dissenting candidate is `proposed_value`; supporting evidence (rows agreeing with the override) and contradicting evidence (rows disagreeing) are categorized at read time from `payload.evidence_ids` (§2.3).
 
 ### 5.4 Per-field contradiction rules
 
@@ -345,7 +377,10 @@ Phase B read surfaces use Supabase PostgREST directly with RLS. The FastAPI surf
 
 ### 7.1 Purpose
 
-Per `ui_requirements.md` §10.2, every evidence row has a source-type-specific renderer producing human-readable content for hover popovers and detail views. These are backend functions called during review item payload generation and on-demand via a `GET /evidence/{id}/snippet?field={field_name}` endpoint.
+Per `ui_requirements.md` §10.2, every evidence row has a source-type-specific renderer that produces human-readable content. These are backend functions called **on demand only**; they are **not** stored in `review_items.payload`. Two read-time use cases:
+
+1. **Inline summary line** (queue cards) — a single-line ~80-char string (`summary_line()` per renderer) returned by the queue API for each evidence row in `payload.evidence_ids`. The queue card uses these to render the support/against rows without per-row round-trips. Per `C.tail.11`, the queue API caps inline hydration at top 5 supporting + top 5 against per item plus totals.
+2. **Full snippet payload** (detail page, hover popovers) — the structured `SnippetPayload` in §7.3. Lazy-loaded via the existing `GET /evidence/{id}/snippet?field={field_name}` endpoint when the user expands a card or opens the detail view.
 
 ### 7.2 Renderer registry
 
@@ -372,6 +407,13 @@ SNIPPET_RENDERERS = {
 def render_snippet(evidence: Evidence, field_name: str) -> SnippetPayload:
     renderer = SNIPPET_RENDERERS.get(evidence.source_type, SNIPPET_RENDERERS['*'])
     return renderer(evidence, field_name)
+
+def render_summary_line(evidence: Evidence, field_name: str) -> str:
+    """Single-line ~80-char summary used in queue card support/against rows.
+    Per C.tail.11: each renderer exposes summary_line() in addition to the
+    full SnippetPayload renderer. Client never duplicates this logic."""
+    renderer = SNIPPET_RENDERERS.get(evidence.source_type, SNIPPET_RENDERERS['*'])
+    return renderer.summary_line(evidence, field_name)
 ```
 
 ### 7.3 Output shape
@@ -447,9 +489,11 @@ If any deferred items exist, the queue is not cleared; Coverage shows the deferr
 
 ### 8.3 Deferred refresh on new evidence
 
-When new evidence arrives for a field with a deferred decision, the underlying `ReviewItem` payload is updated (new evidence added to `supporting_evidence_ids`, `proposed_value` may shift if the winner changed). The deferred decision remains valid — the user sees the refreshed context when they eventually return.
+When new evidence arrives for a field with a deferred decision, behavior depends on whether the resolved `proposed_value` changes (per §2.4):
 
-If the new evidence *invalidates* the original proposal (e.g., a project was deleted, the field's resolved value now matches the current value), the ReviewItem transitions to `invalidated` and the deferred decision is dropped.
+- **`proposed_value` unchanged** — the existing ReviewItem is updated in place: the new evidence ID is appended to `payload.evidence_ids`, `winning_evidence_id` may shift if a stronger row arrived, `priority` and `flags` refresh, and `updated_at` bumps. The deferred decision remains valid; the user sees the refreshed context (including any new "against" evidence) when they return.
+- **`proposed_value` changes** — the existing ReviewItem invalidates and a fresh `open` item is created for the new proposal. The deferred decision is dropped (its value applied to a different proposal). The user is notified post-commit.
+- **Proposal no longer applies** (project deleted, resolved value now matches current value) — ReviewItem invalidates with no replacement; deferred decision is dropped.
 
 ---
 
