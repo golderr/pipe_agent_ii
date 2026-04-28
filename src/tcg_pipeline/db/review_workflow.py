@@ -1251,6 +1251,8 @@ def _apply_field_or_contradiction_decision(
 
 
 def _field_name_for_decision(review_item: ReviewItem, decision: ReviewDecision) -> str:
+    if review_item.field_name:
+        return review_item.field_name
     payload = _payload_mapping(review_item.payload)
     field_name = _coerce_text(payload.get("field_name"))
     if field_name is not None:

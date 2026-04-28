@@ -197,6 +197,8 @@ def _serialize_review_item(review_item: ReviewItem) -> ReviewQueueItemResponse:
         state=review_item.state,
         priority=review_item.priority.value,
         match_confidence=review_item.match_confidence,
+        field_name=review_item.field_name,
+        winning_evidence_id=review_item.winning_evidence_id,
         payload=review_item.payload,
         assigned_to=review_item.assigned_to,
         created_at=review_item.created_at.isoformat(),

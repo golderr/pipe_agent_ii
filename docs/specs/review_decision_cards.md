@@ -31,6 +31,7 @@ Add to `review_items`:
 
 - `field_name` (text, nullable) — promoted out of payload.
 - `winning_evidence_id` (uuid, FK to `evidence`, nullable) — the evidence row that drove the resolution rule.
+- `updated_at` (timestamp, non-null) - bumped when an active card absorbs additional evidence.
 - Partial unique index on `(project_id, field_name, item_type) WHERE state IN ('open', 'staged') AND field_name IS NOT NULL`.
 
 Keep existing columns (nullable, repurposed as "latest representative"):

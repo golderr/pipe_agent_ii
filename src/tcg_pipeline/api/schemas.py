@@ -181,6 +181,8 @@ class ReviewQueueItemResponse(BaseModel):
     state: str
     priority: str
     match_confidence: float | None
+    field_name: str | None
+    winning_evidence_id: uuid.UUID | None
     payload: Any | None
     assigned_to: str | None
     created_at: str

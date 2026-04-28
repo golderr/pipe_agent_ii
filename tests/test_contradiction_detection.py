@@ -86,11 +86,22 @@ def test_detect_project_contradictions_creates_and_updates_single_active_item(
             ReviewItem.state.in_(["open", "staged"]),
         )
     ).scalars().all()
+    invalidated_items = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+            ReviewItem.state == "invalidated",
+        )
+    ).scalars().all()
 
-    assert second_result.created_count == 0
-    assert second_result.updated_count == 1
-    assert [item.id for item in active_items] == [review_item.id]
+    assert second_result.created_count == 1
+    assert second_result.updated_count == 0
+    assert second_result.invalidated_count == 1
+    assert [item.id for item in invalidated_items] == [review_item.id]
+    assert len(active_items) == 1
+    assert active_items[0].id != review_item.id
     assert active_items[0].payload["proposed_value"] == 280
+    assert active_items[0].field_name == "total_units"
 
 
 def test_detect_project_contradictions_flags_baseline_less_legacy_override(
@@ -126,8 +137,10 @@ def test_detect_project_contradictions_flags_baseline_less_legacy_override(
     ).scalar_one()
 
     assert result.created_count == 1
+    assert review_item.field_name == "developer"
     assert review_item.payload["field_name"] == "developer"
     assert review_item.payload["proposed_value"] == "New Dev"
+    assert review_item.payload["evidence_ids"]
 
 
 def test_detect_project_contradictions_ignores_developer_legal_suffix_noise(
@@ -282,6 +295,12 @@ def _ensure_contradiction_tables(postgres_session: Session) -> None:
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply the latest migrations before running contradiction tests: {missing}")
+    columns = {column["name"] for column in inspector.get_columns("review_items")}
+    missing_columns = {"field_name", "winning_evidence_id"} - columns
+    if missing_columns:
+        pytest.skip(
+            f"Apply the latest migrations before running contradiction tests: {missing_columns}"
+        )
 
 
 def _project(canonical_address: str, **overrides: Any) -> Project:
@@ -373,6 +392,7 @@ def _review_item(
         status=status,
         state=state,
         priority=Priority.MEDIUM,
+        field_name="total_units",
         payload={"field_name": "total_units"},
         contradiction_priority="medium",
     )

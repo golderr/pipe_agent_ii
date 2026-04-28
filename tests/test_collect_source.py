@@ -95,6 +95,9 @@ def test_persist_collected_records_creates_status_change_review_item(
     ).scalar_one()
     assert review_item.item_type == ReviewItemType.STATUS_CHANGE
     assert review_item.project_id == project.id
+    assert review_item.field_name == "pipeline_status"
+    assert len(review_item.payload["evidence_ids"]) == 1
+    assert review_item.winning_evidence_id is not None
     assert review_item.payload["status_suggestion"]["suggested_status"] == "Approved"
     assert review_item.payload["status_suggestion"]["evidence_type"] == "building_permit_issued"
     assert review_item.payload["status_suggestion"]["rule_code"] == "building_permit_issued"

@@ -64,10 +64,11 @@ export function fieldNameForItem(item: ReviewQueueItem) {
   const change = firstChange(item);
   const statusSuggestion = asRecord(payload?.status_suggestion);
   return (
+    item.fieldName ??
     asString(payload?.field_name) ??
+    (statusSuggestion ? "pipeline_status" : null) ??
     asString(change?.field) ??
     asString(change?.field_name) ??
-    (statusSuggestion ? "pipeline_status" : null) ??
     item.itemType
   );
 }

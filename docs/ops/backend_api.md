@@ -480,6 +480,26 @@ Before applying `202604280017` to production:
    rows, Project Detail notes for a project with note history, and Project
    Detail Overrides for a project with active overrides.
 
+## Review Decision-Card Consolidation
+
+C.tail.11 adds `review_items.field_name`, `review_items.winning_evidence_id`,
+`review_items.updated_at`, and the partial unique index
+`uq_review_items_active_project_field_type` with Alembic `202604280018`. The
+index enforces one active (`open`/`staged`) review item per
+`(project_id, field_name, item_type)` for field-based review items.
+
+Before applying `202604280018` to a database that already has review items:
+
+1. Run `python scripts/collapse_duplicate_review_items.py` and inspect the dry
+   run output.
+2. If any staged duplicate group is reported, pause researcher queue work and
+   decide whether to re-run with `--migrate-staged`.
+3. Run `python scripts/collapse_duplicate_review_items.py --apply` once the dry
+   run is clean.
+4. Apply `alembic upgrade head`.
+5. Smoke-check `/review`, Coverage queue counts, and one Project Detail review
+   link for a project that previously had duplicate status-change rows.
+
 ## Auth Notes
 
 The API verifies Supabase access tokens with the Supabase JWKS endpoint:

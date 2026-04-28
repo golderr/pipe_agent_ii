@@ -48,6 +48,8 @@ type ReviewQueueItemApi = {
   state: string;
   priority: string;
   match_confidence: number | null;
+  field_name: string | null;
+  winning_evidence_id: string | null;
   payload: Record<string, unknown> | null;
   assigned_to: string | null;
   created_at: string;
@@ -390,6 +392,8 @@ function mapReviewItem(item: ReviewQueueItemApi): ReviewQueueItem {
     state: item.state,
     priority: item.priority,
     matchConfidence: item.match_confidence,
+    fieldName: item.field_name,
+    winningEvidenceId: item.winning_evidence_id,
     payload: item.payload,
     assignedTo: item.assigned_to,
     createdAt: item.created_at,

@@ -405,6 +405,8 @@ def test_review_queue_serializes_committed_decision_for_reviewed_tab() -> None:
         state="committed",
         priority=Priority.MEDIUM,
         match_confidence=None,
+        field_name="total_units",
+        winning_evidence_id=None,
         payload={"field_name": "total_units"},
         assigned_to=None,
         created_at=datetime(2026, 4, 27, 10, 0, tzinfo=UTC),
@@ -432,6 +434,8 @@ def test_review_queue_serializes_committed_decision_for_reviewed_tab() -> None:
     serialized = review_router._serialize_review_item(review_item)
 
     assert serialized.state == "committed"
+    assert serialized.field_name == "total_units"
+    assert serialized.winning_evidence_id is None
     assert serialized.active_decision is not None
     assert serialized.active_decision.decision_id == decision_id
     assert serialized.active_decision.state == "committed"

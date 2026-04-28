@@ -43,6 +43,8 @@ function reviewItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
     state: "committed",
     priority: "medium",
     matchConfidence: null,
+    fieldName: null,
+    winningEvidenceId: null,
     payload: {
       field_name: "total_units",
       current_override: { value: 100 },

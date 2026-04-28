@@ -22,6 +22,8 @@ export type ReviewQueueItem = {
   state: string;
   priority: string;
   matchConfidence: number | null;
+  fieldName: string | null;
+  winningEvidenceId: string | null;
   payload: Record<string, unknown> | null;
   assignedTo: string | null;
   createdAt: string;

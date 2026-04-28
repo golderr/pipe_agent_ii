@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, object_session
 
 from tcg_pipeline.db.models import (
+    Evidence,
     Priority,
     Project,
     ResearcherOverride,
@@ -23,6 +24,10 @@ from tcg_pipeline.developer.registry import (
     normalize_developer_name,
 )
 from tcg_pipeline.resolution.fields import FieldResolution, normalize_comparable
+from tcg_pipeline.review.decision_cards import (
+    proposed_values_match,
+    upsert_decision_card_review_item,
+)
 
 ACTIVE_REVIEW_STATES = {"open", "staged"}
 REVIEW_PROTECTED_MODES = {"review_protected", "until_newer_evidence", "sticky", None}
@@ -109,30 +114,38 @@ def detect_project_contradictions(
 
         contradicted_fields.add(field_name)
         priority = contradiction_priority(field_name, resolution)
-        payload = contradiction_payload(field_name, resolution)
+        payload = contradiction_payload(
+            session,
+            project=project,
+            field_name=field_name,
+            resolution=resolution,
+        )
         existing_item = existing_items.get(field_name)
-        if existing_item is not None:
-            if existing_item.id in skip_review_item_ids:
-                continue
-            existing_item.priority = priority
-            existing_item.contradiction_priority = priority.value
-            existing_item.payload = payload
-            existing_item.contradicted_override_id = active_override_ids.get(field_name)
-            result.updated_items.append(existing_item)
+        if existing_item is not None and existing_item.id in skip_review_item_ids:
             continue
 
-        item = ReviewItem(
+        item, created = upsert_decision_card_review_item(
+            session,
             project_id=project.id,
             item_type=ReviewItemType.OVERRIDE_CONTRADICTION,
-            status=ReviewItemStatus.OPEN,
-            state="open",
+            field_name=field_name,
             priority=priority,
             payload=payload,
+            proposed_value=resolution.metadata.get("candidate_value"),
+            winning_evidence_id=_winning_candidate_evidence_id(session, resolution),
             contradicted_override_id=active_override_ids.get(field_name),
             contradiction_priority=priority.value,
         )
-        session.add(item)
-        result.created_items.append(item)
+        if created:
+            result.created_items.append(item)
+            if (
+                existing_item is not None
+                and existing_item.state == "invalidated"
+                and not proposed_values_match(existing_item.payload, payload.get("proposed_value"))
+            ):
+                result.invalidated_items.append(existing_item)
+        else:
+            result.updated_items.append(item)
 
     for field_name, existing_item in existing_items.items():
         if field_name in contradicted_fields or existing_item.id in skip_review_item_ids:
@@ -259,9 +272,18 @@ def contradiction_priority(
 
 
 def contradiction_payload(
+    session: Session,
+    *,
+    project: Project,
     field_name: str,
     resolution: FieldResolution,
 ) -> dict[str, Any]:
+    evidence_ids = _contradiction_evidence_ids(
+        session,
+        project=project,
+        field_name=field_name,
+        resolution=resolution,
+    )
     return {
         "origin": "override_contradiction_detection",
         "field_name": field_name,
@@ -274,6 +296,7 @@ def contradiction_payload(
             "baseline": resolution.metadata.get("baseline"),
         },
         "proposed_value": resolution.metadata.get("candidate_value"),
+        "evidence_ids": evidence_ids,
         "candidate": {
             "value": resolution.metadata.get("candidate_value"),
             "rule_applied": resolution.metadata.get("candidate_rule_applied"),
@@ -315,7 +338,7 @@ def _existing_override_contradiction_items_by_field(
     items_by_field: dict[str, ReviewItem] = {}
     for item in rows:
         payload = item.payload if isinstance(item.payload, dict) else {}
-        field_name = payload.get("field_name")
+        field_name = item.field_name or payload.get("field_name")
         if isinstance(field_name, str):
             items_by_field[field_name] = item
     return items_by_field
@@ -382,6 +405,84 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
     return value
+
+
+def _contradiction_evidence_ids(
+    session: Session,
+    *,
+    project: Project,
+    field_name: str,
+    resolution: FieldResolution,
+) -> list[str]:
+    evidence_ids: list[str] = []
+    candidate_ids = resolution.metadata.get("candidate_evidence_ids") or []
+    evidence_ids.extend(str(evidence_id) for evidence_id in candidate_ids if evidence_id)
+    evidence_ids.extend(
+        str(evidence_id)
+        for evidence_id in _supporting_evidence_ids(
+            session,
+            project=project,
+            field_name=field_name,
+            override_value=resolution.value,
+        )
+    )
+    return _dedupe_text(evidence_ids)
+
+
+def _supporting_evidence_ids(
+    session: Session,
+    *,
+    project: Project,
+    field_name: str,
+    override_value: Any,
+) -> list[uuid.UUID]:
+    rows = session.execute(
+        select(Evidence).where(
+            Evidence.project_id == project.id,
+            Evidence.extracted_fields.isnot(None),
+        )
+    ).scalars().all()
+    supporting: list[uuid.UUID] = []
+    for evidence in rows:
+        field_payload = (evidence.extracted_fields or {}).get(field_name)
+        if not isinstance(field_payload, Mapping) or "value" not in field_payload:
+            continue
+        if not values_contradict(
+            field_name,
+            override_value,
+            field_payload.get("value"),
+            session=session,
+        ):
+            supporting.append(evidence.id)
+    return supporting
+
+
+def _winning_candidate_evidence_id(
+    session: Session,
+    resolution: FieldResolution,
+) -> uuid.UUID | None:
+    candidate_ids = resolution.metadata.get("candidate_evidence_ids") or []
+    if not candidate_ids:
+        return None
+    try:
+        evidence_id = uuid.UUID(str(candidate_ids[0]))
+    except (TypeError, ValueError):
+        return None
+    return session.execute(
+        select(Evidence.id).where(Evidence.id == evidence_id)
+    ).scalar_one_or_none()
+
+
+def _dedupe_text(values: Iterable[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _coerce_text(value: Any) -> str | None:

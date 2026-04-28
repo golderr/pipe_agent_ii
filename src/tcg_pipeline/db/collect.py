@@ -34,6 +34,11 @@ from tcg_pipeline.matching.differ import (
 )
 from tcg_pipeline.matching.matcher import MatchResult, match_raw_record
 from tcg_pipeline.resolution import resolve_project
+from tcg_pipeline.review.decision_cards import (
+    field_name_for_payload,
+    proposed_value_for_payload,
+    upsert_decision_card_review_item,
+)
 from tcg_pipeline.status_rules import build_status_suggestion
 
 
@@ -194,33 +199,18 @@ def persist_collected_records(
         )
         if diff_result.has_reviewable_changes:
             source_run.updates_found += 1
-            result.status_change_review_items += 1
-            session.add(
-                ReviewItem(
-                    project_id=project.id,
-                    source_run_id=source_run.id,
-                    item_type=ReviewItemType.STATUS_CHANGE,
-                    status=ReviewItemStatus.OPEN,
-                    priority=_review_priority(diff_result),
-                    match_confidence=match_result.confidence,
-                    payload={
-                        "match": _serialize_match_result(match_result),
-                        "source_record_id": raw_record.source_record_id,
-                        "canonical_address": raw_record.canonical_address,
-                        "mapped_fields": _serialize_payload(raw_record.mapped_fields),
-                        "changes": [
-                            _serialize_change(change) for change in diff_result.field_changes
-                        ],
-                        "review_flags": [
-                            _serialize_review_flag(review_flag)
-                            for review_flag in diff_result.review_flags
-                        ],
-                        "status_suggestion": _serialize_status_suggestion(
-                            diff_result.status_suggestion
-                        ),
-                    },
-                )
+            _, created = _upsert_status_change_review_item(
+                session,
+                project=project,
+                source_run=source_run,
+                raw_record=raw_record,
+                match_result=match_result,
+                diff_result=diff_result,
+                resolution_result=resolution_result,
+                evidence_id=evidence_result.evidence.id if evidence_result.evidence else None,
             )
+            if created:
+                result.status_change_review_items += 1
 
     source_run.duration_seconds = max(int((datetime.now(UTC) - run_started_at).total_seconds()), 0)
     return result
@@ -390,6 +380,81 @@ def _create_unmatched_review_item(
             },
         )
     )
+
+
+def _upsert_status_change_review_item(
+    session: Session,
+    *,
+    project: Project,
+    source_run: SourceRun,
+    raw_record: RawRecord,
+    match_result: MatchResult,
+    diff_result: DiffResult,
+    resolution_result,
+    evidence_id: uuid.UUID | None,
+) -> tuple[ReviewItem, bool]:
+    payload = {
+        "match": _serialize_match_result(match_result),
+        "source_record_id": raw_record.source_record_id,
+        "canonical_address": raw_record.canonical_address,
+        "mapped_fields": _serialize_payload(raw_record.mapped_fields),
+        "changes": [_serialize_change(change) for change in diff_result.field_changes],
+        "review_flags": [
+            _serialize_review_flag(review_flag) for review_flag in diff_result.review_flags
+        ],
+        "status_suggestion": _serialize_status_suggestion(diff_result.status_suggestion),
+    }
+    field_name = _field_name_for_status_review(payload, raw_record)
+    proposed_value = proposed_value_for_payload(payload, field_name)
+    if evidence_id is not None:
+        payload["evidence_ids"] = [str(evidence_id)]
+    winning_evidence_id = _winning_evidence_id_for_field(
+        resolution_result,
+        field_name,
+        fallback=evidence_id,
+    )
+    return upsert_decision_card_review_item(
+        session,
+        project_id=project.id,
+        source_run_id=source_run.id,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        field_name=field_name,
+        priority=_review_priority(diff_result),
+        match_confidence=match_result.confidence,
+        payload=payload,
+        proposed_value=proposed_value,
+        winning_evidence_id=winning_evidence_id,
+    )
+
+
+def _field_name_for_status_review(payload: dict[str, Any], raw_record: RawRecord) -> str:
+    field_name = field_name_for_payload(ReviewItemType.STATUS_CHANGE, payload)
+    if field_name is not None:
+        return field_name
+    if any(
+        review_flag.get("code") == "developer_canonicalization_review"
+        for review_flag in payload.get("review_flags", [])
+        if isinstance(review_flag, dict)
+    ):
+        return "developer"
+    for candidate in ("pipeline_status", "developer", "total_units", "date_delivery"):
+        if candidate in raw_record.mapped_fields:
+            return candidate
+    return "pipeline_status"
+
+
+def _winning_evidence_id_for_field(
+    resolution_result,
+    field_name: str,
+    *,
+    fallback: uuid.UUID | None,
+) -> uuid.UUID | None:
+    if resolution_result is None:
+        return fallback
+    field_resolution = resolution_result.field_resolutions.get(field_name)
+    if field_resolution is None or not field_resolution.evidence_ids:
+        return fallback
+    return field_resolution.evidence_ids[0]
 
 
 def _review_priority(diff_result: DiffResult) -> Priority:

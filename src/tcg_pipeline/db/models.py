@@ -977,6 +977,19 @@ class ReviewItem(Base):
         Index("ix_review_items_status_priority", "status", "priority"),
         Index("ix_review_items_state_priority", "state", "priority"),
         Index("ix_review_items_project_id_state", "project_id", "state"),
+        Index("ix_review_items_project_field_state", "project_id", "field_name", "state"),
+        Index(
+            "uq_review_items_active_project_field_type",
+            "project_id",
+            "field_name",
+            "item_type",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('open', 'staged') "
+                "AND field_name IS NOT NULL "
+                "AND project_id IS NOT NULL"
+            ),
+        ),
         CheckConstraint(
             "state IN ('open', 'staged', 'committed', 'invalidated')",
             name="state",
@@ -1003,6 +1016,12 @@ class ReviewItem(Base):
     state: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     priority: Mapped[Priority] = mapped_column(PRIORITY_ENUM, nullable=False)
     match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    field_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    winning_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("evidence.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     contradicted_override_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -1016,11 +1035,17 @@ class ReviewItem(Base):
         nullable=False,
         server_default=func.now(),
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     project: Mapped[Project | None] = relationship(back_populates="review_items")
     source_run: Mapped[SourceRun | None] = relationship(back_populates="review_items")
+    winning_evidence: Mapped[Evidence | None] = relationship()
     decisions: Mapped[list["ReviewDecision"]] = relationship(back_populates="review_item")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="review_item")
 

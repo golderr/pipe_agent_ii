@@ -26,6 +26,8 @@ function reviewItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
     state: "open",
     priority: "medium",
     matchConfidence: null,
+    fieldName: null,
+    winningEvidenceId: null,
     payload: null,
     assignedTo: null,
     createdAt: "2026-04-27T10:00:00Z",
