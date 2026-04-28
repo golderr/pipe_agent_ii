@@ -335,7 +335,7 @@ Coverage source actions now call FastAPI:
 ```text
 POST /coverage/{jurisdiction_id}/scrape
 POST /coverage/{jurisdiction_id}/costar-upload
-GET  /scrape_jobs/{job_id}
+GET  /scrape_jobs/{job_id}?jurisdiction_id={jurisdiction_id}
 ```
 
 `scrape` enqueues a tracked `scrape_jobs` row for an active non-CoStar source
@@ -348,19 +348,32 @@ registration. The body is:
 ```
 
 The response includes the job id, status, timestamps, actor identity, and
-progress payload. Jobs currently start in `queued` state for the external worker
-to consume; the Coverage UI polls `GET /scrape_jobs/{job_id}` while the status
-is `queued` or `running`.
+progress payload. Implemented Socrata sources with local adapters currently run
+through a FastAPI background task immediately after enqueue:
 
-`costar-upload` accepts multipart form data with a single `file` field. The API
-parses and persists the workbook through the existing CoStar seed importer,
-records a jurisdiction-scoped `source_runs` row, and writes a `costar_uploads`
-audit row with uploader id/email, file metadata, row count, status, and error
-text. Failed imports return a normal response with `status = failed` so the
-audit row can commit.
+- `ladbs_permits`
+- `ladbs_permit_activity`
+- `ladbs_inspections`
+- `ladbs_cofo`
+
+Unsupported sources return `400` with a worker-pending message instead of
+creating a job that nothing consumes. The Coverage UI polls the jurisdiction-
+scoped status URL while the status is `queued` or `running`. Active duplicate
+jobs are prevented by a partial unique index on `(jurisdiction_id, source_name)`
+for `queued` / `running` rows; a duplicate click returns the existing active job
+when visible to the request, or `409` if the database unique constraint wins a
+race.
+
+`costar-upload` accepts multipart form data with a single `file` field. Uploads
+are capped at 50 MB. The API parses and persists the workbook through the
+existing CoStar seed importer, records a jurisdiction-scoped `source_runs` row,
+and writes a `costar_uploads` audit row with uploader id/email, file metadata,
+row count, status, and error text. Failed imports return a normal response with
+`status = failed` so the audit row can commit.
 
 C.l requires the `202604270014` Alembic migration and the `python-multipart`
-runtime dependency before deployed code handles uploads.
+runtime dependency before deployed code handles uploads. C.l-bis requires
+`202604270015` for active-job uniqueness.
 
 ## C.c Migration Verification
 

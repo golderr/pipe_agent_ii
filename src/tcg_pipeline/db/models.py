@@ -887,6 +887,13 @@ class ScrapeJob(Base):
             "queued_at",
             postgresql_where=text("status IN ('queued', 'running')"),
         ),
+        Index(
+            "uq_scrape_jobs_one_active_per_source",
+            "jurisdiction_id",
+            "source_name",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

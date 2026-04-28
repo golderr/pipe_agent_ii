@@ -202,14 +202,29 @@ def test_costar_upload_route_requires_multipart_file() -> None:
 
 def test_coverage_scrape_enqueue_uses_full_actor_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client()
-    client.app.dependency_overrides[get_db_session] = lambda: object()
     calls: dict[str, Any] = {}
+    background_job_ids: list[uuid.UUID] = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commit_calls = 0
+
+        def commit(self) -> None:
+            self.commit_calls += 1
+
+    fake_session = FakeSession()
+    client.app.dependency_overrides[get_db_session] = lambda: fake_session
 
     def fake_enqueue_scrape_job(_session: object, **kwargs: Any) -> object:
         calls.update(kwargs)
         return _fake_scrape_job()
 
     monkeypatch.setattr(coverage_router, "enqueue_scrape_job", fake_enqueue_scrape_job)
+    monkeypatch.setattr(
+        coverage_router,
+        "run_scrape_job",
+        lambda job_id: background_job_ids.append(job_id),
+    )
 
     response = client.post(
         f"/coverage/{JURISDICTION_ID}/scrape",
@@ -224,6 +239,8 @@ def test_coverage_scrape_enqueue_uses_full_actor_identity(monkeypatch: pytest.Mo
     assert calls["source_name"] == "ladbs_permits"
     assert calls["user"].user_id == USER_ID
     assert calls["user"].email == "allowed@example.com"
+    assert fake_session.commit_calls == 1
+    assert background_job_ids == [JOB_ID]
 
 
 def test_scrape_job_status_serializes_job() -> None:
@@ -240,7 +257,7 @@ def test_scrape_job_status_serializes_job() -> None:
     assert response.status_code == 200
     assert response.json()["id"] == str(JOB_ID)
     assert response.json()["source_name"] == "ladbs_permits"
-    assert response.json()["progress"] == {"message": "Queued for scraper worker."}
+    assert response.json()["progress"] == {"message": "Queued for API background scrape."}
 
 
 def test_costar_upload_uses_full_actor_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -381,7 +398,7 @@ def _fake_scrape_job() -> object:
         completed_at=None,
         source_run_id=None,
         error_text=None,
-        progress={"message": "Queued for scraper worker."},
+        progress={"message": "Queued for API background scrape."},
     )
 
 

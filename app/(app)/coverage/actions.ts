@@ -7,6 +7,8 @@ import {
   responseErrorMessage
 } from "@/lib/server-actions";
 
+const MAX_COSTAR_UPLOAD_BYTES = 50 * 1024 * 1024;
+
 export type ScrapeJobStatus = {
   id: string;
   jurisdictionId: string;
@@ -89,15 +91,19 @@ export async function enqueueScrapeAction(
   }
 }
 
-export async function getScrapeJobAction(jobId: string): Promise<CoverageActionResult> {
-  if (!jobId) {
+export async function getScrapeJobAction(
+  jobId: string,
+  jurisdictionId: string
+): Promise<CoverageActionResult> {
+  if (!jobId || !jurisdictionId) {
     return { ok: false, message: "Missing scrape job." };
   }
 
   try {
     const apiBaseUrl = await apiBaseUrlForWrite();
     const accessToken = await accessTokenForApi();
-    const response = await fetch(`${apiBaseUrl}/scrape_jobs/${jobId}`, {
+    const params = new URLSearchParams({ jurisdiction_id: jurisdictionId });
+    const response = await fetch(`${apiBaseUrl}/scrape_jobs/${jobId}?${params}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
       cache: "no-store"
     });
@@ -125,6 +131,9 @@ export async function uploadCostarAction(formData: FormData): Promise<CoverageAc
   const file = formData.get("file");
   if (typeof jurisdictionId !== "string" || !jurisdictionId || !(file instanceof File)) {
     return { ok: false, message: "Choose a CoStar workbook to upload." };
+  }
+  if (file.size > MAX_COSTAR_UPLOAD_BYTES) {
+    return { ok: false, message: "CoStar uploads must be 50 MB or smaller." };
   }
 
   try {

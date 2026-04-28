@@ -69,6 +69,14 @@ const SOURCE_CLASS_STYLES: Record<string, string> = {
   web: "border-slate-200 bg-slate-50 text-slate-700",
   pipedream_seed: "border-teal-200 bg-teal-50 text-teal-800"
 };
+const INLINE_REFRESH_SOURCE_NAMES = new Set([
+  "ladbs_permits",
+  "ladbs_permit_activity",
+  "ladbs_inspections",
+  "ladbs_cofo"
+]);
+const MAX_POLL_ATTEMPTS = 20;
+const POLL_DELAYS_MS = [3000, 6000, 12000, 30000, 60000];
 
 function number(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
@@ -263,16 +271,20 @@ function SourceDetail({
   const [tone, setTone] = useState<"neutral" | "success" | "error">("neutral");
   const [isPending, startTransition] = useTransition();
   const isCostar = source.sourceClass === "costar";
-  const isPolling = job ? ["queued", "running"].includes(job.status) && pollAttempts < 20 : false;
-  const disabled = isPending || !source.active;
+  const refreshUnavailable = !isCostar && !INLINE_REFRESH_SOURCE_NAMES.has(source.sourceName);
+  const isPolling = job
+    ? ["queued", "running"].includes(job.status) && pollAttempts < MAX_POLL_ATTEMPTS
+    : false;
+  const disabled = isPending || !source.active || refreshUnavailable;
 
   useEffect(() => {
     if (!isPolling || !job) {
       return;
     }
+    const delay = POLL_DELAYS_MS[Math.min(pollAttempts, POLL_DELAYS_MS.length - 1)];
     const timeout = window.setTimeout(() => {
       startTransition(async () => {
-        const result = await getScrapeJobAction(job.id);
+        const result = await getScrapeJobAction(job.id, jurisdictionId);
         setPollAttempts((current) => current + 1);
         if (result.job) {
           setJob(result.job);
@@ -285,10 +297,10 @@ function SourceDetail({
           setMessage(result.job.errorText ?? `Scrape ${result.job.status}.`);
         }
       });
-    }, 3000);
+    }, delay);
 
     return () => window.clearTimeout(timeout);
-  }, [isPolling, job]);
+  }, [isPolling, job, jurisdictionId, pollAttempts]);
 
   function queueScrape() {
     setTone("neutral");
@@ -355,10 +367,14 @@ function SourceDetail({
         ) : job ? (
           <p className="mt-1 text-slate-500">
             Job {job.status}
-            {pollAttempts >= 20 && ["queued", "running"].includes(job.status)
+            {pollAttempts >= MAX_POLL_ATTEMPTS && ["queued", "running"].includes(job.status)
               ? " - worker will continue"
               : ""}
           </p>
+        ) : refreshUnavailable ? (
+          <p className="mt-1 text-slate-500">Worker pending for this source</p>
+        ) : isCostar ? (
+          <p className="mt-1 text-slate-500">Max 50 MB</p>
         ) : null}
       </div>
       {isCostar ? (
@@ -372,7 +388,13 @@ function SourceDetail({
       ) : null}
       <Button
         disabled={disabled}
-        title={source.active ? undefined : "Source registration is inactive"}
+        title={
+          !source.active
+            ? "Source registration is inactive"
+            : refreshUnavailable
+              ? "Refresh will be enabled when worker support is deployed for this source"
+              : undefined
+        }
         type="button"
         variant="outline"
         onClick={() => {

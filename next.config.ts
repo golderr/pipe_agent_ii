@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  reactStrictMode: true
+  reactStrictMode: true,
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "50mb"
+    }
+  }
 };
 
 export default nextConfig;
