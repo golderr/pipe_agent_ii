@@ -75,6 +75,8 @@ def test_update_project_field_writes_direct_field_and_logs(
     assert change_log.change_type == ChangeType.RESEARCHER_CONFIRMED
     assert change_log.old_value == "Old Name"
     assert change_log.new_value == "New Name"
+    assert change_log.reviewed_by_user_id == USER_ID
+    assert change_log.reviewed_by_email == "allowed@example.com"
 
 
 @pytest.mark.parametrize(
@@ -230,6 +232,8 @@ def test_append_project_note_creates_history_updates_latest_and_logs(
         "Second appended note",
     ]
     assert {row.source for row in change_log_rows} == {"project_note"}
+    assert {row.reviewed_by_user_id for row in change_log_rows} == {USER_ID}
+    assert {row.reviewed_by_email for row in change_log_rows} == {"allowed@example.com"}
 
 
 def test_append_project_note_rejects_empty_body(postgres_session: Session) -> None:

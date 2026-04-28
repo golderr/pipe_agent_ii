@@ -101,6 +101,8 @@ def test_set_project_override_writes_table_resolves_and_logs(
     assert change_log.old_value == 100
     assert change_log.new_value == 212
     assert change_log.reviewed_by == "allowed@example.com"
+    assert change_log.reviewed_by_user_id == USER_ID
+    assert change_log.reviewed_by_email == "allowed@example.com"
 
 
 def test_clear_project_override_marks_row_cleared_resolves_and_logs(

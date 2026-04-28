@@ -104,6 +104,7 @@ def set_project_override(
         old_value=old_value,
         new_value=resolution_result.resolved_values.get(field_name),
         actor=actor,
+        user=user,
         timestamp=now,
     )
     session.flush()
@@ -157,6 +158,7 @@ def clear_project_override(
         old_value=old_value,
         new_value=resolved_value,
         actor=actor,
+        user=user,
         timestamp=now,
     )
     session.flush()
@@ -260,6 +262,7 @@ def _write_override_change_log(
     old_value: Any,
     new_value: Any,
     actor: str,
+    user: AuthenticatedUser,
     timestamp: datetime,
 ) -> int:
     priority = CHANGELOG_PRIORITY_BY_FIELD.get(field_name, Priority.MEDIUM)
@@ -274,6 +277,8 @@ def _write_override_change_log(
             change_type=ChangeType.RESEARCHER_OVERRIDE,
             priority=priority,
             reviewed_by=actor[:50],
+            reviewed_by_user_id=user.user_id,
+            reviewed_by_email=user.email,
         )
     )
     return 1

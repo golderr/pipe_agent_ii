@@ -7,6 +7,7 @@ import type {
   ProjectDetailData,
   ProjectEvidenceFilterOption,
   ProjectEvidenceRow,
+  ProjectNoteHistoryRow,
   ProjectOverrideRow,
   ProjectResolutionRow,
   ProjectRelationshipRow,
@@ -127,7 +128,18 @@ type RawChangeLog = {
   change_type: string;
   priority: string;
   reviewed_by: string | null;
+  reviewed_by_user_id: string | null;
+  reviewed_by_email: string | null;
   review_item_id: string | null;
+};
+
+type RawProjectNote = {
+  id: string;
+  note_type: string;
+  body: string;
+  created_by_user_id: string | null;
+  created_by_label: string | null;
+  created_at: string;
 };
 
 type ProjectDetailResult =
@@ -530,6 +542,37 @@ function sourceTypeLabel(sourceType: string) {
   return labels[sourceType] ?? humanizeToken(sourceType);
 }
 
+function changeSourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    inline_field: "Inline field",
+    inline_override: "Inline override",
+    manual_project: "Manual project",
+    project_note: "Project note",
+    project_relationship: "Project relationship",
+    resolution_engine: "Resolution engine",
+    contradiction_detection: "Contradiction detection"
+  };
+
+  return labels[source] ?? sourceTypeLabel(source);
+}
+
+function displayActor(
+  email: string | null | undefined,
+  label: string | null | undefined,
+  userId: string | null | undefined
+) {
+  if (email) {
+    return email;
+  }
+  if (label) {
+    return label;
+  }
+  if (userId && userId.length > 8) {
+    return `${userId.slice(0, 4)}...${userId.slice(-4)}`;
+  }
+  return userId ?? "System";
+}
+
 function uniqueOptions(options: ProjectEvidenceFilterOption[]) {
   const byValue = new Map<string, ProjectEvidenceFilterOption>();
   for (const option of options) {
@@ -771,14 +814,36 @@ function toChangeRows(changeRows: RawChangeLog[]): ProjectChangeLogRow[] {
       id: row.id,
       timestamp: row.timestamp,
       source: row.source,
+      sourceLabel: changeSourceLabel(row.source),
       field: row.field,
       fieldLabel: fieldLabel(row.field),
       oldValue: formatValue(row.old_value),
       newValue: formatValue(row.new_value),
       changeType: row.change_type,
+      changeTypeLabel: humanizeToken(row.change_type),
       priority: row.priority,
       reviewedBy: row.reviewed_by,
+      reviewedByUserId: row.reviewed_by_user_id,
+      reviewedByEmail: row.reviewed_by_email,
+      actorLabel: displayActor(row.reviewed_by_email, row.reviewed_by, row.reviewed_by_user_id),
       reviewItemId: row.review_item_id
+    }));
+}
+
+function toNoteRows(noteRows: RawProjectNote[]): ProjectNoteHistoryRow[] {
+  return [...noteRows]
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .map((row) => ({
+      id: row.id,
+      noteType: row.note_type,
+      noteTypeLabel: fieldLabel(row.note_type),
+      body: row.body,
+      createdByUserId: row.created_by_user_id,
+      createdByLabel: row.created_by_label,
+      actorLabel: displayActor(null, row.created_by_label, row.created_by_user_id),
+      createdAt: row.created_at,
+      source: "project_note",
+      sourceLabel: changeSourceLabel("project_note")
     }));
 }
 
@@ -789,6 +854,7 @@ function toStatusRows(statusRows: RawStatusHistory[]): ProjectStatusHistoryRow[]
       status: row.status,
       statusDate: row.status_date,
       source: row.source,
+      sourceLabel: changeSourceLabel(row.source),
       notes: row.notes
     }));
 }
@@ -1060,7 +1126,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     relationships,
     incomingRelationships,
     statusHistory,
-    changeRows
+    changeRows,
+    noteRows
   ] = await Promise.all([
     rawProject.jurisdiction_id
       ? supabase
@@ -1113,7 +1180,13 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     fetchProjectRows<RawChangeLog>(
       supabase,
       "change_log",
-      "id, timestamp, source, field, old_value, new_value, change_type, priority, reviewed_by, review_item_id",
+      "id, timestamp, source, field, old_value, new_value, change_type, priority, reviewed_by, reviewed_by_user_id, reviewed_by_email, review_item_id",
+      projectId
+    ),
+    fetchProjectRows<RawProjectNote>(
+      supabase,
+      "project_notes",
+      "id, note_type, body, created_by_user_id, created_by_label, created_at",
       projectId
     )
   ]);
@@ -1128,7 +1201,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     relationships.error ??
     incomingRelationships.error?.message ??
     statusHistory.error ??
-    changeRows.error;
+    changeRows.error ??
+    noteRows.error;
 
   if (error) {
     return { data: null, error };
@@ -1169,6 +1243,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
   const resolutionByField = new Map(resolutions.data.map((resolution) => [resolution.field, resolution]));
   const resolutionRows = toResolutionRows(resolutions.data, evidenceById);
   const projectChangeRows = toChangeRows(changeRows.data);
+  const projectNoteRows = toNoteRows(noteRows.data);
   const projectStatusRows = toStatusRows(statusHistory.data);
   const overrideRows = toOverrideRows(rawProject.researcher_override);
   const relationshipRows = toRelationshipRows(
@@ -1307,6 +1382,7 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       },
       resolutionRows,
       changeRows: projectChangeRows,
+      noteRows: projectNoteRows,
       statusRows: projectStatusRows,
       overrideRows,
       relationshipRows

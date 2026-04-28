@@ -5,6 +5,14 @@ import { AlertCircle, ArrowLeft, ChevronRight, Circle, Clock, ExternalLink, File
 import { FieldEditControl } from "./field-edit-control";
 import { InclusionFlagsControl } from "./inclusion-flags-control";
 import { RelationshipPicker } from "./relationship-picker";
+import {
+  buildChangeFilterOptions,
+  filterChangeRows,
+  filterNoteRows,
+  filterStatusRows,
+  hasActiveChangeFilter,
+  type ProjectChangeQuery
+} from "@/lib/project-detail/changes";
 import { getProjectDetailData } from "@/lib/project-detail/data";
 import { compactStatus, statusStyle } from "@/lib/status";
 import type {
@@ -17,6 +25,7 @@ import type {
   ProjectEvidenceFilters,
   ProjectEvidenceRow,
   ProjectField,
+  ProjectNoteHistoryRow,
   ProjectOverrideRow,
   ProjectRelationshipRow,
   ProjectResolutionRow,
@@ -33,6 +42,8 @@ type ProjectDetailPageProps = {
     tab?: string;
     field?: string;
     source?: string;
+    actor?: string;
+    type?: string;
     from?: string;
     to?: string;
   }>;
@@ -83,6 +94,20 @@ function formatDate(value: string | null) {
     month: "short",
     day: "numeric",
     year: "numeric"
+  }).format(new Date(value));
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) {
+    return "-";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
   }).format(new Date(value));
 }
 
@@ -250,11 +275,19 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
     );
   }
 
-  const { project, sections, evidenceRows, evidenceFilters, resolutionRows, changeRows, statusRows, overrideRows, relationshipRows } = result.data;
+  const { project, sections, evidenceRows, evidenceFilters, resolutionRows, changeRows, noteRows, statusRows, overrideRows, relationshipRows } = result.data;
   const activeTab = normalizeTab(query.tab);
   const evidenceQuery = {
     field: normalizeQueryValue(query.field),
     source: normalizeQueryValue(query.source),
+    from: normalizeDateQueryValue(query.from),
+    to: normalizeDateQueryValue(query.to)
+  };
+  const changeQuery: ProjectChangeQuery = {
+    field: normalizeQueryValue(query.field),
+    source: normalizeQueryValue(query.source),
+    actor: normalizeQueryValue(query.actor),
+    type: normalizeQueryValue(query.type),
     from: normalizeDateQueryValue(query.from),
     to: normalizeDateQueryValue(query.to)
   };
@@ -319,7 +352,13 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
       ) : activeTab === "resolution" ? (
         <ResolutionTab projectId={project.id} resolutionRows={resolutionRows} />
       ) : activeTab === "changes" ? (
-        <ChangesTab changeRows={changeRows} statusRows={statusRows} />
+        <ChangesTab
+          changeQuery={changeQuery}
+          changeRows={changeRows}
+          noteRows={noteRows}
+          projectId={project.id}
+          statusRows={statusRows}
+        />
       ) : activeTab === "overrides" ? (
         <OverridesTab overrideRows={overrideRows} />
       ) : (
@@ -642,49 +681,164 @@ function ResolutionRow({ projectId, row }: { projectId: string; row: ProjectReso
 }
 
 function ChangesTab({
+  changeQuery,
   changeRows,
+  noteRows,
+  projectId,
   statusRows
 }: {
+  changeQuery: ProjectChangeQuery;
   changeRows: ProjectChangeLogRow[];
+  noteRows: ProjectNoteHistoryRow[];
+  projectId: string;
   statusRows: ProjectStatusHistoryRow[];
 }) {
-  return (
-    <div className="mt-5 space-y-5">
-      <section className="rounded-md border border-slate-200 bg-white">
-        <div className="border-b border-slate-200 px-4 py-3">
-          <h2 className="text-sm font-semibold text-slate-950">ChangeLog</h2>
-          <p className="mt-0.5 text-xs text-slate-500">
-            ChangeLog rows are written when review decisions are committed in Phase C.
-          </p>
-        </div>
-        {changeRows.length ? (
-          <div className="divide-y divide-slate-100">
-            {changeRows.map((row) => (
-              <ChangeLogRow row={row} key={row.id} />
-            ))}
-          </div>
-        ) : (
-          <EmptyTabMessage title="No change log entries" text="No review-commit ChangeLog rows are linked to this project yet." />
-        )}
-      </section>
+  const filteredChangeRows = filterChangeRows(changeRows, changeQuery);
+  const filteredNoteRows = filterNoteRows(noteRows, changeQuery);
+  const filteredStatusRows = filterStatusRows(statusRows, changeQuery);
+  const filterOptions = buildChangeFilterOptions(changeRows, noteRows, statusRows);
+  const hasActiveFilter = hasActiveChangeFilter(changeQuery);
+  const visibleCount = filteredChangeRows.length + filteredNoteRows.length + filteredStatusRows.length;
+  const totalCount = changeRows.length + noteRows.length + statusRows.length;
 
-      <section className="rounded-md border border-slate-200 bg-white">
-        <div className="border-b border-slate-200 px-4 py-3">
-          <h2 className="text-sm font-semibold text-slate-950">Status History</h2>
-          <p className="mt-0.5 text-xs text-slate-500">
-            Lifecycle status changes recorded by the resolver or collectors.
-          </p>
-        </div>
-        {statusRows.length ? (
-          <div className="divide-y divide-slate-100">
-            {statusRows.map((row, index) => (
-              <StatusHistoryRow row={row} key={`${row.status}-${row.statusDate ?? "undated"}-${index}`} />
-            ))}
+  return (
+    <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className="space-y-5">
+        <section className="rounded-md border border-slate-200 bg-white">
+          <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-950">ChangeLog</h2>
+              <p className="mt-0.5 text-xs text-slate-500">
+                {filteredChangeRows.length} of {changeRows.length} rows shown. Human edits, review commits, and system updates are listed newest first.
+              </p>
+            </div>
+            <Link
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"
+              href={`/pipeline/${projectId}?tab=changes`}
+            >
+              Clear filters
+            </Link>
           </div>
-        ) : (
-          <EmptyTabMessage title="No status history" text="No lifecycle status history rows are linked to this project yet." />
-        )}
-      </section>
+          {filteredChangeRows.length ? (
+            <div className="divide-y divide-slate-100">
+              {filteredChangeRows.map((row) => (
+                <ChangeLogRow row={row} key={row.id} />
+              ))}
+            </div>
+          ) : (
+            <EmptyTabMessage
+              title={hasActiveFilter ? "No matching change log entries" : "No change log entries"}
+              text={hasActiveFilter ? "No ChangeLog rows match these filters." : "No ChangeLog rows are linked to this project yet."}
+            />
+          )}
+        </section>
+
+        <section className="rounded-md border border-slate-200 bg-white">
+          <div className="border-b border-slate-200 px-4 py-3">
+            <h2 className="text-sm font-semibold text-slate-950">Project Notes</h2>
+            <p className="mt-0.5 text-xs text-slate-500">
+              {filteredNoteRows.length} of {noteRows.length} append-only note rows shown.
+            </p>
+          </div>
+          {filteredNoteRows.length ? (
+            <div className="divide-y divide-slate-100">
+              {filteredNoteRows.map((row) => (
+                <ProjectNoteRow row={row} key={row.id} />
+              ))}
+            </div>
+          ) : (
+            <EmptyTabMessage
+              title={hasActiveFilter ? "No matching project notes" : "No project notes"}
+              text={hasActiveFilter ? "No note history rows match these filters." : "No append-only project notes are linked to this project yet."}
+            />
+          )}
+        </section>
+
+        <section className="rounded-md border border-slate-200 bg-white">
+          <div className="border-b border-slate-200 px-4 py-3">
+            <h2 className="text-sm font-semibold text-slate-950">Status History</h2>
+            <p className="mt-0.5 text-xs text-slate-500">
+              {filteredStatusRows.length} of {statusRows.length} lifecycle rows shown.
+            </p>
+          </div>
+          {filteredStatusRows.length ? (
+            <div className="divide-y divide-slate-100">
+              {filteredStatusRows.map((row, index) => (
+                <StatusHistoryRow row={row} key={`${row.status}-${row.statusDate ?? "undated"}-${index}`} />
+              ))}
+            </div>
+          ) : (
+            <EmptyTabMessage
+              title={hasActiveFilter ? "No matching status history" : "No status history"}
+              text={hasActiveFilter ? "No status history rows match these filters." : "No lifecycle status history rows are linked to this project yet."}
+            />
+          )}
+        </section>
+      </div>
+
+      <aside className="h-fit rounded-md border border-slate-200 bg-white p-4">
+        <div className="flex items-center gap-2">
+          <Filter className="size-4 text-slate-500" aria-hidden="true" />
+          <h2 className="text-sm font-semibold text-slate-950">Audit Filters</h2>
+        </div>
+        <p className="mt-2 text-xs text-slate-500">
+          {visibleCount} of {totalCount} audit rows shown.
+        </p>
+        <form action={`/pipeline/${projectId}`} className="mt-4 space-y-3">
+          <input name="tab" type="hidden" value="changes" />
+          <FilterSelect
+            label="Field"
+            name="field"
+            options={withActiveOption(filterOptions.fields, changeQuery.field, displayRawFieldKey)}
+            value={changeQuery.field}
+          />
+          <FilterSelect
+            label="Actor"
+            name="actor"
+            options={withActiveOption(filterOptions.actors, changeQuery.actor, (value) => value)}
+            value={changeQuery.actor}
+          />
+          <FilterSelect
+            label="Source"
+            name="source"
+            options={withActiveOption(filterOptions.sources, changeQuery.source, displayRawFieldKey)}
+            value={changeQuery.source}
+          />
+          <FilterSelect
+            label="Type"
+            name="type"
+            options={withActiveOption(filterOptions.types, changeQuery.type, displayRawFieldKey)}
+            value={changeQuery.type}
+          />
+          <label className="block">
+            <span className="text-xs font-medium text-slate-600">From</span>
+            <input
+              className="mt-1 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+              defaultValue={changeQuery.from ?? ""}
+              name="from"
+              type="date"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-slate-600">To</span>
+            <input
+              className="mt-1 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+              defaultValue={changeQuery.to ?? ""}
+              name="to"
+              type="date"
+            />
+          </label>
+          <button
+            className="w-full rounded-md bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+            type="submit"
+          >
+            Apply
+          </button>
+        </form>
+        <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500">
+          Actor identity uses full email when the audit row provides it; older rows may show legacy labels.
+        </p>
+      </aside>
     </div>
   );
 }
@@ -693,29 +847,56 @@ function ChangeLogRow({ row }: { row: ProjectChangeLogRow }) {
   return (
     <details className="group px-4 py-3">
       <summary
-        className="grid cursor-pointer list-none gap-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 lg:grid-cols-[8rem_12rem_minmax(0,1fr)_8rem]"
+        className="grid cursor-pointer list-none gap-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 lg:grid-cols-[8rem_12rem_minmax(0,1fr)_10rem_8rem]"
         tabIndex={0}
       >
-        <span className="text-slate-500">{formatDate(row.timestamp)}</span>
+        <span className="text-slate-500">{formatDateTime(row.timestamp)}</span>
         <span className="font-medium text-slate-950">{row.fieldLabel}</span>
         <span className="min-w-0 text-slate-700">
           {row.oldValue} <span className="text-slate-400">to</span> {row.newValue}
         </span>
+        <span className="min-w-0 truncate text-xs text-slate-500" title={row.actorLabel}>
+          {row.actorLabel}
+        </span>
         <span className="w-fit rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] text-slate-700">
-          {displayRawFieldKey(row.changeType)}
+          {row.changeTypeLabel}
         </span>
       </summary>
       <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
         <DetailList
           rows={[
-            ["Source", row.source],
+            ["Source", row.sourceLabel],
             ["Priority", row.priority],
-            ["Reviewed by", row.reviewedBy ?? "-"],
-            ["Review item", row.reviewItemId ? <CompactId id={row.reviewItemId} key="review-item-id" /> : "-"]
+            ["Actor", row.actorLabel],
+            ["Legacy actor", row.reviewedBy ?? "-"],
+            ["User ID", row.reviewedByUserId ? <CompactId id={row.reviewedByUserId} key="reviewed-by-user-id" /> : "-"],
+            [
+              "Review item",
+              row.reviewItemId ? (
+                <Link className="font-medium text-teal-700 hover:text-teal-900" href={`/review/${row.reviewItemId}`} key="review-item-id">
+                  <CompactId id={row.reviewItemId} />
+                </Link>
+              ) : (
+                "-"
+              )
+            ]
           ]}
         />
       </div>
     </details>
+  );
+}
+
+function ProjectNoteRow({ row }: { row: ProjectNoteHistoryRow }) {
+  return (
+    <div className="grid gap-3 px-4 py-3 text-sm lg:grid-cols-[8rem_12rem_minmax(0,1fr)_10rem]">
+      <span className="text-slate-500">{formatDateTime(row.createdAt)}</span>
+      <span className="font-medium text-slate-950">{row.noteTypeLabel}</span>
+      <p className="min-w-0 whitespace-pre-wrap text-slate-700">{row.body}</p>
+      <span className="min-w-0 truncate text-xs text-slate-500" title={row.actorLabel}>
+        {row.actorLabel}
+      </span>
+    </div>
   );
 }
 
@@ -725,7 +906,7 @@ function StatusHistoryRow({ row }: { row: ProjectStatusHistoryRow }) {
       <span className="text-slate-500">{formatDate(row.statusDate)}</span>
       <span className="font-medium text-slate-950">{row.status}</span>
       <span className="min-w-0 text-slate-700">
-        <span className="text-slate-500">{row.source}</span>
+        <span className="text-slate-500">{row.sourceLabel}</span>
         {row.notes ? <span className="ml-2">{row.notes}</span> : null}
       </span>
     </div>

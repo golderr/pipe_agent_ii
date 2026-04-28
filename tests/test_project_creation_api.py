@@ -87,6 +87,8 @@ def test_create_project_creates_project_and_audit_rows(postgres_session: Session
     assert change_log.source == "manual_project"
     assert change_log.change_type == ChangeType.RESEARCHER_CONFIRMED
     assert change_log.new_value["canonical_address"] == project.canonical_address
+    assert change_log.reviewed_by_user_id == USER_ID
+    assert change_log.reviewed_by_email == "allowed@example.com"
 
 
 def test_create_project_returns_duplicate_candidate_without_force(

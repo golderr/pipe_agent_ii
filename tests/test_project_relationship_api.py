@@ -82,6 +82,8 @@ def test_add_project_relationship_creates_row_and_logs(postgres_session: Session
     assert change_log.source == "project_relationship"
     assert change_log.change_type == ChangeType.RESEARCHER_CONFIRMED
     assert change_log.new_value["related_project_id"] == str(related.id)
+    assert change_log.reviewed_by_user_id == USER_ID
+    assert change_log.reviewed_by_email == "allowed@example.com"
 
 
 def test_add_project_relationship_is_idempotent(postgres_session: Session) -> None:

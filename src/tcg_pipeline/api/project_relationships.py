@@ -60,6 +60,7 @@ def add_project_relationship(
                 relationship=existing,
                 related_project=related_project,
                 actor=actor,
+                user=user,
                 timestamp=now,
                 old_notes=old_notes,
             )
@@ -92,6 +93,7 @@ def add_project_relationship(
         relationship=relationship,
         related_project=related_project,
         actor=actor,
+        user=user,
         timestamp=now,
     )
     session.flush()
@@ -141,6 +143,7 @@ def _write_relationship_change_log(
     relationship: ProjectRelationship,
     related_project: Project,
     actor: str,
+    user: AuthenticatedUser,
     timestamp: datetime,
     old_notes: str | None | object = _MISSING,
 ) -> int:
@@ -165,6 +168,8 @@ def _write_relationship_change_log(
             change_type=ChangeType.RESEARCHER_CONFIRMED,
             priority=Priority.LOW,
             reviewed_by=actor[:50],
+            reviewed_by_user_id=user.user_id,
+            reviewed_by_email=user.email,
         )
     )
     return 1

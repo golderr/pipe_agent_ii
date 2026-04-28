@@ -92,6 +92,7 @@ def update_project_field(
             old_value=old_value,
             new_value=new_value,
             actor=actor,
+            user=user,
             timestamp=now,
             source="inline_field",
         )
@@ -137,6 +138,7 @@ def append_project_note(
         old_value=old_value,
         new_value=note_body,
         actor=actor,
+        user=user,
         timestamp=now,
         source="project_note",
     )
@@ -295,6 +297,7 @@ def _write_direct_change_log(
     old_value: Any,
     new_value: Any,
     actor: str,
+    user: AuthenticatedUser,
     timestamp: datetime,
     source: str,
 ) -> int:
@@ -309,6 +312,8 @@ def _write_direct_change_log(
             change_type=ChangeType.RESEARCHER_CONFIRMED,
             priority=Priority.LOW,
             reviewed_by=actor[:50],
+            reviewed_by_user_id=user.user_id,
+            reviewed_by_email=user.email,
         )
     )
     return 1

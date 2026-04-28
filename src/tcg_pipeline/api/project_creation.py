@@ -130,6 +130,7 @@ def create_project(
         session,
         project=project,
         actor=actor,
+        user=user,
         timestamp=now,
         duplicate_candidates=duplicate_candidates,
     )
@@ -196,6 +197,7 @@ def _write_project_created_change_log(
     *,
     project: Project,
     actor: str,
+    user: AuthenticatedUser,
     timestamp: datetime,
     duplicate_candidates: list[ProjectCreateCandidate],
 ) -> None:
@@ -223,6 +225,8 @@ def _write_project_created_change_log(
             change_type=ChangeType.RESEARCHER_CONFIRMED,
             priority=Priority.LOW,
             reviewed_by=actor[:50],
+            reviewed_by_user_id=user.user_id,
+            reviewed_by_email=user.email,
         )
     )
 

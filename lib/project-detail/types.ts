@@ -59,20 +59,39 @@ export type ProjectChangeLogRow = {
   id: string;
   timestamp: string;
   source: string;
+  sourceLabel: string;
   field: string;
   fieldLabel: string;
   oldValue: string;
   newValue: string;
   changeType: string;
+  changeTypeLabel: string;
   priority: string;
   reviewedBy: string | null;
+  reviewedByUserId: string | null;
+  reviewedByEmail: string | null;
+  actorLabel: string;
   reviewItemId: string | null;
+};
+
+export type ProjectNoteHistoryRow = {
+  id: string;
+  noteType: string;
+  noteTypeLabel: string;
+  body: string;
+  createdByUserId: string | null;
+  createdByLabel: string | null;
+  actorLabel: string;
+  createdAt: string;
+  source: "project_note";
+  sourceLabel: string;
 };
 
 export type ProjectStatusHistoryRow = {
   status: string;
   statusDate: string | null;
   source: string;
+  sourceLabel: string;
   notes: string | null;
 };
 
@@ -161,6 +180,7 @@ export type ProjectDetailData = {
   evidenceFilters: ProjectEvidenceFilters;
   resolutionRows: ProjectResolutionRow[];
   changeRows: ProjectChangeLogRow[];
+  noteRows: ProjectNoteHistoryRow[];
   statusRows: ProjectStatusHistoryRow[];
   overrideRows: ProjectOverrideRow[];
   relationshipRows: ProjectRelationshipRow[];
