@@ -59,10 +59,35 @@ export type ReviewQueueData = {
   generatedAt: string;
 };
 
+export type ReviewItemNavigation = {
+  previousItemId: string | null;
+  nextItemId: string | null;
+  position: number | null;
+  total: number;
+  jurisdictionId: string | null;
+};
+
+export type ReviewProcessedChange = {
+  id: string;
+  timestamp: string;
+  source: string;
+  field: string;
+  oldValue: unknown;
+  newValue: unknown;
+  changeType: string;
+  priority: string;
+  reviewedBy: string | null;
+  reviewedByUserId: string | null;
+  reviewedByEmail: string | null;
+  reviewItemId: string | null;
+};
+
 export type ReviewItemDetailData = {
   item: ReviewQueueItem;
   project: ReviewProjectSummary | null;
   candidateProjects: ReviewProjectSummary[];
   sourceRun: ReviewSourceRunSummary | null;
+  navigation: ReviewItemNavigation;
+  processedChanges: ReviewProcessedChange[];
   generatedAt: string;
 };

@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
+  ArrowLeft,
+  ArrowRight,
   Check,
   Clock,
   ExternalLink,
@@ -11,17 +13,36 @@ import {
   RotateCcw,
   Save
 } from "lucide-react";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   stageReviewDecisionAction,
   unstageReviewDecisionAction
 } from "@/app/(app)/review/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  acceptDecisionValue,
+  asString,
+  currentValueForItem,
+  displayActor,
+  fieldNameForItem,
+  flattenPayload,
+  formatDate,
+  formatDateTime,
+  formatInputValue,
+  formatValue,
+  humanize,
+  isStagedByMe,
+  isStagedByOther,
+  proposedValueForItem,
+  sourceTextForItem,
+  warningForItem
+} from "@/lib/review/payload";
 import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type {
   ReviewItemDetailData,
+  ReviewProcessedChange,
   ReviewProjectSummary,
   ReviewQueueItem
 } from "@/lib/review/types";
@@ -43,12 +64,13 @@ export function ReviewItemDetailClient({
   currentUserEmail
 }: ReviewItemDetailClientProps) {
   const router = useRouter();
-  const { item, project, candidateProjects, sourceRun } = data;
+  const { item, project, candidateProjects, sourceRun, navigation, processedChanges } = data;
   const [customValue, setCustomValue] = useState(formatInputValue(proposedValueForItem(item)));
   const [notes, setNotes] = useState(item.activeDecision?.decisionNotes ?? "");
   const [sourceUrl, setSourceUrl] = useState(item.activeDecision?.sourceUrl ?? "");
   const [banner, setBanner] = useState<Banner>(null);
   const [isPending, startTransition] = useTransition();
+  const stagedDecision = item.activeDecision?.state === "staged" ? item.activeDecision : null;
   const stagedByMe = isStagedByMe(item, currentUserId, currentUserEmail);
   const stagedByOther = isStagedByOther(item, currentUserId, currentUserEmail);
   const fieldName = fieldNameForItem(item);
@@ -59,6 +81,37 @@ export function ReviewItemDetailClient({
     ? `${sourceRun.sourceName} - ${formatDate(sourceRun.finishedAt ?? sourceRun.runTimestamp)}`
     : sourceTextForItem(item);
   const payloadRows = useMemo(() => flattenPayload(item.payload), [item.payload]);
+  const queueHref = reviewQueueHref(navigation.jurisdictionId);
+  const previousHref = navigation.previousItemId
+    ? reviewItemHref(navigation.previousItemId, navigation.jurisdictionId)
+    : null;
+  const nextHref = navigation.nextItemId
+    ? reviewItemHref(navigation.nextItemId, navigation.jurisdictionId)
+    : null;
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT"
+      ) {
+        return;
+      }
+      if (event.key === "[" && previousHref) {
+        event.preventDefault();
+        router.push(previousHref);
+      }
+      if (event.key === "]" && nextHref) {
+        event.preventDefault();
+        router.push(nextHref);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [nextHref, previousHref, router]);
 
   function stageDecision(decisionType: string, decisionValue?: unknown) {
     if (stagedByOther) {
@@ -100,7 +153,7 @@ export function ReviewItemDetailClient({
       <div className="border-b border-slate-200 bg-white px-5 py-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <Link className="text-sm font-medium text-teal-700 hover:text-teal-900" href="/review">
+            <Link className="text-sm font-medium text-teal-700 hover:text-teal-900" href={queueHref}>
               Back to Review Queue
             </Link>
             <p className="mt-3 text-xs font-medium uppercase tracking-normal text-slate-500">
@@ -110,14 +163,25 @@ export function ReviewItemDetailClient({
               {fieldLabel(fieldName)}
             </h1>
           </div>
-          <div className="flex flex-wrap gap-2 text-xs">
-            <span className={priorityBadgeClass(item.priority)}>{humanize(item.priority)}</span>
-            <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-600">
-              {humanize(item.itemType)}
-            </span>
-            <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-600">
-              {humanize(item.state)}
-            </span>
+          <div className="flex flex-col gap-2 lg:items-end">
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span className={priorityBadgeClass(item.priority)}>{humanize(item.priority)}</span>
+              <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-600">
+                {humanize(item.itemType)}
+              </span>
+              <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-600">
+                {humanize(item.state)}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <span>
+                {navigation.position !== null
+                  ? `${navigation.position.toLocaleString()} of ${navigation.total.toLocaleString()}`
+                  : `${navigation.total.toLocaleString()} active items`}
+              </span>
+              <NavigationLink href={previousHref} label="Previous" keycap="[" direction="previous" />
+              <NavigationLink href={nextHref} label="Next" keycap="]" direction="next" />
+            </div>
           </div>
         </div>
         {banner ? (
@@ -148,7 +212,7 @@ export function ReviewItemDetailClient({
             </div>
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-stretch">
               <ValuePanel label="Current" value={currentValueForItem(item)} />
-              <div className="hidden items-center text-slate-300 lg:flex">-&gt;</div>
+              <ArrowRight className="hidden size-4 self-center text-slate-300 lg:block" aria-hidden="true" />
               <ValuePanel label="Proposed" value={proposedValueForItem(item)} />
             </div>
             {warningForItem(item) ? (
@@ -176,13 +240,13 @@ export function ReviewItemDetailClient({
 
           <section className="rounded-md border border-slate-200 bg-white p-4">
             <h2 className="text-sm font-semibold text-slate-950">Stage Decision</h2>
-            {item.activeDecision ? (
+            {stagedDecision ? (
               <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
-                Staged {humanize(item.activeDecision.decisionType ?? "decision")} by{" "}
+                Staged {humanize(stagedDecision.decisionType ?? "decision")} by{" "}
                 {isStagedByMe(item, currentUserId, currentUserEmail)
                   ? "you"
-                  : displayActor(item.activeDecision.stagedByEmail, item.activeDecision.stagedBy)}
-                .
+                  : displayActor(stagedDecision.stagedByEmail, stagedDecision.stagedBy)}
+                {stagedDecision.stagedAt ? ` on ${formatDateTime(stagedDecision.stagedAt)}` : ""}.
               </div>
             ) : null}
             <div className="mt-4 flex flex-wrap gap-2">
@@ -253,6 +317,8 @@ export function ReviewItemDetailClient({
               </div>
             ) : null}
           </section>
+
+          <ProcessedChangesSection changes={processedChanges} />
 
           <section className="rounded-md border border-slate-200 bg-white p-4">
             <h2 className="text-sm font-semibold text-slate-950">Review Payload</h2>
@@ -360,6 +426,72 @@ function CandidateProjectCard({
   );
 }
 
+function NavigationLink({
+  href,
+  label,
+  keycap,
+  direction
+}: {
+  href: string | null;
+  label: string;
+  keycap: string;
+  direction: "previous" | "next";
+}) {
+  const Icon = direction === "previous" ? ArrowLeft : ArrowRight;
+  const className =
+    "inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50";
+  if (!href) {
+    return (
+      <span className={cn(className, "pointer-events-none opacity-45")}>
+        <Icon className="size-3.5" aria-hidden="true" />
+        {label}
+        <span className="rounded border border-slate-300 px-1 text-[10px] text-slate-500">{keycap}</span>
+      </span>
+    );
+  }
+  return (
+    <Link className={className} href={href}>
+      <Icon className="size-3.5" aria-hidden="true" />
+      {label}
+      <span className="rounded border border-slate-300 px-1 text-[10px] text-slate-500">{keycap}</span>
+    </Link>
+  );
+}
+
+function ProcessedChangesSection({ changes }: { changes: ReviewProcessedChange[] }) {
+  return (
+    <section className="rounded-md border border-slate-200 bg-white p-4">
+      <h2 className="text-sm font-semibold text-slate-950">Recent Field Changes</h2>
+      {changes.length ? (
+        <div className="mt-3 overflow-hidden rounded-md border border-slate-200">
+          {changes.map((change) => (
+            <div key={change.id} className="border-b border-slate-100 px-3 py-3 last:border-b-0">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                <span>{formatDateTime(change.timestamp)}</span>
+                <span>{displayActor(change.reviewedByEmail, change.reviewedByUserId ?? change.reviewedBy)}</span>
+              </div>
+              <div className="mt-2 grid gap-2 text-sm md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
+                <p className="break-words rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-700">
+                  {formatValue(change.oldValue)}
+                </p>
+                <ArrowRight className="hidden size-3.5 text-slate-300 md:block" aria-hidden="true" />
+                <p className="break-words rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-950">
+                  {formatValue(change.newValue)}
+                </p>
+              </div>
+              <p className="mt-2 text-xs text-slate-500">
+                {humanize(change.changeType)} via {change.source}
+              </p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 text-sm text-slate-500">No prior committed changes for this project field.</p>
+      )}
+    </section>
+  );
+}
+
 function ValuePanel({ label, value }: { label: string; value: unknown }) {
   return (
     <div className="min-h-28 rounded-md border border-slate-200 bg-slate-50 p-3">
@@ -367,26 +499,6 @@ function ValuePanel({ label, value }: { label: string; value: unknown }) {
       <p className="mt-2 break-words text-base text-slate-950">{formatValue(value)}</p>
     </div>
   );
-}
-
-function isStagedByMe(
-  item: ReviewQueueItem,
-  currentUserId: string,
-  currentUserEmail: string | null
-) {
-  const decision = item.activeDecision;
-  if (!decision) {
-    return false;
-  }
-  return decision.stagedBy === currentUserId || Boolean(currentUserEmail && decision.stagedByEmail === currentUserEmail);
-}
-
-function isStagedByOther(
-  item: ReviewQueueItem,
-  currentUserId: string,
-  currentUserEmail: string | null
-) {
-  return Boolean(item.activeDecision) && !isStagedByMe(item, currentUserId, currentUserEmail);
 }
 
 function canAcceptItem(item: ReviewQueueItem, candidateProjects: ReviewProjectSummary[]) {
@@ -397,125 +509,6 @@ function canAcceptItem(item: ReviewQueueItem, candidateProjects: ReviewProjectSu
     return candidateProjects.length === 1;
   }
   return true;
-}
-
-function acceptDecisionValue(item: ReviewQueueItem) {
-  if (item.itemType === "new_candidate") {
-    return { create_new: true, new_project_data: newProjectDataForItem(item) };
-  }
-  const targetProjectId = candidateProjectIdsForItem(item)[0];
-  return targetProjectId ? { project_id: targetProjectId } : undefined;
-}
-
-function candidateProjectIdsForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const match = asRecord(payload?.match);
-  return asStringArray(match?.candidate_project_ids ?? payload?.candidate_project_ids);
-}
-
-function newProjectDataForItem(item: ReviewQueueItem) {
-  const mappedFields = asRecord(item.payload?.mapped_fields);
-  return {
-    canonical_address: asString(item.payload?.canonical_address) ?? undefined,
-    project_name: asString(mappedFields?.project_name) ?? undefined,
-    city: asString(mappedFields?.city) ?? undefined,
-    state: asString(mappedFields?.state) ?? undefined,
-    county: asString(mappedFields?.county) ?? undefined,
-    zip: asString(mappedFields?.zip) ?? undefined
-  };
-}
-
-function fieldNameForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const change = firstChange(item);
-  const statusSuggestion = asRecord(payload?.status_suggestion);
-  return (
-    asString(payload?.field_name) ??
-    asString(change?.field) ??
-    asString(change?.field_name) ??
-    (statusSuggestion ? "pipeline_status" : null) ??
-    item.itemType
-  );
-}
-
-function currentValueForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const currentOverride = asRecord(payload?.current_override);
-  const statusSuggestion = asRecord(payload?.status_suggestion);
-  const change = firstChange(item);
-  if (currentOverride && "value" in currentOverride) {
-    return currentOverride.value;
-  }
-  if (payload && "current_value" in payload) {
-    return payload.current_value;
-  }
-  if (statusSuggestion && "current_status" in statusSuggestion) {
-    return statusSuggestion.current_status;
-  }
-  if (change && "old_value" in change) {
-    return change.old_value;
-  }
-  return null;
-}
-
-function proposedValueForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const candidate = asRecord(payload?.candidate);
-  const statusSuggestion = asRecord(payload?.status_suggestion);
-  const change = firstChange(item);
-  if (payload && "proposed_value" in payload) {
-    return payload.proposed_value;
-  }
-  if (candidate && "value" in candidate) {
-    return candidate.value;
-  }
-  if (statusSuggestion && "suggested_status" in statusSuggestion) {
-    return statusSuggestion.suggested_status;
-  }
-  if (change && "new_value" in change) {
-    return change.new_value;
-  }
-  if (payload && "canonical_address" in payload) {
-    return payload.canonical_address;
-  }
-  return null;
-}
-
-function sourceTextForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const candidate = asRecord(payload?.candidate);
-  const frontier = asRecord(candidate?.evidence_frontier);
-  const source = asString(frontier?.source_type) ?? asString(payload?.source_record_id);
-  const date = asString(candidate?.evidence_date);
-  if (source && date) {
-    return `${source} - ${formatDate(date)}`;
-  }
-  return source;
-}
-
-function warningForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const flags = asRecordArray(payload?.review_flags);
-  const firstFlag = flags[0];
-  return (
-    asString(payload?.message) ??
-    asString(firstFlag?.message) ??
-    (item.itemType.includes("contradiction") ? "This item conflicts with a manual override." : null)
-  );
-}
-
-function firstChange(item: ReviewQueueItem) {
-  return asRecordArray(item.payload?.changes)[0] ?? null;
-}
-
-function flattenPayload(payload: Record<string, unknown> | null) {
-  if (!payload) {
-    return [];
-  }
-  return Object.entries(payload)
-    .filter(([, value]) => value !== null && value !== undefined && value !== "")
-    .map(([key, value]) => ({ key, value: formatValue(value) }))
-    .slice(0, 24);
 }
 
 function priorityBadgeClass(priority: string) {
@@ -532,89 +525,20 @@ function fieldLabel(value: string) {
   return humanize(value);
 }
 
-function humanize(value: string) {
-  return value
-    .split(/[_-]/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+function reviewQueueHref(jurisdictionId: string | null) {
+  const params = new URLSearchParams();
+  if (jurisdictionId) {
+    params.set("jurisdiction_id", jurisdictionId);
+  }
+  const query = params.toString();
+  return query ? `/review?${query}` : "/review";
 }
 
-function displayActor(email: string | null | undefined, fallback: string | null | undefined) {
-  if (email) {
-    return email;
+function reviewItemHref(itemId: string, jurisdictionId: string | null) {
+  const params = new URLSearchParams();
+  if (jurisdictionId) {
+    params.set("jurisdiction_id", jurisdictionId);
   }
-  if (fallback) {
-    return fallback.slice(0, 8);
-  }
-  return "unknown";
-}
-
-function formatDate(value: string | null | undefined) {
-  if (!value) {
-    return "-";
-  }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric"
-  }).format(new Date(value));
-}
-
-function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit"
-  }).format(new Date(value));
-}
-
-function formatInputValue(value: unknown) {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  return formatValue(value);
-}
-
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") {
-    return "-";
-  }
-  if (typeof value === "number") {
-    return value.toLocaleString();
-  }
-  if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  return Array.isArray(value) ? value.map(asRecord).filter((row): row is Record<string, unknown> => Boolean(row)) : [];
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
+  const query = params.toString();
+  return query ? `/review/${itemId}?${query}` : `/review/${itemId}`;
 }

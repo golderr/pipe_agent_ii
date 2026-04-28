@@ -1,11 +1,14 @@
 import "server-only";
 
 import { requireApiBaseUrl } from "@/lib/env";
+import { candidateProjectIdsForItem, fieldNameForItem } from "@/lib/review/payload";
 import { accessTokenForApi, responseErrorMessage } from "@/lib/server-actions";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type {
   ReviewDecisionSummary,
   ReviewItemDetailData,
+  ReviewItemNavigation,
+  ReviewProcessedChange,
   ReviewProjectSummary,
   ReviewQueueData,
   ReviewQueueItem,
@@ -75,32 +78,34 @@ type RawSourceRun = {
   finished_at: string | null;
 };
 
+type RawChangeLog = {
+  id: string;
+  timestamp: string;
+  source: string;
+  field: string;
+  old_value: unknown;
+  new_value: unknown;
+  change_type: string;
+  priority: string;
+  reviewed_by: string | null;
+  reviewed_by_user_id: string | null;
+  reviewed_by_email: string | null;
+  review_item_id: string | null;
+};
+
 export async function getReviewQueueData(options: {
   jurisdictionId?: string | null;
 } = {}): Promise<ReviewQueueDataResult> {
   try {
     const apiBaseUrl = requireApiBaseUrl();
     const accessToken = await accessTokenForApi();
-    const params = new URLSearchParams({ limit: "500" });
-    if (options.jurisdictionId) {
-      params.set("jurisdiction_id", options.jurisdictionId);
-    }
-    const response = await fetch(`${apiBaseUrl}/review/queue?${params.toString()}`, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`
-      },
-      cache: "no-store"
+    const queue = await fetchReviewItemsFromApi(apiBaseUrl, accessToken, {
+      jurisdictionId: options.jurisdictionId
     });
-
-    if (!response.ok) {
-      return {
-        data: null,
-        error: await responseErrorMessage(response, "Review queue request failed.")
-      };
+    if (queue.error) {
+      return { data: null, error: queue.error };
     }
-
-    const apiItems = (await response.json()) as ReviewQueueItemApi[];
-    const items = apiItems.map(mapReviewItem);
+    const items = queue.items;
     const [projects, sourceRuns] = await Promise.all([
       fetchProjects(items),
       fetchSourceRuns(items)
@@ -128,7 +133,8 @@ export async function getReviewQueueData(options: {
 }
 
 export async function getReviewItemDetailData(
-  itemId: string
+  itemId: string,
+  options: { jurisdictionId?: string | null } = {}
 ): Promise<ReviewItemDetailDataResult> {
   try {
     const apiBaseUrl = requireApiBaseUrl();
@@ -151,11 +157,15 @@ export async function getReviewItemDetailData(
     }
 
     const item = mapReviewItem((await response.json()) as ReviewQueueItemApi);
-    const [projects, sourceRuns] = await Promise.all([
+    const [queue, projects, sourceRuns, processedChanges] = await Promise.all([
+      fetchReviewItemsFromApi(apiBaseUrl, accessToken, {
+        jurisdictionId: options.jurisdictionId
+      }),
       fetchProjects([item]),
-      fetchSourceRuns([item])
+      fetchSourceRuns([item]),
+      fetchProcessedChanges(item)
     ]);
-    const error = projects.error ?? sourceRuns.error;
+    const error = queue.error ?? projects.error ?? sourceRuns.error ?? processedChanges.error;
     if (error) {
       return { data: null, error };
     }
@@ -171,6 +181,8 @@ export async function getReviewItemDetailData(
         project: item.projectId ? projectById.get(item.projectId) ?? null : null,
         candidateProjects,
         sourceRun: sourceRuns.rows[0] ?? null,
+        navigation: buildNavigation(queue.items, item.id, options.jurisdictionId ?? null),
+        processedChanges: processedChanges.rows,
         generatedAt: new Date().toISOString()
       },
       error: null
@@ -181,6 +193,51 @@ export async function getReviewItemDetailData(
       error: error instanceof Error ? error.message : "Review item request failed."
     };
   }
+}
+
+async function fetchReviewItemsFromApi(
+  apiBaseUrl: string,
+  accessToken: string,
+  options: { jurisdictionId?: string | null } = {}
+): Promise<{ items: ReviewQueueItem[]; error: string | null }> {
+  const params = new URLSearchParams({ limit: "500" });
+  if (options.jurisdictionId) {
+    params.set("jurisdiction_id", options.jurisdictionId);
+  }
+  const response = await fetch(`${apiBaseUrl}/review/queue?${params.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    },
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    return {
+      items: [],
+      error: await responseErrorMessage(response, "Review queue request failed.")
+    };
+  }
+
+  return {
+    items: ((await response.json()) as ReviewQueueItemApi[]).map(mapReviewItem),
+    error: null
+  };
+}
+
+function buildNavigation(
+  items: ReviewQueueItem[],
+  itemId: string,
+  jurisdictionId: string | null
+): ReviewItemNavigation {
+  const itemIds = items.map((item) => item.id);
+  const index = itemIds.indexOf(itemId);
+  return {
+    previousItemId: index > 0 ? itemIds[index - 1] : null,
+    nextItemId: index >= 0 && index < itemIds.length - 1 ? itemIds[index + 1] : null,
+    position: index >= 0 ? index + 1 : null,
+    total: itemIds.length,
+    jurisdictionId
+  };
 }
 
 async function fetchProjects(
@@ -267,6 +324,46 @@ async function fetchSourceRuns(
   };
 }
 
+async function fetchProcessedChanges(
+  item: ReviewQueueItem
+): Promise<{ rows: ReviewProcessedChange[]; error: string | null }> {
+  if (!item.projectId) {
+    return { rows: [], error: null };
+  }
+  const supabase = await createSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("change_log")
+    .select(
+      "id, timestamp, source, field, old_value, new_value, change_type, priority, reviewed_by, reviewed_by_user_id, reviewed_by_email, review_item_id"
+    )
+    .eq("project_id", item.projectId)
+    .eq("field", fieldNameForItem(item))
+    .order("timestamp", { ascending: false })
+    .limit(8);
+
+  if (error) {
+    return { rows: [], error: error.message };
+  }
+
+  return {
+    rows: ((data ?? []) as unknown as RawChangeLog[]).map((change) => ({
+      id: change.id,
+      timestamp: change.timestamp,
+      source: change.source,
+      field: change.field,
+      oldValue: change.old_value,
+      newValue: change.new_value,
+      changeType: change.change_type,
+      priority: change.priority,
+      reviewedBy: change.reviewed_by,
+      reviewedByUserId: change.reviewed_by_user_id,
+      reviewedByEmail: change.reviewed_by_email,
+      reviewItemId: change.review_item_id
+    })),
+    error: null
+  };
+}
+
 function mapReviewItem(item: ReviewQueueItemApi): ReviewQueueItem {
   return {
     id: item.id,
@@ -305,22 +402,4 @@ function mapDecision(decision: ReviewDecisionApi): ReviewDecisionSummary {
 
 function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value)))];
-}
-
-function candidateProjectIdsForItem(item: ReviewQueueItem) {
-  const payload = asRecord(item.payload);
-  const match = asRecord(payload?.match);
-  return asStringArray(match?.candidate_project_ids ?? payload?.candidate_project_ids);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && Boolean(item))
-    : [];
 }

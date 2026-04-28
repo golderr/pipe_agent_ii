@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
+  ArrowRight,
   Check,
   ExternalLink,
   GitCompareArrows,
@@ -19,6 +20,23 @@ import {
 } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  acceptDecisionValue,
+  asString,
+  candidateProjectIdsForItem,
+  candidateValuesForItem,
+  currentValueForItem,
+  displayActor,
+  fieldNameForItem,
+  formatDate,
+  formatValue,
+  humanize,
+  isStagedByMe,
+  isStagedByOther,
+  proposedValueForItem,
+  sourceTextForItem,
+  warningForItem
+} from "@/lib/review/payload";
 import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type {
@@ -124,7 +142,7 @@ export function ReviewQueueClient({
         normalizedValue = acceptDecisionValue(item);
       }
       if (decisionType === "custom" && normalizedValue === undefined) {
-        router.push(`/review/${item.id}`);
+        router.push(reviewItemHref(item.id, jurisdictionId));
         return;
       }
 
@@ -147,7 +165,7 @@ export function ReviewQueueClient({
         }
       });
     },
-    [currentUserEmail, currentUserId, router]
+    [currentUserEmail, currentUserId, jurisdictionId, router]
   );
 
   const unstageItem = useCallback(
@@ -366,6 +384,7 @@ export function ReviewQueueClient({
             {selectedGroup ? (
               <ProjectReviewPanel
                 group={selectedGroup}
+                jurisdictionId={jurisdictionId}
                 projects={data.projects}
                 sourceRuns={data.sourceRuns}
                 currentUserId={currentUserId}
@@ -454,6 +473,7 @@ function ProjectSection({
 
 function ProjectReviewPanel({
   group,
+  jurisdictionId,
   projects,
   sourceRuns,
   currentUserId,
@@ -467,6 +487,7 @@ function ProjectReviewPanel({
   onStageProject
 }: {
   group: ReviewGroup;
+  jurisdictionId: string | null;
   projects: Record<string, ReviewProjectSummary>;
   sourceRuns: Record<string, ReviewSourceRunSummary>;
   currentUserId: string;
@@ -567,6 +588,7 @@ function ProjectReviewPanel({
             sourceRun={item.sourceRunId ? sourceRuns[item.sourceRunId] : undefined}
             currentUserId={currentUserId}
             currentUserEmail={currentUserEmail}
+            jurisdictionId={jurisdictionId}
             focused={item.id === focusedItemId}
             pending={pendingItemId === item.id}
             isPending={isPending}
@@ -587,6 +609,7 @@ function ReviewItemRow({
   sourceRun,
   currentUserId,
   currentUserEmail,
+  jurisdictionId,
   focused,
   pending,
   isPending,
@@ -600,6 +623,7 @@ function ReviewItemRow({
   sourceRun: ReviewSourceRunSummary | undefined;
   currentUserId: string;
   currentUserEmail: string | null;
+  jurisdictionId: string | null;
   focused: boolean;
   pending: boolean;
   isPending: boolean;
@@ -642,7 +666,7 @@ function ReviewItemRow({
 
           <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
             <ValueBlock label="Current" value={currentValueForItem(item)} />
-            <div className="hidden text-slate-300 md:block">-&gt;</div>
+            <ArrowRight className="hidden size-4 text-slate-300 md:block" aria-hidden="true" />
             <ValueBlock label="Proposed" value={proposedValueForItem(item)} />
           </div>
 
@@ -744,7 +768,7 @@ function ReviewItemRow({
           />
           <Link
             className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
-            href={`/review/${item.id}`}
+            href={reviewItemHref(item.id, jurisdictionId)}
             onClick={(event) => event.stopPropagation()}
           >
             <ExternalLink className="size-3.5" aria-hidden="true" />
@@ -980,26 +1004,6 @@ function sectionKeyForGroup(group: ReviewGroup) {
   return priority in SECTION_LABELS ? priority : "low";
 }
 
-function isStagedByMe(
-  item: ReviewQueueItem,
-  currentUserId: string,
-  currentUserEmail: string | null
-) {
-  const decision = item.activeDecision;
-  if (!decision) {
-    return false;
-  }
-  return decision.stagedBy === currentUserId || Boolean(currentUserEmail && decision.stagedByEmail === currentUserEmail);
-}
-
-function isStagedByOther(
-  item: ReviewQueueItem,
-  currentUserId: string,
-  currentUserEmail: string | null
-) {
-  return Boolean(item.activeDecision) && !isStagedByMe(item, currentUserId, currentUserEmail);
-}
-
 function canAcceptItem(item: ReviewQueueItem) {
   if (item.itemType === "new_candidate") {
     return true;
@@ -1008,96 +1012,6 @@ function canAcceptItem(item: ReviewQueueItem) {
     return candidateProjectIdsForItem(item).length === 1;
   }
   return true;
-}
-
-function acceptDecisionValue(item: ReviewQueueItem) {
-  if (item.itemType === "new_candidate") {
-    return { create_new: true, new_project_data: newProjectDataForItem(item) };
-  }
-  const targetProjectId = candidateProjectIdsForItem(item)[0];
-  return targetProjectId ? { project_id: targetProjectId } : undefined;
-}
-
-function candidateProjectIdsForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const match = asRecord(payload?.match);
-  return asStringArray(match?.candidate_project_ids ?? payload?.candidate_project_ids);
-}
-
-function newProjectDataForItem(item: ReviewQueueItem) {
-  const mappedFields = asRecord(item.payload?.mapped_fields);
-  return {
-    canonical_address: asString(item.payload?.canonical_address) ?? undefined,
-    project_name: asString(mappedFields?.project_name) ?? undefined,
-    city: asString(mappedFields?.city) ?? undefined,
-    state: asString(mappedFields?.state) ?? undefined,
-    county: asString(mappedFields?.county) ?? undefined,
-    zip: asString(mappedFields?.zip) ?? undefined
-  };
-}
-
-function fieldNameForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const change = firstChange(item);
-  const statusSuggestion = asRecord(payload?.status_suggestion);
-  return (
-    asString(payload?.field_name) ??
-    asString(change?.field) ??
-    asString(change?.field_name) ??
-    (statusSuggestion ? "pipeline_status" : null) ??
-    item.itemType
-  );
-}
-
-function currentValueForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const currentOverride = asRecord(payload?.current_override);
-  const statusSuggestion = asRecord(payload?.status_suggestion);
-  const change = firstChange(item);
-  if (currentOverride && "value" in currentOverride) {
-    return currentOverride.value;
-  }
-  if (payload && "current_value" in payload) {
-    return payload.current_value;
-  }
-  if (statusSuggestion && "current_status" in statusSuggestion) {
-    return statusSuggestion.current_status;
-  }
-  if (change && "old_value" in change) {
-    return change.old_value;
-  }
-  return null;
-}
-
-function proposedValueForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const candidate = asRecord(payload?.candidate);
-  const statusSuggestion = asRecord(payload?.status_suggestion);
-  const change = firstChange(item);
-  if (payload && "proposed_value" in payload) {
-    return payload.proposed_value;
-  }
-  if (candidate && "value" in candidate) {
-    return candidate.value;
-  }
-  if (statusSuggestion && "suggested_status" in statusSuggestion) {
-    return statusSuggestion.suggested_status;
-  }
-  if (change && "new_value" in change) {
-    return change.new_value;
-  }
-  if (payload && "canonical_address" in payload) {
-    return payload.canonical_address;
-  }
-  return null;
-}
-
-function candidateValuesForItem(item: ReviewQueueItem) {
-  if (item.itemType === "new_candidate" || item.itemType === "possible_match") {
-    return [];
-  }
-  const candidates = asRecordArray(item.payload?.candidates);
-  return candidates.map((candidate) => ("value" in candidate ? candidate.value : candidate));
 }
 
 function possibleMatchCandidateProjects(
@@ -1110,33 +1024,6 @@ function possibleMatchCandidateProjects(
   return candidateProjectIdsForItem(item)
     .map((projectId) => projects[projectId])
     .filter((project): project is ReviewProjectSummary => Boolean(project));
-}
-
-function sourceTextForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const candidate = asRecord(payload?.candidate);
-  const frontier = asRecord(candidate?.evidence_frontier);
-  const source = asString(frontier?.source_type) ?? asString(payload?.source_record_id);
-  const date = asString(candidate?.evidence_date);
-  if (source && date) {
-    return `${source} - ${formatDate(date)}`;
-  }
-  return source;
-}
-
-function warningForItem(item: ReviewQueueItem) {
-  const payload = item.payload;
-  const flags = asRecordArray(payload?.review_flags);
-  const firstFlag = flags[0];
-  return (
-    asString(payload?.message) ??
-    asString(firstFlag?.message) ??
-    (item.itemType.includes("contradiction") ? "This item conflicts with a manual override." : null)
-  );
-}
-
-function firstChange(item: ReviewQueueItem) {
-  return asRecordArray(item.payload?.changes)[0] ?? null;
 }
 
 function titleForUnmatchedItem(item: ReviewQueueItem | undefined) {
@@ -1171,69 +1058,11 @@ function fieldLabel(value: string) {
   return humanize(value);
 }
 
-function humanize(value: string) {
-  return value
-    .split(/[_-]/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
-function displayActor(email: string | null | undefined, fallback: string | null | undefined) {
-  if (email) {
-    return email;
+function reviewItemHref(itemId: string, jurisdictionId: string | null) {
+  const params = new URLSearchParams();
+  if (jurisdictionId) {
+    params.set("jurisdiction_id", jurisdictionId);
   }
-  if (fallback) {
-    return fallback.slice(0, 8);
-  }
-  return "unknown";
-}
-
-function formatDate(value: string | null | undefined) {
-  if (!value) {
-    return "-";
-  }
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric"
-  }).format(new Date(value));
-}
-
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") {
-    return "-";
-  }
-  if (typeof value === "number") {
-    return value.toLocaleString();
-  }
-  if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  return Array.isArray(value) ? value.map(asRecord).filter((row): row is Record<string, unknown> => Boolean(row)) : [];
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
+  const query = params.toString();
+  return query ? `/review/${itemId}?${query}` : `/review/${itemId}`;
 }

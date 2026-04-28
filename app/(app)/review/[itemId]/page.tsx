@@ -8,15 +8,22 @@ export const dynamic = "force-dynamic";
 
 type ReviewItemPageProps = {
   params: Promise<{ itemId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 };
 
-export default async function ReviewItemPage({ params }: ReviewItemPageProps) {
+function firstQueryValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+export default async function ReviewItemPage({ params, searchParams }: ReviewItemPageProps) {
   const { itemId } = await params;
+  const query = searchParams ? await searchParams : {};
+  const jurisdictionId = firstQueryValue(query.jurisdiction_id);
   const supabase = await createSupabaseServerClient();
   const {
     data: { user }
   } = await supabase.auth.getUser();
-  const result = await getReviewItemDetailData(itemId);
+  const result = await getReviewItemDetailData(itemId, { jurisdictionId });
 
   if (result.notFound) {
     notFound();
