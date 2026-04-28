@@ -43,6 +43,19 @@ def test_enqueue_scrape_job_execution_queues_when_redis_configured(
     ]
 
 
+def test_enqueue_scrape_job_execution_falls_back_when_enqueue_fails(
+    monkeypatch,
+) -> None:
+    class FakeQueue:
+        def enqueue(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(scrape_jobs, "scrape_job_queue", lambda **_kwargs: FakeQueue())
+    settings = Settings(app_env="test", redis_url="redis://example.test:6379/0")
+
+    assert scrape_jobs.enqueue_scrape_job_execution(uuid.uuid4(), settings=settings) is False
+
+
 def test_scrape_queue_status_reports_unconfigured() -> None:
     status = scrape_jobs.scrape_queue_status(settings=Settings(app_env="test", redis_url=None))
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from tcg_pipeline.settings import Settings, get_settings
+from tcg_pipeline.utils.logging import configure_logging
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,17 +31,27 @@ def enqueue_scrape_job_execution(
     queue = scrape_job_queue(settings=settings)
     if queue is None:
         return False
-    queue.enqueue(
-        "tcg_pipeline.workers.scrape_jobs.run_scrape_job_task",
-        str(job_id),
-        job_timeout=_settings(settings).scrape_job_timeout_seconds,
-        result_ttl=_settings(settings).scrape_job_result_ttl_seconds,
-        failure_ttl=_settings(settings).scrape_job_failure_ttl_seconds,
-    )
+    resolved_settings = _settings(settings)
+    try:
+        queue.enqueue(
+            "tcg_pipeline.workers.scrape_jobs.run_scrape_job_task",
+            str(job_id),
+            job_timeout=resolved_settings.scrape_job_timeout_seconds,
+            result_ttl=resolved_settings.scrape_job_result_ttl_seconds,
+            failure_ttl=resolved_settings.scrape_job_failure_ttl_seconds,
+        )
+    except Exception:
+        LOGGER.warning(
+            "Could not enqueue scrape job %s in RQ; falling back to API background task.",
+            job_id,
+            exc_info=True,
+        )
+        return False
     return True
 
 
 def run_scrape_job_task(job_id: str) -> None:
+    # Late import avoids a module cycle: coverage router imports the worker queue helpers.
     from tcg_pipeline.api.routers.coverage import run_scrape_job
 
     run_scrape_job(uuid.UUID(job_id))
@@ -101,6 +115,7 @@ def run_worker(
     if redis_url is None:
         raise RuntimeError("REDIS_URL is required to run the scrape worker.")
 
+    configure_logging(resolved_settings.log_level)
     redis_cls, queue_cls, worker_cls = _rq_imports()
     connection = redis_cls.from_url(redis_url)
     queue = queue_cls(queue_name or resolved_settings.scrape_job_queue_name, connection=connection)
