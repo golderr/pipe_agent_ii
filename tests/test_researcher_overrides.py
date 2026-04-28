@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import UTC, datetime
 from importlib import util
@@ -13,42 +12,12 @@ from tcg_pipeline.db.models import PipelineStatus, Project, ResearcherOverride
 from tcg_pipeline.db.researcher_overrides import (
     active_researcher_overrides_for_project,
     clear_researcher_override_fields,
-    normalize_legacy_researcher_overrides,
     upsert_researcher_overrides,
 )
 from tcg_pipeline.resolution import resolve_project
 
 
-def test_normalize_legacy_researcher_overrides_accepts_plain_and_structured_payloads() -> None:
-    normalized = normalize_legacy_researcher_overrides(
-        {
-            "total_units": 120,
-            "developer": {
-                "value": "Helio Capital",
-                "set_by": "nate",
-                "set_at": "2026-04-24T12:00:00+00:00",
-                "note": "Confirmed.",
-                "mode": "until_newer_evidence",
-                "baseline": {"source_type": "costar"},
-            },
-        }
-    )
-
-    assert normalized["total_units"] == {
-        "value": 120,
-        "set_by": "legacy",
-        "set_at": None,
-        "note": None,
-        "mode": "sticky",
-        "baseline": None,
-        "source_url": None,
-    }
-    assert normalized["developer"]["value"] == "Helio Capital"
-    assert normalized["developer"]["set_by"] == "nate"
-    assert normalized["developer"]["baseline"] == {"source_type": "costar"}
-
-
-def test_researcher_override_upsert_dual_writes_table_and_legacy_json(
+def test_researcher_override_upsert_writes_table(
     postgres_session: Session,
 ) -> None:
     _ensure_researcher_overrides_table(postgres_session)
@@ -71,9 +40,7 @@ def test_researcher_override_upsert_dual_writes_table_and_legacy_json(
         },
     )
     postgres_session.flush()
-    postgres_session.refresh(project)
 
-    assert project.researcher_override["total_units"]["value"] == 212
     table_override = postgres_session.execute(
         select(ResearcherOverride).where(
             ResearcherOverride.project_id == project.id,
@@ -145,7 +112,7 @@ def test_researcher_override_reaffirm_preserves_first_set_metadata(
     assert table_override.note == "Reaffirmed after review."
 
 
-def test_researcher_override_clear_marks_table_row_and_prunes_legacy_json(
+def test_researcher_override_clear_marks_table_row(
     postgres_session: Session,
 ) -> None:
     _ensure_researcher_overrides_table(postgres_session)
@@ -169,23 +136,15 @@ def test_researcher_override_clear_marks_table_row_and_prunes_legacy_json(
             ResearcherOverride.field_name == "developer",
         )
     ).scalar_one()
-    assert project.researcher_override is None
     assert table_override.cleared_at is not None
     assert active_researcher_overrides_for_project(postgres_session, project) == {}
 
 
-def test_active_overrides_merge_table_and_legacy_with_table_winning(
-    postgres_session: Session,
-    caplog,
-) -> None:
+def test_active_overrides_read_active_table_rows(postgres_session: Session) -> None:
     _ensure_researcher_overrides_table(postgres_session)
     project = _project(
         "101 MIXED OVERRIDE WAY LOS ANGELES CA 90012",
         total_units=10,
-        researcher_override={
-            "total_units": {"value": 111, "set_by": "legacy-json"},
-            "developer": {"value": "Legacy Developer", "set_by": "legacy-json"},
-        },
     )
     postgres_session.add(project)
     postgres_session.flush()
@@ -200,33 +159,21 @@ def test_active_overrides_merge_table_and_legacy_with_table_winning(
         )
     )
     postgres_session.flush()
-    caplog.set_level(logging.WARNING, logger="tcg_pipeline.db.researcher_overrides")
 
     active = active_researcher_overrides_for_project(postgres_session, project)
     result = resolve_project(project.id, postgres_session, apply=False, write_resolution_log=False)
 
     assert active["total_units"]["value"] == 222
-    assert active["developer"]["value"] == "Legacy Developer"
     assert result.field_resolutions["total_units"].value == 222
-    assert result.field_resolutions["developer"].value == "Legacy Developer"
-    assert "legacy-only researcher_override keys" in caplog.text
-    assert "developer" in caplog.text
 
 
-def test_resolve_project_prefers_table_override_over_legacy_json(
+def test_resolve_project_uses_table_override(
     postgres_session: Session,
 ) -> None:
     _ensure_researcher_overrides_table(postgres_session)
     project = _project(
         "102 TABLE PREFERRED WAY LOS ANGELES CA 90012",
         total_units=10,
-        researcher_override={
-            "total_units": {
-                "value": 111,
-                "set_by": "legacy-json",
-                "mode": "until_newer_evidence",
-            }
-        },
     )
     postgres_session.add(project)
     postgres_session.flush()

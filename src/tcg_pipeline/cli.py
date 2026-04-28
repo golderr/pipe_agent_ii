@@ -415,7 +415,7 @@ def review_accept_command(
     field_overrides_json: Annotated[
         str | None,
         typer.Option(
-            help="Optional JSON object to merge into project.researcher_override before resolve.",
+            help="Optional JSON object to write as researcher_overrides before resolve.",
         ),
     ] = None,
     canonical_address: Annotated[

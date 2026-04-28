@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -117,7 +118,7 @@ def append_project_note(
     note_type = _validate_note_type(note_type)
     project = _load_project(session, project_id)
     note_body = _coerce_note_body(body)
-    old_value = _project_field_value(project, note_type)
+    old_value = _latest_project_note_value(session, project.id, note_type)
     actor = _actor_for_audit(user)
     now = datetime.now(UTC)
     note = ProjectNote(
@@ -129,7 +130,6 @@ def append_project_note(
         created_at=now,
     )
     session.add(note)
-    setattr(project, note_type, note_body)
     _mark_project_edited(project, actor=actor, timestamp=now)
     change_log_entries_created = _write_direct_change_log(
         session,
@@ -287,6 +287,19 @@ def _mark_project_edited(project: Project, *, actor: str, timestamp: datetime) -
 
 def _project_field_value(project: Project, field_name: str) -> Any:
     return normalize_value_for_project(getattr(project, field_name))
+
+
+def _latest_project_note_value(
+    session: Session,
+    project_id: uuid.UUID,
+    note_type: str,
+) -> str | None:
+    return session.execute(
+        select(ProjectNote.body)
+        .where(ProjectNote.project_id == project_id, ProjectNote.note_type == note_type)
+        .order_by(ProjectNote.created_at.desc(), ProjectNote.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def _write_direct_change_log(

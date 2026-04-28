@@ -91,7 +91,7 @@ SCOPED_ARCHITECTURE_FIRM_OVERRIDES = (
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply Phase A CSV override decisions by writing researcher_override entries."
+            "Apply Phase A CSV override decisions by writing researcher_overrides rows."
         ),
     )
     parser.add_argument(

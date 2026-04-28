@@ -8,7 +8,13 @@ from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from tcg_pipeline.cli import app
-from tcg_pipeline.db.models import DeveloperAlias, DeveloperRegistry, Evidence, Project
+from tcg_pipeline.db.models import (
+    DeveloperAlias,
+    DeveloperRegistry,
+    Evidence,
+    Project,
+    ResearcherOverride,
+)
 from tcg_pipeline.developer import (
     audit_developer_registry_token_overlap,
     canonicalize_project_developers,
@@ -560,7 +566,10 @@ def test_canonicalize_project_developers_does_not_apply_fuzzy_review_match(
 def test_canonicalize_project_developers_preserves_researcher_override_value(
     postgres_session: Session,
 ) -> None:
-    if not inspect(postgres_session.bind).has_table("developer_registry"):
+    inspector = inspect(postgres_session.bind)
+    if not inspector.has_table("developer_registry") or not inspector.has_table(
+        "researcher_overrides"
+    ):
         pytest.skip("Apply the evidence layer migration before running developer tests.")
 
     canonical = DeveloperRegistry(canonical_name=TEST_JAMISON)
@@ -580,15 +589,18 @@ def test_canonicalize_project_developers_preserves_researcher_override_value(
         state="CA",
         county="Los Angeles",
         developer=TEST_JAMISON_ALIAS,
-        researcher_override={
-            "developer": {
-                "value": TEST_JAMISON_ALIAS,
-                "mode": "until_newer_evidence",
-                "note": "Keep researcher-selected raw developer value.",
-            }
-        },
     )
     postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        ResearcherOverride(
+            project_id=project.id,
+            field_name="developer",
+            value=TEST_JAMISON_ALIAS,
+            mode="until_newer_evidence",
+            note="Keep researcher-selected raw developer value.",
+        )
+    )
     postgres_session.flush()
 
     result = canonicalize_project_developers(

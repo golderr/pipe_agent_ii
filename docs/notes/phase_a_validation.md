@@ -113,7 +113,7 @@ One project (`Lake on Wilshire`) surfaced a real bug during A.8:
 
 - `canonicalize-developers --apply` rewrote a raw developer override value after `resolve-all --apply`.
 - The project was immediately re-resolved and corrected.
-- Code now prevents future canonicalization sweeps from rewriting `project.developer` when `researcher_override.developer` is present.
+- Code now prevents future canonicalization sweeps from rewriting `project.developer` when an active `researcher_overrides.developer` row is present.
 
 ## Verification
 

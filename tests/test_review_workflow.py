@@ -370,11 +370,6 @@ def test_accept_review_item_merges_field_overrides_before_resolve(
     postgres_session.refresh(project)
 
     assert project.total_units == 300
-    assert project.researcher_override["total_units"]["value"] == 300
-    assert project.researcher_override["total_units"]["set_by"] == "nate"
-    assert project.researcher_override["total_units"]["note"] == "Researcher confirmed 300 units."
-    assert project.researcher_override["total_units"]["mode"] == "until_newer_evidence"
-    assert project.researcher_override["total_units"]["baseline"]["evidence_date"] == "2026-04-01"
     table_override = postgres_session.execute(
         select(ResearcherOverride).where(
             ResearcherOverride.project_id == project.id,
@@ -1042,8 +1037,8 @@ def test_commit_staged_custom_decision_applies_override_and_audit_identity(
     assert review_item.state == REVIEW_ITEM_STATE_COMMITTED
     assert review_item.status == ReviewItemStatus.ACCEPTED
     assert project.total_units == 25
-    assert project.researcher_override["total_units"]["mode"] == "review_protected"
     assert override.value == 25
+    assert override.mode == "review_protected"
     assert override.set_by_user_id == reviewer_id
     assert override.source_url == "https://example.com/source"
     assert decision is not None
@@ -1437,7 +1432,6 @@ def test_reject_status_change_creates_review_protected_override_and_newer_eviden
     assert reject_result.action == ReviewDecisionAction.REJECT
     assert review_item.status == ReviewItemStatus.REJECTED
     assert project.pipeline_status == PipelineStatus.PROPOSED
-    assert project.researcher_override["pipeline_status"]["value"] == PipelineStatus.PROPOSED.value
     table_override = postgres_session.execute(
         select(ResearcherOverride).where(
             ResearcherOverride.project_id == project.id,
@@ -1446,13 +1440,8 @@ def test_reject_status_change_creates_review_protected_override_and_newer_eviden
     ).scalar_one()
     assert table_override.value == PipelineStatus.PROPOSED.value
     assert table_override.cleared_at is None
-    assert (
-        project.researcher_override["pipeline_status"]["mode"] == "until_newer_evidence"
-    )
-    assert (
-        project.researcher_override["pipeline_status"]["baseline"]["evidence_date"]
-        == "2026-03-15"
-    )
+    assert table_override.mode == "until_newer_evidence"
+    assert table_override.baseline["evidence_date"] == "2026-03-15"
     assert review_decision.field_overrides["pipeline_status"]["mode"] == "until_newer_evidence"
     assert rejection_change.old_value == PipelineStatus.APPROVED.value
     assert rejection_change.new_value == PipelineStatus.PROPOSED.value
@@ -1502,7 +1491,6 @@ def test_reject_status_change_creates_review_protected_override_and_newer_eviden
     ).scalar_one()
 
     assert project.pipeline_status == PipelineStatus.PROPOSED
-    assert project.researcher_override["pipeline_status"]["value"] == PipelineStatus.PROPOSED.value
     postgres_session.refresh(table_override)
     assert table_override.cleared_at is None
     assert contradiction_review_item.state == "open"
@@ -1536,7 +1524,6 @@ def test_reject_status_change_creates_review_protected_override_and_newer_eviden
     ).scalars().all()
 
     assert project.pipeline_status == PipelineStatus.PROPOSED
-    assert project.researcher_override["pipeline_status"]["value"] == PipelineStatus.PROPOSED.value
     assert len(contradiction_review_items) == 1
     assert not any(
         review_flag.code == "researcher_override_superseded"

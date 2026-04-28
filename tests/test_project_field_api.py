@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -186,15 +187,22 @@ def test_update_project_field_clears_inclusion_note(postgres_session: Session) -
     assert project.inclusion_note is None
 
 
-def test_append_project_note_creates_history_updates_latest_and_logs(
+def test_append_project_note_creates_history_and_logs(
     postgres_session: Session,
 ) -> None:
     _ensure_project_write_api_tables(postgres_session)
-    project = _project(
-        "923 NOTE WAY LOS ANGELES CA 90012",
-        researcher_notes="Initial note",
-    )
+    project = _project("923 NOTE WAY LOS ANGELES CA 90012")
     postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        ProjectNote(
+            project_id=project.id,
+            note_type="researcher_notes",
+            body="Initial note",
+            created_by_label="legacy",
+            created_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+        )
+    )
     postgres_session.flush()
     client = _client(postgres_session)
 
@@ -223,9 +231,12 @@ def test_append_project_note_creates_history_updates_latest_and_logs(
         .order_by(ChangeLog.timestamp, ChangeLog.id)
     ).scalars().all()
 
-    assert project.researcher_notes == "Second appended note"
-    assert [row.body for row in note_rows] == ["First appended note", "Second appended note"]
-    assert all(row.created_by_user_id == USER_ID for row in note_rows)
+    assert {row.body for row in note_rows} == {
+        "Initial note",
+        "First appended note",
+        "Second appended note",
+    }
+    assert sum(1 for row in note_rows if row.created_by_user_id == USER_ID) == 2
     assert [row.old_value for row in change_log_rows] == ["Initial note", "First appended note"]
     assert [row.new_value for row in change_log_rows] == [
         "First appended note",

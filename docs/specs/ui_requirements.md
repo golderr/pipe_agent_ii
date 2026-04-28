@@ -927,7 +927,8 @@ Every field in the data model belongs to one of five classes. The class determin
 |---|---|---|---|
 | **Evidence-derived** | `pipeline_status`, `total_units`, `affordable_units`, `market_rate_units`, `developer`, `product_type`, `age_restriction`, `date_delivery` | Edit becomes a `researcher_override` via the FastAPI. Resolution engine re-runs. | ⓘ "Your edit holds the value. New contradicting evidence will create a review item." |
 | **Source-populated direct** | `rent_or_sale`, `acres`, `retail_sf`, `office_sf`, `hotel_keys`, `stories`, bed-mix percentages, `costar_submarket`, `owner`, `zoning` | Read-only for MVP. Future choice: promote to Evidence-derived or teach source ingesters to respect field overrides. | Disabled edit control: "Managed by source updates in MVP." |
-| **Researcher-authored** | `project_name`, `previous_names`, `researcher_notes`, `personal_notes`, `change_notes`, `source_urls`, planner contacts | Direct write to project table via the FastAPI. ChangeLog entry created. | ⓘ "Your edit is the source of truth for this field." |
+| **Researcher-authored** | `project_name`, `previous_names`, `source_urls`, planner contacts | Direct write to project table via the FastAPI. ChangeLog entry created. | ⓘ "Your edit is the source of truth for this field." |
+| **Project notes** | `researcher_notes`, `personal_notes`, `change_notes` | Append-only write to `project_notes` via the FastAPI. ChangeLog entry created. | ⓘ "Notes are append-only." |
 | **Relationships** | `master_project`, `phase_siblings`, `related_projects` | Write to `project_relationships` / `project_identifiers` tables. Uses a link picker, not inline text. | ⓘ "Relationship — uses a picker, not inline edit." |
 | **Computed** | `canonical_address`, `id`, `created_at`, `confidence`, `likelihood`, `delivery_year_provenance` | Not editable. Displayed with `—` source badge. | Non-interactive. |
 
@@ -983,7 +984,7 @@ When two or more evidence rows agree on the same value, they are aggregated into
 
 - Per review item (note on a specific decision).
 - Per project field (note on an override or current value).
-- Project-level notes: `researcher_notes`, `personal_notes`, `change_notes`.
+- Project-level notes: `researcher_notes`, `personal_notes`, `change_notes` stored as append-only `project_notes` rows.
 
 ### 16.2 Append-only semantics
 

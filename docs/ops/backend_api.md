@@ -140,10 +140,11 @@ Only evidence-derived Core fields are accepted: `pipeline_status`,
 `total_units`, `affordable_units`, `market_rate_units`, `developer`,
 `product_type`, `age_restriction`, and `date_delivery`.
 
-The API writes/clears `researcher_overrides`, keeps the legacy
-`projects.researcher_override` JSONB in sync during the transition, re-runs
+The API writes/clears `researcher_overrides`, re-runs
 `resolve_project(apply=True)`, updates project edit metadata, and writes a
-`change_log` row with `change_type = researcher_override`.
+`change_log` row with `change_type = researcher_override`. C.tail.2 removed the
+legacy `projects.researcher_override` JSONB mirror; active table rows are the
+source of truth.
 
 New manual Core-field edits use `mode = review_protected`. They are not
 permanent sticky locks: the manual value remains current, but when newer
@@ -198,9 +199,9 @@ updates edit metadata, and writes a `change_log` row with
 `change_type = researcher_confirmed`.
 
 `/note` is append-only for `researcher_notes`, `personal_notes`, and
-`change_notes`. Each write inserts a `project_notes` row and also updates the
-legacy latest-note column on `projects` so existing Project Detail reads stay
-stable during the transition.
+`change_notes`. Each write inserts a `project_notes` row. C.tail.3 removed the
+legacy latest-note columns from `projects`; Project Detail derives latest-note
+previews from `project_notes`.
 
 `project_notes` grants authenticated clients `SELECT` only under RLS. Direct
 PostgREST writes remain blocked; writes go through FastAPI with Supabase JWT
@@ -436,41 +437,13 @@ runtime dependency before deployed code handles uploads. C.l-bis requires
 `202604270015` for active-job uniqueness. C.tail.1 adds the `redis` and `rq`
 runtime dependencies plus the Render worker service.
 
-## C.c Migration Verification
+## Legacy Storage Retirement
 
-Before C.d write endpoints are enabled, verify the `researcher_overrides`
-migration against staging or a snapshotted database. Do not run the migration
-blindly against the production project.
-
-Safe pre-migration checks:
-
-```powershell
-python scripts/verify_researcher_overrides_migration.py summary --verbose
-python scripts/verify_researcher_overrides_migration.py snapshot --output data/output/migration_checks/researcher_overrides_<env>_<utc>_before.json
-```
-
-Use a DB-specific filename (`<env>` and timestamp) for every snapshot. Do not
-reuse one hardcoded JSON path across production and staging checks.
-
-After taking a DB snapshot or targeting staging:
-
-```powershell
-alembic upgrade head
-python scripts/verify_researcher_overrides_migration.py summary --verbose
-python scripts/verify_researcher_overrides_migration.py compare --before data/output/migration_checks/researcher_overrides_<env>_<utc>_before.json
-```
-
-The pre-migration `compare` can be run as a tool sanity check, but it does not
-verify the migration. The post-migration `compare` is mandatory.
-
-Done criteria:
-
-- `summary` reports the `researcher_overrides` table exists.
-- Legacy override field-pair count equals active table row count.
-- Legacy-only, table-only, and mismatched pair counts are all `0`.
-- Unique active-field index, RLS enabled, authenticated read policy, and
-  authenticated SELECT grant are all present.
-- Snapshot comparison passes with no resolution differences.
+C.tail.2/C.tail.3 retire the transitional project columns with Alembic
+`202604280017`. The migration refuses to run if any non-empty legacy override
+value lacks a matching active `researcher_overrides` row, or if any non-empty
+legacy latest-note column differs from the latest `project_notes` row for that
+project/type.
 
 ## Auth Notes
 

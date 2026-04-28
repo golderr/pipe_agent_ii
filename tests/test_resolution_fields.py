@@ -553,7 +553,7 @@ def test_resolve_status_preserves_inactive_until_manual_reactivation() -> None:
 def test_resolve_status_override_holds_until_newer_evidence() -> None:
     project = _build_project()
     project.pipeline_status = PipelineStatus.APPROVED
-    project.researcher_override = {
+    overrides = {
         "pipeline_status": {
             "value": PipelineStatus.PROPOSED.value,
             "set_by": "nate",
@@ -567,8 +567,8 @@ def test_resolve_status_override_holds_until_newer_evidence() -> None:
                 "source_type": "ladbs_permit",
                 "evidence_ids": [],
                 "rule_applied": "highest_status_wins",
-            },
-        }
+        },
+    }
     }
     permit_evidence = _build_evidence(
         source_type="ladbs_permit",
@@ -579,7 +579,7 @@ def test_resolve_status_override_holds_until_newer_evidence() -> None:
         },
     )
 
-    resolution = resolve_status([permit_evidence], project, overrides=project.researcher_override)
+    resolution = resolve_status([permit_evidence], project, overrides=overrides)
 
     assert resolution.value == PipelineStatus.PROPOSED
     assert resolution.rule_applied == "researcher_override_until_newer_evidence"
@@ -588,7 +588,7 @@ def test_resolve_status_override_holds_until_newer_evidence() -> None:
 def test_resolve_status_override_records_newer_candidate_and_keeps_override() -> None:
     project = _build_project()
     project.pipeline_status = PipelineStatus.APPROVED
-    project.researcher_override = {
+    overrides = {
         "pipeline_status": {
             "value": PipelineStatus.PROPOSED.value,
             "set_by": "nate",
@@ -628,7 +628,7 @@ def test_resolve_status_override_records_newer_candidate_and_keeps_override() ->
     resolution = resolve_status(
         [permit_evidence, inspection_evidence],
         project,
-        overrides=project.researcher_override,
+        overrides=overrides,
     )
 
     assert resolution.value == PipelineStatus.PROPOSED

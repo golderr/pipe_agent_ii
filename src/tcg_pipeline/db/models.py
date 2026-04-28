@@ -456,9 +456,6 @@ class Project(Base, TimestampMixin):
     planner_2_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     planner_2_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
-    researcher_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    personal_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    change_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_urls: Mapped[list[str]] = mapped_column(ARRAY(String()), default=list, nullable=False)
 
     last_editor: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -478,7 +475,6 @@ class Project(Base, TimestampMixin):
         server_default=true(),
     )
     inclusion_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    researcher_override: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
 

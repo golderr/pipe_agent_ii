@@ -21,6 +21,7 @@ from tcg_pipeline.db.models import (
     ProductType,
     Project,
     ProjectIdentifier,
+    ProjectNote,
     ProjectSourceRecord,
     RelationshipType,
     RentOrSale,
@@ -280,6 +281,7 @@ class PipedreamProjectRecord:
     row_number: int
     project_identifier_value: str
     project: Project
+    project_notes: list[ProjectNote]
     identifiers: list[ProjectIdentifier]
     status_history: list[StatusHistory]
     source_record: ProjectSourceRecord
@@ -571,9 +573,6 @@ def _build_project_record(
         planner_2_city=_clean_text(payload.get("Plan2City")),
         planner_2_email=_clean_text(payload.get("Plan2Email")),
         planner_2_phone=_clean_text(payload.get("Plan2Phone")),
-        researcher_notes=_clean_text(payload.get("Notes")),
-        personal_notes=_clean_text(payload.get("PersonalNotes")),
-        change_notes=_clean_text(payload.get("ChangeNotes")),
         source_urls=_dedupe_strings(_clean_text(payload.get(field)) for field in SOURCE_URL_FIELDS),
         last_editor=_clean_text(payload.get("Editor")),
         last_edit_date=_parse_date(
@@ -585,6 +584,7 @@ def _build_project_record(
         created_by=PIPEDREAM_CREATED_BY,
     )
 
+    project_notes = _build_project_notes(project, payload, imported_at)
     identifiers = _build_identifiers(project, payload, source_name, imported_at, project_identifier)
     status_history = _build_status_history(
         project,
@@ -628,10 +628,37 @@ def _build_project_record(
         row_number=row_number,
         project_identifier_value=project_identifier,
         project=project,
+        project_notes=project_notes,
         identifiers=identifiers,
         status_history=status_history,
         source_record=source_record,
     )
+
+
+def _build_project_notes(
+    project: Project,
+    payload: dict[str, Any],
+    imported_at: datetime,
+) -> list[ProjectNote]:
+    notes: list[ProjectNote] = []
+    for source_field, note_type in {
+        "Notes": "researcher_notes",
+        "PersonalNotes": "personal_notes",
+        "ChangeNotes": "change_notes",
+    }.items():
+        body = _clean_text(payload.get(source_field))
+        if body is None:
+            continue
+        notes.append(
+            ProjectNote(
+                project=project,
+                note_type=note_type,
+                body=body,
+                created_by_label=PIPEDREAM_CREATED_BY,
+                created_at=imported_at,
+            )
+        )
+    return notes
 
 
 def _build_identifiers(

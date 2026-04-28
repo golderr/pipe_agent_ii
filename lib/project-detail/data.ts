@@ -39,7 +39,6 @@ type RawProject = Record<string, unknown> & {
   inclusion_in_analysis: boolean;
   inclusion_in_exhibit: boolean;
   inclusion_note: string | null;
-  researcher_override: Record<string, unknown> | null;
 };
 
 type RawJurisdiction = {
@@ -140,6 +139,17 @@ type RawProjectNote = {
   created_by_user_id: string | null;
   created_by_label: string | null;
   created_at: string;
+};
+
+type RawResearcherOverride = {
+  field_name: string;
+  value: unknown;
+  set_by_label: string | null;
+  set_at: string | null;
+  note: string | null;
+  source_url: string | null;
+  mode: string | null;
+  baseline: Record<string, unknown> | null;
 };
 
 type ProjectDetailResult =
@@ -259,9 +269,6 @@ const PROJECT_SELECT = [
   "planner_2_city",
   "planner_2_email",
   "planner_2_phone",
-  "researcher_notes",
-  "personal_notes",
-  "change_notes",
   "source_urls",
   "last_editor",
   "last_edit_date",
@@ -270,7 +277,6 @@ const PROJECT_SELECT = [
   "inclusion_in_analysis",
   "inclusion_in_exhibit",
   "inclusion_note",
-  "researcher_override",
   "created_by",
   "created_at",
   "updated_at"
@@ -884,6 +890,33 @@ function toOverrideRows(overrides: Record<string, unknown> | null): ProjectOverr
     .sort((a, b) => a.fieldLabel.localeCompare(b.fieldLabel));
 }
 
+function toOverridePayloads(overrideRows: RawResearcherOverride[]): Record<string, unknown> {
+  return Object.fromEntries(
+    overrideRows.map((row) => [
+      row.field_name,
+      {
+        value: row.value,
+        set_by: row.set_by_label,
+        set_at: row.set_at,
+        note: row.note,
+        source_url: row.source_url,
+        mode: row.mode,
+        baseline: row.baseline
+      }
+    ])
+  );
+}
+
+function latestNoteValues(noteRows: ProjectNoteHistoryRow[]): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const row of noteRows) {
+    if (values[row.noteType] === undefined) {
+      values[row.noteType] = row.body;
+    }
+  }
+  return values;
+}
+
 function extractReviewFields(reviewItems: RawReviewItem[]) {
   const fields = new Set<string>();
 
@@ -920,9 +953,17 @@ function extractReviewFields(reviewItems: RawReviewItem[]) {
   return fields;
 }
 
-function valueForField(project: RawProject, key: string, jurisdictionName: string | null) {
+function valueForField(
+  project: RawProject,
+  key: string,
+  jurisdictionName: string | null,
+  notesByType: Record<string, string>
+) {
   if (key === "jurisdiction_display") {
     return jurisdictionName;
+  }
+  if (key in notesByType) {
+    return notesByType[key];
   }
   if (key === "lat_lng") {
     return project.lat !== null && project.lng !== null ? `${project.lat}, ${project.lng}` : null;
@@ -940,8 +981,12 @@ function valueForField(project: RawProject, key: string, jurisdictionName: strin
   return project[key];
 }
 
-function editValueForField(project: RawProject, key: string) {
-  const value = project[key];
+function editValueForField(
+  project: RawProject,
+  key: string,
+  notesByType: Record<string, string>
+) {
+  const value = key in notesByType ? notesByType[key] : project[key];
   if (value === null || value === undefined) {
     return "";
   }
@@ -960,7 +1005,8 @@ function editValueForField(project: RawProject, key: string) {
 function editConfigForField(
   definition: FieldDefinition,
   project: RawProject,
-  overrides: Record<string, unknown> | null
+  overrides: Record<string, unknown> | null,
+  notesByType: Record<string, string>
 ): FieldEditConfig | null {
   if (!definition.edit) {
     return null;
@@ -969,7 +1015,7 @@ function editConfigForField(
   return {
     ...definition.edit,
     enabled: true,
-    value: editValueForField(project, definition.key),
+    value: editValueForField(project, definition.key, notesByType),
     isOverridden: Boolean(activeOverridePayload(overrides, definition.key))
   };
 }
@@ -981,17 +1027,18 @@ function buildFields(
   pendingFields: Set<string>,
   resolutionByField: Map<string, RawFieldResolution>,
   evidenceById: Map<string, RawEvidence>,
-  overrides: Record<string, unknown> | null
+  overrides: Record<string, unknown> | null,
+  notesByType: Record<string, string>
 ): ProjectField[] {
   return definitions.map((definition) => ({
     key: definition.key,
     label: definition.label,
-    value: formatValue(valueForField(project, definition.key, jurisdictionName)),
+    value: formatValue(valueForField(project, definition.key, jurisdictionName, notesByType)),
     fieldClass: definition.className,
     state: pendingFields.has(definition.key) ? "review" : "default",
     note: definition.note ?? null,
     provenance: buildFieldProvenance(definition, resolutionByField, evidenceById, overrides),
-    edit: editConfigForField(definition, project, overrides)
+    edit: editConfigForField(definition, project, overrides, notesByType)
   }));
 }
 
@@ -1099,6 +1146,19 @@ async function fetchProjectRows<T>(
   return { data: (data ?? []) as T[], error: error?.message ?? null };
 }
 
+async function fetchActiveOverrideRows(
+  supabase: SupabaseServerClient,
+  projectId: string
+): Promise<{ data: RawResearcherOverride[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from("researcher_overrides")
+    .select("field_name, value, set_by_label, set_at, note, source_url, mode, baseline")
+    .eq("project_id", projectId)
+    .is("cleared_at", null)
+    .order("field_name", { ascending: true });
+  return { data: (data ?? []) as RawResearcherOverride[], error: error?.message ?? null };
+}
+
 export async function getProjectDetailData(projectId: string): Promise<ProjectDetailResult> {
   const supabase = await createSupabaseServerClient();
 
@@ -1127,7 +1187,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     incomingRelationships,
     statusHistory,
     changeRows,
-    noteRows
+    noteRows,
+    overrideRowsResult
   ] = await Promise.all([
     rawProject.jurisdiction_id
       ? supabase
@@ -1188,7 +1249,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
       "project_notes",
       "id, note_type, body, created_by_user_id, created_by_label, created_at",
       projectId
-    )
+    ),
+    fetchActiveOverrideRows(supabase, projectId)
   ]);
 
   const error =
@@ -1202,7 +1264,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
     incomingRelationships.error?.message ??
     statusHistory.error ??
     changeRows.error ??
-    noteRows.error;
+    noteRows.error ??
+    overrideRowsResult.error;
 
   if (error) {
     return { data: null, error };
@@ -1245,7 +1308,9 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
   const projectChangeRows = toChangeRows(changeRows.data);
   const projectNoteRows = toNoteRows(noteRows.data);
   const projectStatusRows = toStatusRows(statusHistory.data);
-  const overrideRows = toOverrideRows(rawProject.researcher_override);
+  const overridePayloads = toOverridePayloads(overrideRowsResult.data);
+  const overrideRows = toOverrideRows(overridePayloads);
+  const notesByType = latestNoteValues(projectNoteRows);
   const relationshipRows = toRelationshipRows(
     relationships.data,
     (incomingRelationships.data ?? []) as unknown as RawRelationship[],
@@ -1276,7 +1341,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         pendingFields,
         resolutionByField,
         evidenceById,
-        rawProject.researcher_override
+        overridePayloads,
+        notesByType
       )
     },
     {
@@ -1290,7 +1356,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         pendingFields,
         resolutionByField,
         evidenceById,
-        rawProject.researcher_override
+        overridePayloads,
+        notesByType
       )
     },
     {
@@ -1304,7 +1371,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         pendingFields,
         resolutionByField,
         evidenceById,
-        rawProject.researcher_override
+        overridePayloads,
+        notesByType
       )
     },
     {
@@ -1318,7 +1386,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         pendingFields,
         resolutionByField,
         evidenceById,
-        rawProject.researcher_override
+        overridePayloads,
+        notesByType
       )
     },
     {
@@ -1342,7 +1411,8 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         pendingFields,
         resolutionByField,
         evidenceById,
-        rawProject.researcher_override
+        overridePayloads,
+        notesByType
       )
     }
   ].filter((section) => section.fields.length > 0);

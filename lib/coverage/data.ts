@@ -26,8 +26,12 @@ type RawProject = {
   id: string;
   jurisdiction_id: string | null;
   pipeline_status: string | null;
-  researcher_override: Record<string, unknown> | null;
   last_reviewed_date: string | null;
+};
+
+type RawResearcherOverride = {
+  project_id: string;
+  cleared_at: string | null;
 };
 
 type RawReviewItem = {
@@ -201,11 +205,11 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
     return { data: [], error: jurisdictionError.message };
   }
 
-  const [projects, reviewItems, sourceRegistrations, sourceRuns] = await Promise.all([
+  const [projects, reviewItems, sourceRegistrations, sourceRuns, researcherOverrides] = await Promise.all([
     fetchAllRows<RawProject>(
       supabase,
       "projects",
-      "id, jurisdiction_id, pipeline_status, researcher_override, last_reviewed_date"
+      "id, jurisdiction_id, pipeline_status, last_reviewed_date"
     ),
     fetchAllRows<RawReviewItem>(supabase, "review_items", "id, project_id, status, state, priority"),
     fetchAllRows<RawSourceRegistration>(
@@ -217,10 +221,20 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
       supabase,
       "source_runs",
       "id, market, jurisdiction_id, source_name, run_timestamp, finished_at, records_pulled, rows_inserted, rows_updated, rows_unchanged, errors, error_text"
+    ),
+    fetchAllRows<RawResearcherOverride>(
+      supabase,
+      "researcher_overrides",
+      "project_id, cleared_at"
     )
   ]);
 
-  const error = projects.error ?? reviewItems.error ?? sourceRegistrations.error ?? sourceRuns.error;
+  const error =
+    projects.error ??
+    reviewItems.error ??
+    sourceRegistrations.error ??
+    sourceRuns.error ??
+    researcherOverrides.error;
   if (error) {
     return { data: [], error };
   }
@@ -231,6 +245,11 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
       projectJurisdiction.set(project.id, project.jurisdiction_id);
     }
   }
+  const activeOverrideProjectIds = new Set(
+    researcherOverrides.rows
+      .filter((override) => override.cleared_at === null)
+      .map((override) => override.project_id)
+  );
 
   const jurisdictions = ((jurisdictionData ?? []) as RawJurisdiction[]).map((jurisdiction) => {
     const market = singleMarket(jurisdiction.markets);
@@ -292,7 +311,7 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
         )
       },
       lastReviewedAt: maxIsoDate(jurisdictionProjects.map((project) => project.last_reviewed_date)),
-      openOverrides: jurisdictionProjects.filter((project) => project.researcher_override).length,
+      openOverrides: jurisdictionProjects.filter((project) => activeOverrideProjectIds.has(project.id)).length,
       sources
     } satisfies CoverageJurisdiction;
   });

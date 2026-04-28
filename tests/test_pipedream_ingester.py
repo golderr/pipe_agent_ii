@@ -129,6 +129,14 @@ def test_ingest_workbook_builds_project_records_and_history(tmp_path: Path) -> N
     assert project.status_date == date(2026, 4, 1)
     assert project.last_editor == "NG"
     assert project.last_edit_date == date(2026, 4, 10)
+    assert {
+        note.note_type: note.body
+        for note in record.project_notes
+    } == {
+        "researcher_notes": "Survived appeal.",
+        "personal_notes": "Follow up next cycle.",
+        "change_notes": "Added updated unit count.",
+    }
 
     identifier_types = {identifier.identifier_type for identifier in record.identifiers}
     assert IdentifierType.TCG_PIPEDREAM_ID in identifier_types

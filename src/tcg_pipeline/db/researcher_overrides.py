@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import inspect, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.db.evidence import serialize_json
 from tcg_pipeline.db.models import Project, ResearcherOverride
-
-_TABLE_EXISTS_CACHE_KEY = "researcher_overrides_table_exists"
-LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,28 +29,15 @@ def active_researcher_overrides_for_project(
     session: Session,
     project: Project,
 ) -> dict[str, dict[str, Any]]:
-    legacy_overrides = normalize_legacy_researcher_overrides(project.researcher_override)
-    if researcher_overrides_table_exists(session):
-        rows = session.execute(
-            select(ResearcherOverride)
-            .where(
-                ResearcherOverride.project_id == project.id,
-                ResearcherOverride.cleared_at.is_(None),
-            )
-            .order_by(ResearcherOverride.field_name)
-        ).scalars().all()
-        table_overrides = {row.field_name: _override_payload_from_row(row) for row in rows}
-        legacy_only_fields = sorted(set(legacy_overrides) - set(table_overrides))
-        if legacy_only_fields:
-            LOGGER.warning(
-                "Project %s has legacy-only researcher_override keys not present in "
-                "researcher_overrides: %s",
-                project.id,
-                ", ".join(legacy_only_fields),
-            )
-        return {**legacy_overrides, **table_overrides}
-
-    return legacy_overrides
+    rows = session.execute(
+        select(ResearcherOverride)
+        .where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.cleared_at.is_(None),
+        )
+        .order_by(ResearcherOverride.field_name)
+    ).scalars().all()
+    return {row.field_name: _override_payload_from_row(row) for row in rows}
 
 
 def project_has_active_researcher_override(
@@ -62,20 +45,16 @@ def project_has_active_researcher_override(
     project: Project,
     field_name: str,
 ) -> bool:
-    if researcher_overrides_table_exists(session):
-        row_exists = session.execute(
-            select(ResearcherOverride.id)
-            .where(
-                ResearcherOverride.project_id == project.id,
-                ResearcherOverride.field_name == field_name,
-                ResearcherOverride.cleared_at.is_(None),
-            )
-            .limit(1)
-        ).scalar_one_or_none()
-        if row_exists is not None:
-            return True
-
-    return field_name in normalize_legacy_researcher_overrides(project.researcher_override)
+    row_exists = session.execute(
+        select(ResearcherOverride.id)
+        .where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == field_name,
+            ResearcherOverride.cleared_at.is_(None),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    return row_exists is not None
 
 
 def upsert_researcher_overrides(
@@ -86,14 +65,6 @@ def upsert_researcher_overrides(
     set_by_user_id: Any | None = None,
 ) -> None:
     if not incoming:
-        return
-
-    project.researcher_override = _merge_legacy_researcher_overrides(
-        project.researcher_override,
-        incoming,
-    )
-
-    if not researcher_overrides_table_exists(session):
         return
 
     now = datetime.now(UTC)
@@ -150,14 +121,6 @@ def clear_researcher_override_fields(
     if not field_names:
         return
 
-    project.researcher_override = _remove_legacy_researcher_overrides(
-        project.researcher_override,
-        field_names,
-    )
-
-    if not researcher_overrides_table_exists(session):
-        return
-
     timestamp = cleared_at or datetime.now(UTC)
     rows = session.execute(
         select(ResearcherOverride).where(
@@ -169,70 +132,6 @@ def clear_researcher_override_fields(
     for row in rows:
         row.cleared_at = timestamp
         row.cleared_by_user_id = cleared_by_user_id
-
-
-def normalize_legacy_researcher_overrides(raw_override: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(raw_override, dict):
-        return {}
-
-    normalized: dict[str, dict[str, Any]] = {}
-    for field_name, payload in raw_override.items():
-        if isinstance(payload, dict) and "value" in payload:
-            normalized[str(field_name)] = {
-                "value": payload.get("value"),
-                "set_by": payload.get("set_by"),
-                "set_at": payload.get("set_at"),
-                "note": payload.get("note"),
-                "mode": payload.get("mode"),
-                "baseline": payload.get("baseline"),
-                "source_url": payload.get("source_url"),
-            }
-            continue
-        normalized[str(field_name)] = {
-            "value": payload,
-            "set_by": "legacy",
-            "set_at": None,
-            "note": None,
-            "mode": "sticky",
-            "baseline": None,
-            "source_url": None,
-        }
-    return normalized
-
-
-def researcher_overrides_table_exists(session: Session) -> bool:
-    cached = session.info.get(_TABLE_EXISTS_CACHE_KEY)
-    if isinstance(cached, bool):
-        return cached
-    bind = session.get_bind()
-    exists = inspect(bind).has_table("researcher_overrides")
-    session.info[_TABLE_EXISTS_CACHE_KEY] = exists
-    return exists
-
-
-def _merge_legacy_researcher_overrides(
-    existing: Any,
-    incoming: Mapping[str, Mapping[str, Any]],
-) -> dict[str, Any]:
-    merged = dict(existing) if isinstance(existing, dict) else {}
-    for field_name, payload in incoming.items():
-        merged[str(field_name)] = serialize_json(dict(payload))
-    return merged
-
-
-def _remove_legacy_researcher_overrides(
-    existing: Any,
-    field_names: set[str],
-) -> dict[str, Any] | None:
-    if not isinstance(existing, dict):
-        return existing
-
-    remaining = {
-        field_name: payload
-        for field_name, payload in existing.items()
-        if field_name not in field_names
-    }
-    return remaining or None
 
 
 def _override_payload_from_row(row: ResearcherOverride) -> dict[str, Any]:

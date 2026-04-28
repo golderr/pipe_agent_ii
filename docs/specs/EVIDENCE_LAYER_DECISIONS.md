@@ -337,7 +337,7 @@ This means: a government permit issued on 2026-03-15 that we pulled on 2026-04-0
 
 ### 16. Researcher Override Shape — Structured
 
-**Use `{field: {value, set_by, set_at, note}}` for `researcher_override`.**
+**Use `{field: {value, set_by, set_at, note}}` semantics for researcher overrides.**
 
 ```json
 {
@@ -356,9 +356,9 @@ This means: a government permit issued on 2026-03-15 that we pulled on 2026-04-0
 }
 ```
 
-The resolver reads `researcher_override[field]["value"]` and skips resolution for any field present. The metadata (`set_by`, `set_at`, `note`) is for audit trail and future UI rendering.
+The resolver reads active `researcher_overrides` rows and skips resolution for any field present. The metadata (`set_by`, `set_at`, `note`) is for audit trail and future UI rendering.
 
-The existing `researcher_override` column is already JSONB and nullable. No schema change needed — just document the expected shape and handle legacy null/unstructured values gracefully in the resolver (if `researcher_override` is a plain `{field: value}` dict, treat it as `{field: {value: value, set_by: "legacy", set_at: null, note: null}}`).
+Historical note: this originally used the nullable `projects.researcher_override` JSONB column. C.c promoted overrides into the `researcher_overrides` table, and C.tail.2 retired the legacy JSONB column after table-backed reads were verified.
 
 ### 17. Phase 2 Discrepancy Logging
 
@@ -489,7 +489,7 @@ Decisions:
 - `NEW_CANDIDATE` and `POSSIBLE_MATCH` accept actions relink all orphan evidence rows for the same `(logical source_type, source_record_id)` where `project_id IS NULL`.
 - Acceptance can target either an existing project or a newly created project stub.
 - `POSSIBLE_MATCH` acceptance links to the reviewer-selected project only.
-- `ReviewDecision.field_overrides` are merged into `Project.researcher_override` before `resolve_project(apply=True)` so Tier 0 overrides apply on first resolve.
+- `ReviewDecision.field_overrides` are written into `researcher_overrides` before `resolve_project(apply=True)` so Tier 0 overrides apply on first resolve.
 - Acceptance synchronously re-runs `resolve_project()` in the same transaction.
 - Resolver-driven field writes from acceptance create `ChangeLog` rows with `change_type = RESEARCHER_CONFIRMED`.
 - Acceptance also upserts a `ProjectSourceRecord` cache row so future collector reruns can source-record-match immediately instead of reopening discovery.
@@ -548,7 +548,7 @@ Decisions:
   1. `evidence_date`
   2. `collected_at`
   3. `source_tier`
-- Once an `until_newer_evidence` override loses to newer evidence during `resolve_project(apply=True)`, that field override is removed from `project.researcher_override`. It should emit a supersession flag once, not on every future resolve.
+- Historical supersession design: once an `until_newer_evidence` override lost to newer evidence during `resolve_project(apply=True)`, that field override would be removed and emit a supersession flag once, not on every future resolve.
 
 Backward compatibility:
 
@@ -647,7 +647,7 @@ Phase A apply surfaced a case where `canonicalize-developers --apply` rewrote a 
 
 Decisions:
 
-- `canonicalize-developers --apply` may continue to manage registry rows and aliases, but it must not rewrite `project.developer` when `project.researcher_override` contains a `developer` entry.
+- `canonicalize-developers --apply` may continue to manage registry rows and aliases, but it must not rewrite `project.developer` when `researcher_overrides` contains an active `developer` entry.
 - If the project later needs to reconcile that field, the resolution engine remains the source of truth because it understands override semantics and supersession.
 
 Rationale:
@@ -726,8 +726,7 @@ The priority of the contradiction review item reflects the strength of the contr
 
 - Existing overrides with `mode = sticky` are treated as review-protected (equivalent to the new default). Their baselines, if any, are preserved but no longer used as "yield thresholds."
 - Existing overrides with `mode = until_newer_evidence` are treated as review-protected. Their baselines are preserved for audit but are no longer the mechanism by which new evidence wins — new contradicting evidence now always generates a review item regardless of baseline comparison.
-- No data migration is required to adopt this behavior while overrides remain in the existing `Project.researcher_override` JSONB payload.
-- Phase C may still promote overrides into a `researcher_overrides` table for auditability and per-field indexing. That is a storage migration, not a prerequisite for the review-protected override semantics.
+- C.c promoted overrides into a `researcher_overrides` table for auditability and per-field indexing, and C.tail.2 removed the previous `Project.researcher_override` JSONB payload.
 - The `mode` field may continue to exist in override payloads for audit purposes but no longer determines resolution outcomes.
 
 #### 22.8 Interaction with STATUS_CHANGE rejection (§21a)

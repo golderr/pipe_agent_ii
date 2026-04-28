@@ -219,7 +219,7 @@ These exist on the `Project` schema but are not part of the 81-field Pipedream i
 
 | DB Field | Class | Notes |
 |---|---|---|
-| `researcher_override` (JSONB) | — | Deprecated once `researcher_overrides` table is live (`data_model_changes.md` §6.4). Not UI-editable directly; edited through field-level override UX. |
+| `researcher_overrides` | Child table | Active override storage (`data_model_changes.md` §6.4). The legacy `projects.researcher_override` JSONB column was retired in C.tail.2. |
 
 ### 3.8 Additional identifiers and relationships
 

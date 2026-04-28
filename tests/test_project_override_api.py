@@ -150,7 +150,6 @@ def test_clear_project_override_marks_row_cleared_resolves_and_logs(
     assert body["old_value"] == 212
     assert body["resolved_value"] == 100
     assert project.total_units == 100
-    assert project.researcher_override is None
     assert override.cleared_at is not None
     assert override.cleared_by_user_id == USER_ID
     assert change_log_values == [(100, 212), (212, 100)]

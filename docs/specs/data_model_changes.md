@@ -378,7 +378,7 @@ ALTER TABLE review_items ADD COLUMN contradiction_priority TEXT;
 
 ### 6.4 Researcher overrides — promote to table (recommended)
 
-Currently `project.researcher_override` is a JSONB column. For review-protected semantics, it is easier to FK to an explicit table and track per-override history (set-at, set-by, cleared-at, re-affirmed-at, notes per override).
+Pre-Phase-C storage used `project.researcher_override` as a JSONB column. For review-protected semantics, Phase C promoted overrides into an explicit table to track per-override history (set-at, set-by, cleared-at, re-affirmed-at, notes per override).
 
 ```sql
 CREATE TABLE researcher_overrides (
@@ -403,7 +403,7 @@ CREATE INDEX ix_researcher_overrides_project_id_active ON researcher_overrides(p
 CREATE UNIQUE INDEX uq_researcher_overrides_active_field ON researcher_overrides(project_id, field_name) WHERE cleared_at IS NULL;
 ```
 
-Migration: extract current JSONB overrides into rows in this table. During C.c, keep the legacy `projects.researcher_override` JSONB column synchronized for existing read-only UI surfaces and verification. Drop the JSONB column only after the table-backed write/read paths are verified. Resolution engine reads active rows from the new table first, with a legacy JSONB fallback during the transition.
+Migration: extract current JSONB overrides into rows in this table. During C.c, the legacy `projects.researcher_override` JSONB column stayed synchronized for existing read-only UI surfaces and verification. C.tail.2 completed the cutover: table-backed write/read paths are now authoritative, the resolver no longer has a legacy JSONB fallback, and Alembic `202604280017` drops the legacy column after a preflight parity check.
 
 ### 6.5 Contradiction detection
 
@@ -564,7 +564,7 @@ Notes are never updated or deleted; corrections are new rows. The UI shows the m
 
 ### 10.1 Current state
 
-`projects` already has:
+Before C.tail.3, `projects` had legacy latest-note columns:
 - `researcher_notes` TEXT
 - `personal_notes` TEXT
 - `change_notes` TEXT
@@ -586,11 +586,11 @@ CREATE TABLE project_notes (
 CREATE INDEX ix_project_notes_project_id_type_created_at ON project_notes(project_id, note_type, created_at DESC);
 ```
 
-Migrate existing `researcher_notes`, `personal_notes`, `change_notes` strings into `project_notes` rows with a synthetic author (e.g., a system user ID or NULL) and `created_at = projects.created_at`. Drop the original columns.
+Migrate existing `researcher_notes`, `personal_notes`, `change_notes` strings into `project_notes` rows with a synthetic author (e.g., a system user ID or NULL) and `created_at = projects.created_at`. C.tail.3 completes this path with Alembic `202604280017`, which drops the original columns after checking that non-empty legacy values match the latest `project_notes` row per note type.
 
 ### 10.3 Option B: Keep existing columns + add history
 
-Keep `projects.researcher_notes` etc. as the "latest note" display value, and add `project_note_history` for the append-only audit. More redundant but backward-compatible.
+C.e temporarily kept `projects.researcher_notes` etc. as the "latest note" display value while `project_notes` history came online. C.tail.3 retires this redundant storage; latest-note previews are derived from `project_notes`.
 
 **Recommend Option A** — cleaner, matches the append-only model in the UI, no double-storage.
 

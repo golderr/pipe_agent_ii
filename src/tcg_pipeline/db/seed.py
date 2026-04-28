@@ -202,6 +202,13 @@ def persist_pipedream_import_results(
         dismissed_to_insert.append(dismissed_record)
 
     session.add_all([project_record.project for project_record in projects_to_insert])
+    session.add_all(
+        [
+            project_note
+            for project_record in projects_to_insert
+            for project_note in project_record.project_notes
+        ]
+    )
     session.add_all(dismissed_to_insert)
     session.flush()
 

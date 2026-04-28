@@ -191,7 +191,7 @@ ALTER TABLE projects ADD COLUMN inclusion_note VARCHAR(255);
 
 The existing `status_confidence` column can be aliased or eventually migrated to `confidence`. They represent the same concept — just broadened from status-only to overall project confidence.
 
-The existing `researcher_override` JSONB column maps directly to the "Tier 0 override" concept — no change needed there.
+Researcher overrides map to the "Tier 0 override" concept. Phase C stores them in the `researcher_overrides` table; the older `projects.researcher_override` JSONB column was retired in C.tail.2.
 
 ---
 
@@ -279,9 +279,8 @@ def resolve_project(project_id: UUID, session: Session) -> dict[str, Any]:
     resolved['confidence'] = compute_overall_confidence(resolved, evidence)
 
     # Apply researcher overrides (Tier 0 — never clobbered)
-    if project.researcher_override:
-        for field, value in project.researcher_override.items():
-            resolved[field] = value
+    for field, value in active_researcher_overrides(project.id).items():
+        resolved[field] = value
 
     # Diff against current, log changes, update project
     changes = diff_and_apply(project, resolved, session)
