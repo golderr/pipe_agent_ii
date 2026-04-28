@@ -376,6 +376,12 @@ the caller's staged decision and returns the item to `state = open`.
 payloads. The legacy `field_overrides` column is still dual-written for
 transition compatibility and should not be used by new Review Queue code.
 
+`GET /review/queue` and `GET /review/queue/{item_id}` include
+`field_name`, `winning_evidence_id`, and `evidence_summaries[]` for consolidated
+decision cards. Each evidence summary includes source metadata, the backend
+snippet summary, extracted value, `supporting` / `against` / `silent` stance,
+and `is_winning`.
+
 `commit` applies the caller's non-deferred staged decisions in one transaction:
 
 ```json

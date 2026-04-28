@@ -379,7 +379,7 @@ Phase B read surfaces use Supabase PostgREST directly with RLS. The FastAPI surf
 
 Per `ui_requirements.md` §10.2, every evidence row has a source-type-specific renderer that produces human-readable content. These are backend functions called **on demand only**; they are **not** stored in `review_items.payload`. Two read-time use cases:
 
-1. **Inline summary line** (queue cards) — a single-line ~80-char string (`summary_line()` per renderer) returned by the queue API for each evidence row in `payload.evidence_ids`. The queue card uses these to render the support/against rows without per-row round-trips. Per `C.tail.11`, the queue API caps inline hydration at top 5 supporting + top 5 against per item plus totals.
+1. **Inline summary line** (queue cards) — a server-rendered summary string returned by the queue API for each evidence row in `payload.evidence_ids`. C.tail.12 reuses each renderer's existing `render_snippet(...).summary` output, so the client never duplicates source-specific snippet logic.
 2. **Full snippet payload** (detail page, hover popovers) — the structured `SnippetPayload` in §7.3. Lazy-loaded via the existing `GET /evidence/{id}/snippet?field={field_name}` endpoint when the user expands a card or opens the detail view.
 
 ### 7.2 Renderer registry
@@ -409,11 +409,9 @@ def render_snippet(evidence: Evidence, field_name: str) -> SnippetPayload:
     return renderer(evidence, field_name)
 
 def render_summary_line(evidence: Evidence, field_name: str) -> str:
-    """Single-line ~80-char summary used in queue card support/against rows.
-    Per C.tail.11: each renderer exposes summary_line() in addition to the
-    full SnippetPayload renderer. Client never duplicates this logic."""
-    renderer = SNIPPET_RENDERERS.get(evidence.source_type, SNIPPET_RENDERERS['*'])
-    return renderer.summary_line(evidence, field_name)
+    """Summary used in queue card support/against rows.
+    C.tail.12 derives this from the existing full snippet renderer."""
+    return render_snippet(evidence, field_name).summary
 ```
 
 ### 7.3 Output shape

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.deps import get_db_session, require_user
@@ -15,9 +16,10 @@ from tcg_pipeline.api.schemas import (
     ReviewDecisionStageRequest,
     ReviewDecisionStageResponse,
     ReviewDecisionSummary,
+    ReviewEvidenceSummary,
     ReviewQueueItemResponse,
 )
-from tcg_pipeline.db.models import Priority, Project, ReviewDecision, ReviewItem
+from tcg_pipeline.db.models import Evidence, Priority, Project, ReviewDecision, ReviewItem
 from tcg_pipeline.db.review_workflow import (
     REVIEW_DECISION_STATE_COMMITTED,
     REVIEW_DECISION_STATE_STAGED,
@@ -34,6 +36,13 @@ from tcg_pipeline.db.review_workflow import (
 from tcg_pipeline.db.review_workflow import (
     unstage_review_decision as unstage_review_decision_value,
 )
+from tcg_pipeline.review.contradictions import values_contradict
+from tcg_pipeline.review.decision_cards import (
+    evidence_ids_for_payload,
+    field_name_for_payload,
+    proposed_value_for_payload,
+)
+from tcg_pipeline.review.snippets import render_snippet
 
 router = APIRouter(prefix="/review", tags=["review"])
 AUTH_USER = Depends(require_user)
@@ -71,7 +80,8 @@ def list_review_queue(
         )
     statement = statement.limit(limit)
     items = session.execute(statement).scalars().all()
-    return [_serialize_review_item(item) for item in items]
+    evidence_by_id = _evidence_by_id_for_items(session, items)
+    return [_serialize_review_item(item, evidence_by_id=evidence_by_id) for item in items]
 
 
 @router.get("/queue/{item_id}")
@@ -83,7 +93,8 @@ def get_review_item(
     review_item = session.get(ReviewItem, item_id)
     if review_item is None:
         raise HTTPException(status_code=404, detail="Review item not found.")
-    return _serialize_review_item(review_item)
+    evidence_by_id = _evidence_by_id_for_items(session, [review_item])
+    return _serialize_review_item(review_item, evidence_by_id=evidence_by_id)
 
 
 @router.post("/{item_id}/decide")
@@ -186,7 +197,11 @@ def _serialize_stage_result(result) -> ReviewDecisionStageResponse:
     )
 
 
-def _serialize_review_item(review_item: ReviewItem) -> ReviewQueueItemResponse:
+def _serialize_review_item(
+    review_item: ReviewItem,
+    *,
+    evidence_by_id: dict[uuid.UUID, Evidence] | None = None,
+) -> ReviewQueueItemResponse:
     active_decision = _active_decision_for_item(review_item)
     return ReviewQueueItemResponse(
         id=review_item.id,
@@ -205,6 +220,10 @@ def _serialize_review_item(review_item: ReviewItem) -> ReviewQueueItemResponse:
         resolved_at=review_item.resolved_at.isoformat() if review_item.resolved_at else None,
         resolved_by=review_item.resolved_by,
         active_decision=_serialize_decision(active_decision),
+        evidence_summaries=_serialize_evidence_summaries(
+            review_item,
+            evidence_by_id=evidence_by_id or {},
+        ),
     )
 
 
@@ -254,6 +273,97 @@ def _serialize_decision(decision: ReviewDecision | None) -> ReviewDecisionSummar
         decision_notes=decision.decision_notes,
         source_url=decision.source_url,
     )
+
+
+def _evidence_by_id_for_items(
+    session: Session,
+    items: list[ReviewItem],
+) -> dict[uuid.UUID, Evidence]:
+    evidence_ids: set[uuid.UUID] = set()
+    for item in items:
+        payload = item.payload if isinstance(item.payload, dict) else {}
+        for evidence_id in evidence_ids_for_payload(payload):
+            try:
+                evidence_ids.add(uuid.UUID(str(evidence_id)))
+            except ValueError:
+                continue
+    if not evidence_ids:
+        return {}
+    rows = session.execute(
+        select(Evidence).where(Evidence.id.in_(sorted(evidence_ids, key=str)))
+    ).scalars().all()
+    return {row.id: row for row in rows}
+
+
+def _serialize_evidence_summaries(
+    review_item: ReviewItem,
+    *,
+    evidence_by_id: dict[uuid.UUID, Evidence],
+) -> list[ReviewEvidenceSummary]:
+    payload = review_item.payload if isinstance(review_item.payload, dict) else {}
+    field_name = review_item.field_name or field_name_for_payload(review_item.item_type, payload)
+    proposed_value = proposed_value_for_payload(payload, field_name)
+    summaries: list[ReviewEvidenceSummary] = []
+    for raw_evidence_id in evidence_ids_for_payload(payload):
+        try:
+            evidence_id = uuid.UUID(str(raw_evidence_id))
+        except ValueError:
+            continue
+        evidence = evidence_by_id.get(evidence_id)
+        if evidence is None:
+            continue
+        snippet = render_snippet(evidence, field_name=field_name)
+        extracted_value = _extracted_value(evidence, field_name)
+        summaries.append(
+            ReviewEvidenceSummary(
+                evidence_id=evidence.id,
+                stance=_evidence_stance(
+                    field_name=field_name,
+                    proposed_value=proposed_value,
+                    extracted_value=extracted_value,
+                    session=object_session(evidence) or None,
+                ),
+                is_winning=evidence.id == review_item.winning_evidence_id,
+                source_type=evidence.source_type,
+                source_tier=evidence.source_tier,
+                source_record_id=evidence.source_record_id,
+                evidence_date=(
+                    evidence.evidence_date.isoformat() if evidence.evidence_date else None
+                ),
+                collected_at=evidence.collected_at.isoformat(),
+                summary=snippet.summary,
+                extracted_value=snippet.fields.extracted_value,
+            )
+        )
+    return summaries
+
+
+def _evidence_stance(
+    *,
+    field_name: str | None,
+    proposed_value: Any,
+    extracted_value: Any,
+    session: Session | None,
+) -> str:
+    if field_name is None or extracted_value is None:
+        return "silent"
+    return (
+        "against"
+        if values_contradict(field_name, proposed_value, extracted_value, session=session)
+        else "supporting"
+    )
+
+
+def _extracted_value(evidence: Evidence, field_name: str | None) -> Any:
+    if field_name is None:
+        return None
+    extracted_fields = (
+        evidence.extracted_fields if isinstance(evidence.extracted_fields, dict) else {}
+    )
+    payload = extracted_fields.get(field_name)
+    if isinstance(payload, dict):
+        return payload.get("value")
+    return payload
 
 
 def _clean_state(state: str) -> str:

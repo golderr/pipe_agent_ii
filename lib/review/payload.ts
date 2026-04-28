@@ -128,6 +128,18 @@ export function sourceTextForItem(item: ReviewQueueItem) {
   return source;
 }
 
+export function supportingEvidenceForItem(item: ReviewQueueItem) {
+  return item.evidenceSummaries.filter((evidence) => evidence.stance === "supporting");
+}
+
+export function dissentingEvidenceForItem(item: ReviewQueueItem) {
+  return item.evidenceSummaries.filter((evidence) => evidence.stance === "against");
+}
+
+export function winningEvidenceForItem(item: ReviewQueueItem) {
+  return item.evidenceSummaries.find((evidence) => evidence.isWinning) ?? null;
+}
+
 export function warningForItem(item: ReviewQueueItem) {
   const payload = item.payload;
   const flags = asRecordArray(payload?.review_flags);

@@ -56,6 +56,20 @@ type ReviewQueueItemApi = {
   resolved_at: string | null;
   resolved_by: string | null;
   active_decision: ReviewDecisionApi | null;
+  evidence_summaries?: ReviewEvidenceSummaryApi[];
+};
+
+type ReviewEvidenceSummaryApi = {
+  evidence_id: string;
+  stance: "supporting" | "against" | "silent";
+  is_winning: boolean;
+  source_type: string;
+  source_tier: number;
+  source_record_id: string | null;
+  evidence_date: string | null;
+  collected_at: string;
+  summary: string;
+  extracted_value: unknown;
 };
 
 type RawProject = {
@@ -399,7 +413,19 @@ function mapReviewItem(item: ReviewQueueItemApi): ReviewQueueItem {
     createdAt: item.created_at,
     resolvedAt: item.resolved_at,
     resolvedBy: item.resolved_by,
-    activeDecision: item.active_decision ? mapDecision(item.active_decision) : null
+    activeDecision: item.active_decision ? mapDecision(item.active_decision) : null,
+    evidenceSummaries: (item.evidence_summaries ?? []).map((evidence) => ({
+      evidenceId: evidence.evidence_id,
+      stance: evidence.stance,
+      isWinning: evidence.is_winning,
+      sourceType: evidence.source_type,
+      sourceTier: evidence.source_tier,
+      sourceRecordId: evidence.source_record_id,
+      evidenceDate: evidence.evidence_date,
+      collectedAt: evidence.collected_at,
+      summary: evidence.summary,
+      extractedValue: evidence.extracted_value
+    }))
   };
 }
 

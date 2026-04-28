@@ -30,6 +30,20 @@ export type ReviewQueueItem = {
   resolvedAt: string | null;
   resolvedBy: string | null;
   activeDecision: ReviewDecisionSummary | null;
+  evidenceSummaries: ReviewEvidenceSummary[];
+};
+
+export type ReviewEvidenceSummary = {
+  evidenceId: string;
+  stance: "supporting" | "against" | "silent";
+  isWinning: boolean;
+  sourceType: string;
+  sourceTier: number;
+  sourceRecordId: string | null;
+  evidenceDate: string | null;
+  collectedAt: string;
+  summary: string;
+  extractedValue: unknown;
 };
 
 export type ReviewProjectSummary = {

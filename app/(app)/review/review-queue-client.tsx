@@ -6,11 +6,13 @@ import {
   AlertCircle,
   ArrowRight,
   Check,
+  ChevronDown,
   ExternalLink,
   GitCompareArrows,
   ListChecks,
   RotateCcw,
-  Save
+  Save,
+  Star
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import {
@@ -26,6 +28,7 @@ import {
   candidateProjectIdsForItem,
   candidateValuesForItem,
   currentValueForItem,
+  dissentingEvidenceForItem,
   displayActor,
   fieldNameForItem,
   formatDate,
@@ -36,6 +39,7 @@ import {
   isStagedByOther,
   proposedValueForItem,
   sourceTextForItem,
+  supportingEvidenceForItem,
   warningForItem
 } from "@/lib/review/payload";
 import {
@@ -49,6 +53,7 @@ import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type {
   ReviewProjectSummary,
+  ReviewEvidenceSummary,
   ReviewQueueData,
   ReviewQueueItem,
   ReviewSourceRunSummary
@@ -876,6 +881,8 @@ function ReviewItemRow({
   const candidates = candidateValuesForItem(item);
   const matchCandidates = possibleMatchCandidateProjects(item, projects);
   const warningText = warningForItem(item);
+  const supportingEvidence = supportingEvidenceForItem(item);
+  const dissentingEvidence = dissentingEvidenceForItem(item);
 
   return (
     <article
@@ -929,6 +936,13 @@ function ReviewItemRow({
             <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               <GitCompareArrows className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
               <p>{warningText}</p>
+            </div>
+          ) : null}
+
+          {supportingEvidence.length || dissentingEvidence.length ? (
+            <div className="mt-3 grid gap-2 lg:grid-cols-2">
+              <EvidenceSummarySection label="Supporting" rows={supportingEvidence} defaultOpen />
+              <EvidenceSummarySection label="Against" rows={dissentingEvidence} />
             </div>
           ) : null}
 
@@ -1031,6 +1045,76 @@ function ReviewItemRow({
         </div>
       </div>
     </article>
+  );
+}
+
+function EvidenceSummarySection({
+  label,
+  rows,
+  defaultOpen = false
+}: {
+  label: string;
+  rows: ReviewEvidenceSummary[];
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const visibleRows = rows.slice(0, 5);
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-semibold text-slate-700"
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((value) => !value);
+        }}
+      >
+        <span>
+          {label} ({rows.length})
+        </span>
+        <ChevronDown
+          className={cn("size-3.5 transition-transform", open && "rotate-180")}
+          aria-hidden="true"
+        />
+      </button>
+      {open ? (
+        <div className="border-t border-slate-200 bg-white">
+          {visibleRows.length ? (
+            visibleRows.map((row) => <EvidenceSummaryRow key={row.evidenceId} row={row} />)
+          ) : (
+            <p className="px-3 py-2 text-xs text-slate-500">No evidence in this bucket.</p>
+          )}
+          {rows.length > visibleRows.length ? (
+            <p className="border-t border-slate-100 px-3 py-2 text-xs text-slate-500">
+              {rows.length - visibleRows.length} more in detail view.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function EvidenceSummaryRow({ row }: { row: ReviewEvidenceSummary }) {
+  return (
+    <div className="border-b border-slate-100 px-3 py-2 text-xs last:border-b-0">
+      <div className="flex items-start gap-2">
+        {row.isWinning ? (
+          <Star className="mt-0.5 size-3.5 shrink-0 fill-amber-400 text-amber-500" aria-hidden="true" />
+        ) : (
+          <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-slate-300" />
+        )}
+        <div className="min-w-0">
+          <p className="break-words font-medium text-slate-800">{row.summary}</p>
+          <p className="mt-0.5 text-slate-500">
+            {humanize(row.sourceType)}
+            {row.evidenceDate ? ` - ${formatDate(row.evidenceDate)}` : ""}
+            {row.isWinning ? " - winning" : ""}
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 

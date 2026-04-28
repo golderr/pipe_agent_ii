@@ -6,12 +6,14 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  ChevronDown,
   Check,
   Clock,
   ExternalLink,
   GitCompareArrows,
   RotateCcw,
-  Save
+  Save,
+  Star
 } from "lucide-react";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
@@ -24,6 +26,7 @@ import {
   acceptDecisionValue,
   asString,
   currentValueForItem,
+  dissentingEvidenceForItem,
   displayActor,
   fieldNameForItem,
   flattenPayload,
@@ -36,12 +39,14 @@ import {
   isStagedByOther,
   proposedValueForItem,
   sourceTextForItem,
+  supportingEvidenceForItem,
   warningForItem
 } from "@/lib/review/payload";
 import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type {
   ReviewItemDetailData,
+  ReviewEvidenceSummary,
   ReviewProcessedChange,
   ReviewProjectSummary,
   ReviewQueueItem
@@ -80,6 +85,8 @@ export function ReviewItemDetailClient({
   const sourceLabel = sourceRun
     ? `${sourceRun.sourceName} - ${formatDate(sourceRun.finishedAt ?? sourceRun.runTimestamp)}`
     : sourceTextForItem(item);
+  const supportingEvidence = supportingEvidenceForItem(item);
+  const dissentingEvidence = dissentingEvidenceForItem(item);
   const payloadRows = useMemo(() => flattenPayload(item.payload), [item.payload]);
   const queueHref = reviewQueueHref(navigation.jurisdictionId);
   const previousHref = navigation.previousItemId
@@ -222,6 +229,16 @@ export function ReviewItemDetailClient({
             ) : null}
           </section>
 
+          {supportingEvidence.length || dissentingEvidence.length ? (
+            <section className="rounded-md border border-slate-200 bg-white p-4">
+              <h2 className="text-sm font-semibold text-slate-950">Evidence Context</h2>
+              <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                <EvidenceDetailSection label="Supporting" rows={supportingEvidence} defaultOpen />
+                <EvidenceDetailSection label="Against" rows={dissentingEvidence} defaultOpen />
+              </div>
+            </section>
+          ) : null}
+
           {item.itemType === "possible_match" && candidateProjects.length ? (
             <section className="rounded-md border border-slate-200 bg-white p-4">
               <h2 className="text-sm font-semibold text-slate-950">Candidate Projects</h2>
@@ -363,6 +380,72 @@ export function ReviewItemDetailClient({
         </aside>
       </div>
     </main>
+  );
+}
+
+function EvidenceDetailSection({
+  label,
+  rows,
+  defaultOpen = false
+}: {
+  label: string;
+  rows: ReviewEvidenceSummary[];
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-md border border-slate-200">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-2 bg-slate-50 px-3 py-2 text-left text-sm font-medium text-slate-800"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span>
+          {label} ({rows.length})
+        </span>
+        <ChevronDown
+          className={cn("size-4 transition-transform", open && "rotate-180")}
+          aria-hidden="true"
+        />
+      </button>
+      {open ? (
+        <div className="divide-y divide-slate-100">
+          {rows.length ? (
+            rows.map((row) => <EvidenceDetailRow key={row.evidenceId} row={row} />)
+          ) : (
+            <p className="px-3 py-3 text-sm text-slate-500">No evidence in this bucket.</p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function EvidenceDetailRow({ row }: { row: ReviewEvidenceSummary }) {
+  return (
+    <div className="px-3 py-3 text-sm">
+      <div className="flex items-start gap-2">
+        {row.isWinning ? (
+          <Star className="mt-0.5 size-4 shrink-0 fill-amber-400 text-amber-500" aria-hidden="true" />
+        ) : (
+          <span className="mt-2 size-1.5 shrink-0 rounded-full bg-slate-300" />
+        )}
+        <div className="min-w-0">
+          <p className="break-words font-medium text-slate-950">{row.summary}</p>
+          <p className="mt-1 text-xs text-slate-500">
+            {humanize(row.sourceType)}
+            {row.evidenceDate ? ` - ${formatDate(row.evidenceDate)}` : ""}
+            {row.sourceRecordId ? ` - ${row.sourceRecordId}` : ""}
+            {row.isWinning ? " - winning evidence" : ""}
+          </p>
+          {row.extractedValue !== null && row.extractedValue !== undefined ? (
+            <p className="mt-2 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+              {formatValue(row.extractedValue)}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </div>
   );
 }
 

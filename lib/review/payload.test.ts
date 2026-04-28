@@ -4,6 +4,7 @@ import {
   candidateProjectIdsForItem,
   candidateValuesForItem,
   currentValueForItem,
+  dissentingEvidenceForItem,
   displayActor,
   fieldNameForItem,
   flattenPayload,
@@ -12,7 +13,9 @@ import {
   newProjectDataForItem,
   proposedValueForItem,
   sourceTextForItem,
-  warningForItem
+  supportingEvidenceForItem,
+  warningForItem,
+  winningEvidenceForItem
 } from "./payload";
 import type { ReviewQueueItem } from "./types";
 
@@ -34,6 +37,7 @@ function reviewItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
     resolvedAt: null,
     resolvedBy: null,
     activeDecision: null,
+    evidenceSummaries: [],
     ...overrides
   };
 }
@@ -199,5 +203,44 @@ describe("review payload helpers", () => {
 
   it("formats date-only values as their calendar day", () => {
     expect(formatDate("2026-04-26")).toBe("Apr 26, 2026");
+  });
+
+  it("groups evidence summaries by stance", () => {
+    const item = reviewItem({
+      evidenceSummaries: [
+        {
+          evidenceId: "evidence-1",
+          stance: "supporting",
+          isWinning: true,
+          sourceType: "ladbs_permit",
+          sourceTier: 1,
+          sourceRecordId: "permit-1",
+          evidenceDate: "2026-04-01",
+          collectedAt: "2026-04-02T00:00:00Z",
+          summary: "Permit evidence",
+          extractedValue: "Approved"
+        },
+        {
+          evidenceId: "evidence-2",
+          stance: "against",
+          isWinning: false,
+          sourceType: "costar",
+          sourceTier: 3,
+          sourceRecordId: "costar-1",
+          evidenceDate: "2026-03-01",
+          collectedAt: "2026-03-02T00:00:00Z",
+          summary: "CoStar evidence",
+          extractedValue: "Pending"
+        }
+      ]
+    });
+
+    expect(supportingEvidenceForItem(item).map((evidence) => evidence.evidenceId)).toEqual([
+      "evidence-1"
+    ]);
+    expect(dissentingEvidenceForItem(item).map((evidence) => evidence.evidenceId)).toEqual([
+      "evidence-2"
+    ]);
+    expect(winningEvidenceForItem(item)?.evidenceId).toBe("evidence-1");
   });
 });

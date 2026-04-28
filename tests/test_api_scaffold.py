@@ -436,6 +436,7 @@ def test_review_queue_serializes_committed_decision_for_reviewed_tab() -> None:
     assert serialized.state == "committed"
     assert serialized.field_name == "total_units"
     assert serialized.winning_evidence_id is None
+    assert serialized.evidence_summaries == []
     assert serialized.active_decision is not None
     assert serialized.active_decision.decision_id == decision_id
     assert serialized.active_decision.state == "committed"

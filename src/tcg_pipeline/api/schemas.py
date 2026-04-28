@@ -172,6 +172,19 @@ class ReviewDecisionSummary(BaseModel):
     source_url: str | None
 
 
+class ReviewEvidenceSummary(BaseModel):
+    evidence_id: uuid.UUID
+    stance: str
+    is_winning: bool
+    source_type: str
+    source_tier: int
+    source_record_id: str | None
+    evidence_date: str | None
+    collected_at: str
+    summary: str
+    extracted_value: Any | None
+
+
 class ReviewQueueItemResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID | None
@@ -189,6 +202,7 @@ class ReviewQueueItemResponse(BaseModel):
     resolved_at: str | None
     resolved_by: str | None
     active_decision: ReviewDecisionSummary | None
+    evidence_summaries: list[ReviewEvidenceSummary] = []
 
 
 class ReviewCommitRequest(BaseModel):
