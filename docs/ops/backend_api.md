@@ -282,8 +282,25 @@ database session.
 True merge into an existing project is not implemented in C.g.
 
 C.g does not collect APNs, permit/case identifiers, or source URLs at creation
-time. Concurrent duplicate creation is guarded by the matcher but not by a
-database unique constraint.
+time. Alembic `202604280016` adds a partial unique index on
+`projects(market_id, canonical_address)` for rows with a non-null `market_id`.
+If two manual creates race past the application-level matcher, the losing insert
+is translated into the same `created = false` duplicate-candidate response
+instead of a 500.
+
+Before applying `202604280016` to a persistent environment, check for existing
+duplicates:
+
+```sql
+SELECT market_id, canonical_address, COUNT(*) AS duplicate_count, ARRAY_AGG(id) AS project_ids
+FROM projects
+WHERE market_id IS NOT NULL
+GROUP BY market_id, canonical_address
+HAVING COUNT(*) > 1;
+```
+
+The migration also runs this preflight and fails before creating the index if
+duplicates are still present.
 
 ## C.h Review Staging + Commit
 

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -277,6 +278,71 @@ def test_create_project_force_creates_despite_duplicate(postgres_session: Sessio
     assert body["project_id"] is not None
     assert body["duplicate_candidates"][0]["project_id"] == str(existing.id)
     assert project_count == 2
+
+
+def test_create_project_force_returns_duplicate_when_unique_lock_loses(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    market, jurisdiction = _market_and_jurisdiction("race")
+    existing = _project(
+        "321 WEST RACE STREET LOS ANGELES CA 90012",
+        market=market,
+        jurisdiction=jurisdiction,
+        project_name="Race Winner",
+    )
+    postgres_session.add_all([market, jurisdiction, existing])
+    postgres_session.flush()
+    original_flush = postgres_session.flush
+
+    def fake_flush(*args: object, **kwargs: object) -> None:
+        pending_duplicate = any(
+            isinstance(obj, Project)
+            and obj is not existing
+            and obj.canonical_address == existing.canonical_address
+            and obj.market_id == market.id
+            for obj in postgres_session.new
+        )
+        if pending_duplicate:
+            raise IntegrityError(
+                "INSERT",
+                {},
+                Exception("uq_projects_market_id_canonical_address"),
+            )
+        original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(postgres_session, "flush", fake_flush)
+    client = _client(postgres_session)
+
+    response = client.post(
+        "/projects",
+        json={
+            "canonical_address": "321 W Race St",
+            "market_id": str(market.id),
+            "jurisdiction_id": str(jurisdiction.id),
+            "zip": "90012",
+            "force_create": True,
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    project_count = len(
+        postgres_session.execute(
+            select(Project).where(Project.market_id == market.id)
+        ).scalars().all()
+    )
+
+    assert body["created"] is False
+    assert body["project_id"] is None
+    assert body["canonical_address"] == existing.canonical_address
+    assert body["duplicate_candidates"][0]["project_id"] == str(existing.id)
+    assert body["duplicate_candidates"][0]["match_type"] == "address"
+    assert body["change_log_entries_created"] == 0
+    assert body["geocoding"] is None
+    assert project_count == 1
 
 
 def test_create_project_rejects_jurisdiction_from_other_market(

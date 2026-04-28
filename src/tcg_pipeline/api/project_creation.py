@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -30,6 +31,8 @@ from tcg_pipeline.geocoding.types import GeocodeAddress, GeocodeResult, ProjectG
 from tcg_pipeline.ingesters._common import build_location
 from tcg_pipeline.matching.matcher import match_raw_record
 from tcg_pipeline.matching.normalizer import normalize_address
+
+PROJECT_ADDRESS_UNIQUE_INDEX = "uq_projects_market_id_canonical_address"
 
 
 def create_project(
@@ -137,8 +140,25 @@ def create_project(
         last_editor=actor[:50],
         last_edit_date=now.date(),
     )
-    session.add(project)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.add(project)
+            session.flush()
+    except IntegrityError as exc:
+        if not _is_project_address_unique_conflict(exc):
+            raise
+        duplicate_candidates = _load_duplicate_candidates_for_address(
+            session,
+            market_id=market.id,
+            canonical_address=normalized_address.canonical_address,
+        )
+        return ProjectCreateResponse(
+            created=False,
+            project_id=None,
+            canonical_address=normalized_address.canonical_address,
+            duplicate_candidates=duplicate_candidates,
+            change_log_entries_created=0,
+        )
     session.add(
         StatusHistory(
             project_id=project.id,
@@ -214,6 +234,40 @@ def _load_duplicate_candidates(
             )
         )
     return candidates
+
+
+def _load_duplicate_candidates_for_address(
+    session: Session,
+    *,
+    market_id: uuid.UUID,
+    canonical_address: str,
+) -> list[ProjectCreateCandidate]:
+    project_ids = (
+        session.execute(
+            select(Project.id).where(
+                Project.market_id == market_id,
+                Project.canonical_address == canonical_address,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return _load_duplicate_candidates(
+        session,
+        project_ids=list(project_ids),
+        match_type="address",
+        confidence=0.9,
+    )
+
+
+def _is_project_address_unique_conflict(exc: IntegrityError) -> bool:
+    diag = getattr(exc.orig, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    if constraint_name == PROJECT_ADDRESS_UNIQUE_INDEX:
+        return True
+    return PROJECT_ADDRESS_UNIQUE_INDEX in str(exc.orig) or PROJECT_ADDRESS_UNIQUE_INDEX in str(
+        exc
+    )
 
 
 def _write_project_created_change_log(
