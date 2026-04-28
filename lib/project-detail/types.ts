@@ -150,6 +150,11 @@ export type ProjectDetailData = {
     lastEvidenceDate: string | null;
     evidenceCount: number;
     openReviewCount: number;
+    inclusion: {
+      inAnalysis: boolean;
+      inExhibit: boolean;
+      note: string | null;
+    };
   };
   sections: ProjectDetailSection[];
   evidenceRows: ProjectEvidenceRow[];

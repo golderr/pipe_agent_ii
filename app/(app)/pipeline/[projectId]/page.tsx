@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { AlertCircle, ArrowLeft, ChevronRight, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
 import { FieldEditControl } from "./field-edit-control";
+import { InclusionFlagsControl } from "./inclusion-flags-control";
 import { RelationshipPicker } from "./relationship-picker";
 import { getProjectDetailData } from "@/lib/project-detail/data";
 import { compactStatus, statusStyle } from "@/lib/status";
@@ -10,6 +11,7 @@ import type {
   EvidenceSummary,
   FieldClass,
   ProjectChangeLogRow,
+  ProjectDetailData,
   ProjectDetailSection,
   ProjectEvidenceFilterOption,
   ProjectEvidenceFilters,
@@ -321,7 +323,12 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
       ) : activeTab === "overrides" ? (
         <OverridesTab overrideRows={overrideRows} />
       ) : (
-        <SnapshotTab projectId={project.id} relationshipRows={relationshipRows} sections={sections} />
+        <SnapshotTab
+          inclusion={project.inclusion}
+          projectId={project.id}
+          relationshipRows={relationshipRows}
+          sections={sections}
+        />
       )}
     </main>
   );
@@ -346,10 +353,12 @@ function DetailTabLink({ active, href, label }: { active: boolean; href: string;
 }
 
 function SnapshotTab({
+  inclusion,
   projectId,
   relationshipRows,
   sections
 }: {
+  inclusion: ProjectDetailData["project"]["inclusion"];
   projectId: string;
   relationshipRows: ProjectRelationshipRow[];
   sections: ProjectDetailSection[];
@@ -375,23 +384,27 @@ function SnapshotTab({
         ))}
       </div>
 
-      <aside className="h-fit rounded-md border border-slate-200 bg-white p-4">
-        <h2 className="text-sm font-semibold text-slate-950">Snapshot Legend</h2>
-        <div className="mt-3 space-y-3 text-sm">
-          <LegendItem className="bg-amber-50 text-amber-900" label="In review batch" />
-          <LegendItem className="bg-white text-slate-700" label="Unchanged" />
-          <LegendItem className="bg-slate-50 text-slate-700" label="Class-specific editing" />
-        </div>
-        <div className="mt-4 border-t border-slate-200 pt-3">
-          <p className="text-xs font-medium uppercase text-slate-500">Source badges</p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {(["gov", "news", "costar", "pipedream", "user", "system"] as SourceBadge["tone"][]).map((tone) => (
-              <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[tone])} key={tone}>
-                {tone}
-              </span>
-            ))}
+      <aside className="space-y-5">
+        <InclusionFlagsControl inclusion={inclusion} projectId={projectId} />
+
+        <section className="rounded-md border border-slate-200 bg-white p-4">
+          <h2 className="text-sm font-semibold text-slate-950">Snapshot Legend</h2>
+          <div className="mt-3 space-y-3 text-sm">
+            <LegendItem className="bg-amber-50 text-amber-900" label="In review batch" />
+            <LegendItem className="bg-white text-slate-700" label="Unchanged" />
+            <LegendItem className="bg-slate-50 text-slate-700" label="Class-specific editing" />
           </div>
-        </div>
+          <div className="mt-4 border-t border-slate-200 pt-3">
+            <p className="text-xs font-medium uppercase text-slate-500">Source badges</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {(["gov", "news", "costar", "pipedream", "user", "system"] as SourceBadge["tone"][]).map((tone) => (
+                <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", SOURCE_TONES[tone])} key={tone}>
+                  {tone}
+                </span>
+              ))}
+            </div>
+          </div>
+        </section>
       </aside>
     </div>
   );

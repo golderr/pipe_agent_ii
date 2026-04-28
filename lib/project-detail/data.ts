@@ -35,6 +35,9 @@ type RawProject = Record<string, unknown> & {
   confidence: string | null;
   status_confidence: string | null;
   last_evidence_date: string | null;
+  inclusion_in_analysis: boolean;
+  inclusion_in_exhibit: boolean;
+  inclusion_note: string | null;
   researcher_override: Record<string, unknown> | null;
 };
 
@@ -361,9 +364,6 @@ const NOTE_FIELDS: FieldDefinition[] = [
   { key: "researcher_notes", label: "Researcher notes", className: "researcher", edit: { mutation: "note", kind: "textarea", options: null, info: APPEND_NOTE_INFO } },
   { key: "personal_notes", label: "Personal notes", className: "researcher", edit: { mutation: "note", kind: "textarea", options: null, info: APPEND_NOTE_INFO } },
   { key: "change_notes", label: "Change notes", className: "researcher", edit: { mutation: "note", kind: "textarea", options: null, info: APPEND_NOTE_INFO } },
-  { key: "inclusion_in_analysis", label: "In analysis", className: "researcher", edit: { mutation: "field", kind: "select", options: ["Yes", "No"], info: DIRECT_FIELD_INFO } },
-  { key: "inclusion_in_exhibit", label: "In exhibit", className: "researcher", edit: { mutation: "field", kind: "select", options: ["Yes", "No"], info: DIRECT_FIELD_INFO } },
-  { key: "inclusion_note", label: "Inclusion note", className: "researcher", edit: { mutation: "field", kind: "textarea", options: null, info: DIRECT_FIELD_INFO } },
   { key: "last_reviewed", label: "Last reviewed", className: "computed" },
   { key: "last_edited", label: "Last edited", className: "computed" }
 ];
@@ -1287,7 +1287,12 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         confidence: rawProject.confidence ?? rawProject.status_confidence,
         lastEvidenceDate: rawProject.last_evidence_date,
         evidenceCount: sortedEvidenceRows.length,
-        openReviewCount: activeReviewItems.length
+        openReviewCount: activeReviewItems.length,
+        inclusion: {
+          inAnalysis: rawProject.inclusion_in_analysis,
+          inExhibit: rawProject.inclusion_in_exhibit,
+          note: rawProject.inclusion_note
+        }
       },
       sections,
       evidenceRows: projectEvidenceRows,

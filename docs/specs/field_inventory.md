@@ -330,7 +330,7 @@ Findings from the 2026-04-24 audit:
 1. **`raw_addresses[]` vs `canonical_address` edit path confirmed.** Both fields exist. `canonical_address` stays Computed; users edit raw address strings and the server re-normalizes.
 2. **`delivery_year` is not a live `Project` column.** The live schema has `date_delivery` plus `delivery_year_provenance`. Keep `date_delivery` Evidence-derived and `delivery_year_provenance` Computed.
 3. **Source-populated direct exact list expanded.** Added missing direct-source fields from `models.py`, `ingesters/costar.py`, `ingesters/pipedream.py`, and LADBS source adapters: `applicant`, `description`, `total_sf`, `parking_spaces`, `style`, `property_type`, `affordable_type`, `architect`, `date_construction_start`, `entitlement_type`, `appeal_status`, and `ceqa_status`.
-4. **`inclusion_in_analysis` / `inclusion_in_exhibit` exist.** They remain Researcher-authored and are wired in Phase C.m.
+4. **`inclusion_in_analysis` / `inclusion_in_exhibit` exist.** They remain Researcher-authored and are wired in Phase C.m through the Project Detail inclusion panel.
 5. **Planner fields exist.** Preserve as Researcher-authored for now because they are in the Pipedream inventory. Dropping them would be a product decision, not a schema-audit correction.
 
 No unclassified live `Project` columns remain after this audit.
