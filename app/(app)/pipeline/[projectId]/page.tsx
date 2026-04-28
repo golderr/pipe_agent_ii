@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { AlertCircle, ArrowLeft, ChevronRight, Circle, Clock, ExternalLink, FileJson, Filter, MapPin } from "lucide-react";
 import { FieldEditControl } from "./field-edit-control";
+import { GeocodingControl } from "./geocoding-control";
 import { InclusionFlagsControl } from "./inclusion-flags-control";
 import { RelationshipPicker } from "./relationship-picker";
 import {
@@ -363,6 +364,7 @@ export default async function ProjectDetailPage({ params, searchParams }: Projec
         <OverridesTab overrideRows={overrideRows} />
       ) : (
         <SnapshotTab
+          coordinates={project.coordinates}
           inclusion={project.inclusion}
           projectId={project.id}
           relationshipRows={relationshipRows}
@@ -392,11 +394,13 @@ function DetailTabLink({ active, href, label }: { active: boolean; href: string;
 }
 
 function SnapshotTab({
+  coordinates,
   inclusion,
   projectId,
   relationshipRows,
   sections
 }: {
+  coordinates: ProjectDetailData["project"]["coordinates"];
   inclusion: ProjectDetailData["project"]["inclusion"];
   projectId: string;
   relationshipRows: ProjectRelationshipRow[];
@@ -424,6 +428,7 @@ function SnapshotTab({
       </div>
 
       <aside className="space-y-5">
+        <GeocodingControl coordinates={coordinates} projectId={projectId} />
         <InclusionFlagsControl inclusion={inclusion} projectId={projectId} />
 
         <section className="rounded-md border border-slate-200 bg-white p-4">

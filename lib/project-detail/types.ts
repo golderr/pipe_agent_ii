@@ -169,6 +169,11 @@ export type ProjectDetailData = {
     lastEvidenceDate: string | null;
     evidenceCount: number;
     openReviewCount: number;
+    coordinates: {
+      lat: number | null;
+      lng: number | null;
+      confidence: string | null;
+    };
     inclusion: {
       inAnalysis: boolean;
       inExhibit: boolean;

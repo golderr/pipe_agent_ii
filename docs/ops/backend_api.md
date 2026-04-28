@@ -300,6 +300,19 @@ Reliable results populate `projects.lat`, `projects.lng`, `projects.location`,
 and `projects.geocode_confidence`; failures or low-confidence results do not
 block creation and leave coordinates null.
 
+Project Detail can re-run the same geocoder for an existing project:
+
+```text
+POST /projects/{project_id}/geocode
+```
+
+The endpoint derives the query from the stored canonical address, city, state,
+and ZIP. Accepted results update `lat`, `lng`, `location`, and
+`geocode_confidence`; skipped, failed, or low-confidence attempts leave the
+current coordinates unchanged. Every attempt writes a `manual_geocode`
+`change_log` row with the prior coordinates, current coordinates, and full
+provider/fallback audit metadata.
+
 Confirmed creates insert a `projects` row, initial `Proposed` `status_history`,
 project edit metadata, and a `change_log` row with
 `change_type = researcher_confirmed`. The `change_log.new_value` payload includes

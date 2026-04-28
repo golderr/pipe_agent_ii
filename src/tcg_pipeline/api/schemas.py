@@ -108,6 +108,16 @@ class ProjectCreateResponse(BaseModel):
     geocoding: ProjectGeocodingResponse | None = None
 
 
+class ProjectGeocodeMutationResponse(BaseModel):
+    project_id: uuid.UUID
+    geocoding: ProjectGeocodingResponse
+    latitude: float | None
+    longitude: float | None
+    geocode_confidence: str
+    updated_coordinates: bool
+    change_log_entries_created: int
+
+
 class ProjectRelationshipCreateRequest(BaseModel):
     relationship_type: str = Field(min_length=1, max_length=50)
     related_project_id: uuid.UUID

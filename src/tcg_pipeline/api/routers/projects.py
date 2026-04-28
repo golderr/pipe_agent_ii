@@ -11,6 +11,7 @@ from tcg_pipeline.api.errors import raise_not_implemented
 from tcg_pipeline.api.project_creation import create_project as create_project_value
 from tcg_pipeline.api.project_fields import append_project_note as append_project_note_value
 from tcg_pipeline.api.project_fields import update_project_field as update_project_field_value
+from tcg_pipeline.api.project_geocoding import geocode_project as geocode_project_value
 from tcg_pipeline.api.project_overrides import (
     clear_project_override as clear_project_override_value,
 )
@@ -31,6 +32,7 @@ from tcg_pipeline.api.schemas import (
     ProjectCreateResponse,
     ProjectFieldMutationResponse,
     ProjectFieldUpdateRequest,
+    ProjectGeocodeMutationResponse,
     ProjectNoteAppendRequest,
     ProjectNoteAppendResponse,
     ProjectOverrideMutationResponse,
@@ -65,6 +67,21 @@ def create_project(
         county=payload.county,
         zip_code=payload.zip,
         force_create=payload.force_create,
+        user=user,
+        geocoder=geocoder_from_settings(settings),
+    )
+
+
+@router.post("/{project_id}/geocode")
+def geocode_project(
+    project_id: uuid.UUID,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+    settings: Settings = APP_SETTINGS,
+) -> ProjectGeocodeMutationResponse:
+    return geocode_project_value(
+        session,
+        project_id=project_id,
         user=user,
         geocoder=geocoder_from_settings(settings),
     )

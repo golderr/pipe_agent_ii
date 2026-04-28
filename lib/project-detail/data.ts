@@ -25,6 +25,7 @@ type RawProject = Record<string, unknown> & {
   canonical_address: string;
   lat: number | null;
   lng: number | null;
+  geocode_confidence: string | null;
   city: string;
   state: string;
   county: string;
@@ -1433,6 +1434,11 @@ export async function getProjectDetailData(projectId: string): Promise<ProjectDe
         lastEvidenceDate: rawProject.last_evidence_date,
         evidenceCount: sortedEvidenceRows.length,
         openReviewCount: activeReviewItems.length,
+        coordinates: {
+          lat: rawProject.lat,
+          lng: rawProject.lng,
+          confidence: rawProject.geocode_confidence
+        },
         inclusion: {
           inAnalysis: rawProject.inclusion_in_analysis,
           inExhibit: rawProject.inclusion_in_exhibit,

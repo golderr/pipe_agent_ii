@@ -195,6 +195,182 @@ def test_create_project_geocoding_failure_does_not_block_create(
     assert project.geocode_confidence == GeocodeConfidence.NONE
 
 
+def test_geocode_project_updates_missing_coordinates(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    market, jurisdiction = _market_and_jurisdiction("regeocode")
+    project = _project(
+        "555 WEST MAP STREET LOS ANGELES CA 90012",
+        market=market,
+        jurisdiction=jurisdiction,
+    )
+    postgres_session.add_all([market, jurisdiction, project])
+    postgres_session.flush()
+    fake_geocoder = _FakeProjectGeocoder(
+        GeocodeResult(
+            status="accepted",
+            provider="esri",
+            latitude=34.055,
+            longitude=-118.25,
+            formatted_address="555 W Map St, Los Angeles, CA 90012",
+            accuracy_type="PointAddress",
+            accuracy_score=96.0,
+            confidence=GeocodeConfidence.HIGH,
+            fallback_used=True,
+            fallback_reason="geocodio_not_high_confidence",
+        )
+    )
+    _patch_project_geocoder(monkeypatch, fake_geocoder)
+    client = _client(postgres_session)
+
+    response = client.post(f"/projects/{project.id}/geocode", headers=_auth_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    postgres_session.refresh(project)
+    change_log = postgres_session.execute(
+        select(ChangeLog).where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.source == "manual_geocode",
+        )
+    ).scalar_one()
+
+    assert body["geocoding"]["status"] == "accepted"
+    assert body["geocoding"]["provider"] == "esri"
+    assert body["latitude"] == 34.055
+    assert body["longitude"] == -118.25
+    assert body["geocode_confidence"] == "high"
+    assert body["updated_coordinates"] is True
+    assert project.lat == 34.055
+    assert project.lng == -118.25
+    assert project.location is not None
+    assert project.geocode_confidence == GeocodeConfidence.HIGH
+    assert project.last_editor == "allowed@example.com"
+    assert change_log.old_value["latitude"] is None
+    assert change_log.new_value["latitude"] == 34.055
+    assert change_log.new_value["updated_coordinates"] is True
+    assert change_log.new_value["geocoding"]["fallback_used"] is True
+    assert change_log.reviewed_by_user_id == USER_ID
+    assert change_log.reviewed_by_email == "allowed@example.com"
+    assert fake_geocoder.calls[0] == GeocodeAddress(
+        address="555 WEST MAP STREET",
+        city="Los Angeles",
+        state="CA",
+        zip_code="90012",
+    )
+
+
+def test_geocode_project_audits_skipped_when_keys_missing(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    market, jurisdiction = _market_and_jurisdiction("regeocode-skip")
+    project = _project(
+        "556 WEST SKIP STREET LOS ANGELES CA 90012",
+        market=market,
+        jurisdiction=jurisdiction,
+    )
+    postgres_session.add_all([market, jurisdiction, project])
+    postgres_session.flush()
+    _patch_project_geocoder(
+        monkeypatch,
+        _FakeProjectGeocoder(
+            GeocodeResult(
+                status="skipped",
+                message="Geocoding service is not configured.",
+                fallback_reason="geocoding_not_configured",
+            )
+        ),
+    )
+    client = _client(postgres_session)
+
+    response = client.post(f"/projects/{project.id}/geocode", headers=_auth_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    postgres_session.refresh(project)
+    change_log = postgres_session.execute(
+        select(ChangeLog).where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.source == "manual_geocode",
+        )
+    ).scalar_one()
+
+    assert body["geocoding"]["status"] == "skipped"
+    assert body["updated_coordinates"] is False
+    assert body["latitude"] is None
+    assert body["longitude"] is None
+    assert project.lat is None
+    assert project.lng is None
+    assert project.geocode_confidence == GeocodeConfidence.NONE
+    assert change_log.new_value["updated_coordinates"] is False
+    assert change_log.new_value["geocoding"]["status"] == "skipped"
+
+
+def test_geocode_project_keeps_existing_coordinates_on_low_confidence(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    market, jurisdiction = _market_and_jurisdiction("regeocode-low")
+    project = _project(
+        "557 WEST LOW STREET LOS ANGELES CA 90012",
+        market=market,
+        jurisdiction=jurisdiction,
+        lat=34.0,
+        lng=-118.0,
+        geocode_confidence=GeocodeConfidence.MEDIUM,
+    )
+    postgres_session.add_all([market, jurisdiction, project])
+    postgres_session.flush()
+    _patch_project_geocoder(
+        monkeypatch,
+        _FakeProjectGeocoder(
+            GeocodeResult(
+                status="low_confidence",
+                message="No reliable Geocodio or Esri geocode result.",
+            )
+        ),
+    )
+    client = _client(postgres_session)
+
+    response = client.post(f"/projects/{project.id}/geocode", headers=_auth_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    postgres_session.refresh(project)
+    change_log = postgres_session.execute(
+        select(ChangeLog).where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.source == "manual_geocode",
+        )
+    ).scalar_one()
+
+    assert body["geocoding"]["status"] == "low_confidence"
+    assert body["updated_coordinates"] is False
+    assert body["latitude"] == 34.0
+    assert body["longitude"] == -118.0
+    assert project.lat == 34.0
+    assert project.lng == -118.0
+    assert project.geocode_confidence == GeocodeConfidence.MEDIUM
+    assert change_log.old_value["latitude"] == 34.0
+    assert change_log.new_value["latitude"] == 34.0
+    assert change_log.new_value["geocoding"]["status"] == "low_confidence"
+
+
+def test_geocode_project_returns_404_for_missing_project(postgres_session: Session) -> None:
+    _ensure_project_creation_api_tables(postgres_session)
+    client = _client(postgres_session)
+
+    response = client.post(f"/projects/{uuid.uuid4()}/geocode", headers=_auth_headers())
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Project not found."
+
+
 def test_create_project_returns_duplicate_candidate_without_force(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,

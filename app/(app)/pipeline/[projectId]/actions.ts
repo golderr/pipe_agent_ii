@@ -37,6 +37,15 @@ type ProjectRelationshipMutationApiResponse = {
   updated?: boolean;
 };
 
+type ProjectGeocodeMutationApiResponse = {
+  geocoding?: {
+    status?: string;
+    provider?: string | null;
+    message?: string | null;
+  };
+  updated_coordinates?: boolean;
+};
+
 const initialErrorState: ProjectMutationActionState = {
   ok: false,
   message: null
@@ -290,6 +299,43 @@ export async function deleteProjectRelationshipAction(
   return { ok: true, message: "Unlinked.", changed: true };
 }
 
+export async function reGeocodeProjectAction(
+  _previousState: ProjectMutationActionState,
+  formData: FormData
+): Promise<ProjectMutationActionState> {
+  const projectId = textFormValue(formData, "projectId");
+  if (!projectId) {
+    return { ok: false, message: "Missing project." };
+  }
+
+  try {
+    const apiBaseUrl = await apiBaseUrlForWrite();
+    const response = await fetch(`${apiBaseUrl}/projects/${projectId}/geocode`, {
+      method: "POST",
+      headers: await jsonHeadersForApi()
+    });
+
+    if (!response.ok) {
+      return { ok: false, message: await responseErrorMessage(response) };
+    }
+
+    const body = (await response.json().catch(() => null)) as
+      | ProjectGeocodeMutationApiResponse
+      | null;
+    revalidatePath(`/pipeline/${projectId}`);
+    return {
+      ok: body?.geocoding?.status === "accepted",
+      message: geocodeMessage(body),
+      changed: body?.updated_coordinates === true
+    };
+  } catch (error) {
+    return {
+      ...initialErrorState,
+      message: error instanceof Error ? error.message : "Geocoding failed."
+    };
+  }
+}
+
 async function mutateProjectOverride(
   formData: FormData,
   method: "POST" | "DELETE"
@@ -405,6 +451,21 @@ async function mutateProjectNote(formData: FormData): Promise<ProjectMutationAct
 
   revalidatePath(`/pipeline/${projectId}`);
   return { ok: true, message: "Added." };
+}
+
+function geocodeMessage(body: ProjectGeocodeMutationApiResponse | null) {
+  const status = body?.geocoding?.status;
+  if (status === "accepted") {
+    const provider = body?.geocoding?.provider;
+    return provider ? `Coordinates updated via ${provider}.` : "Coordinates updated.";
+  }
+  if (status === "skipped") {
+    return "Geocoding is not configured.";
+  }
+  if (status === "low_confidence") {
+    return "Geocoding did not return reliable coordinates.";
+  }
+  return body?.geocoding?.message ?? "Geocoding failed.";
 }
 
 function relationshipSearchState(
