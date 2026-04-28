@@ -54,6 +54,7 @@ export type ReviewSourceRunSummary = {
 
 export type ReviewQueueData = {
   items: ReviewQueueItem[];
+  reviewedItems: ReviewQueueItem[];
   projects: Record<string, ReviewProjectSummary>;
   sourceRuns: Record<string, ReviewSourceRunSummary>;
   generatedAt: string;

@@ -99,16 +99,28 @@ export async function getReviewQueueData(options: {
   try {
     const apiBaseUrl = requireApiBaseUrl();
     const accessToken = await accessTokenForApi();
-    const queue = await fetchReviewItemsFromApi(apiBaseUrl, accessToken, {
-      jurisdictionId: options.jurisdictionId
-    });
+    const [queue, reviewed] = await Promise.all([
+      fetchReviewItemsFromApi(apiBaseUrl, accessToken, {
+        jurisdictionId: options.jurisdictionId
+      }),
+      fetchReviewItemsFromApi(apiBaseUrl, accessToken, {
+        jurisdictionId: options.jurisdictionId,
+        state: "committed",
+        limit: 500
+      })
+    ]);
     if (queue.error) {
       return { data: null, error: queue.error };
     }
+    if (reviewed.error) {
+      return { data: null, error: reviewed.error };
+    }
     const items = queue.items;
+    const reviewedItems = reviewed.items;
+    const hydratedItems = [...items, ...reviewedItems];
     const [projects, sourceRuns] = await Promise.all([
-      fetchProjects(items),
-      fetchSourceRuns(items)
+      fetchProjects(hydratedItems),
+      fetchSourceRuns(hydratedItems)
     ]);
     const error = projects.error ?? sourceRuns.error;
     if (error) {
@@ -118,6 +130,7 @@ export async function getReviewQueueData(options: {
     return {
       data: {
         items,
+        reviewedItems,
         projects: Object.fromEntries(projects.rows.map((project) => [project.id, project])),
         sourceRuns: Object.fromEntries(sourceRuns.rows.map((sourceRun) => [sourceRun.id, sourceRun])),
         generatedAt: new Date().toISOString()
@@ -198,11 +211,14 @@ export async function getReviewItemDetailData(
 async function fetchReviewItemsFromApi(
   apiBaseUrl: string,
   accessToken: string,
-  options: { jurisdictionId?: string | null } = {}
+  options: { jurisdictionId?: string | null; state?: string | null; limit?: number } = {}
 ): Promise<{ items: ReviewQueueItem[]; error: string | null }> {
-  const params = new URLSearchParams({ limit: "500" });
+  const params = new URLSearchParams({ limit: String(options.limit ?? 500) });
   if (options.jurisdictionId) {
     params.set("jurisdiction_id", options.jurisdictionId);
+  }
+  if (options.state) {
+    params.set("state", options.state);
   }
   const response = await fetch(`${apiBaseUrl}/review/queue?${params.toString()}`, {
     headers: {

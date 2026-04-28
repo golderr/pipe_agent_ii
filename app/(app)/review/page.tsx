@@ -13,9 +13,14 @@ function firstQueryValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function normalizeTab(value: string | undefined) {
+  return value === "reviewed" ? "reviewed" : "queue";
+}
+
 export default async function ReviewPage({ searchParams }: ReviewPageProps) {
   const query = searchParams ? await searchParams : {};
   const jurisdictionId = firstQueryValue(query.jurisdiction_id);
+  const activeTab = normalizeTab(firstQueryValue(query.tab));
   const supabase = await createSupabaseServerClient();
   const {
     data: { user }
@@ -38,6 +43,7 @@ export default async function ReviewPage({ searchParams }: ReviewPageProps) {
 
   return (
     <ReviewQueueClient
+      activeTab={activeTab}
       data={result.data}
       jurisdictionId={jurisdictionId ?? null}
       currentUserId={user.id}

@@ -14,7 +14,14 @@ from tcg_pipeline.api.deps import get_db_session
 from tcg_pipeline.api.main import create_app
 from tcg_pipeline.api.routers import coverage as coverage_router
 from tcg_pipeline.api.routers import review as review_router
-from tcg_pipeline.db.models import CoStarUploadStatus, ScrapeJobStatus, ScrapeTriggerType
+from tcg_pipeline.db.models import (
+    CoStarUploadStatus,
+    Priority,
+    ReviewItemStatus,
+    ReviewItemType,
+    ScrapeJobStatus,
+    ScrapeTriggerType,
+)
 from tcg_pipeline.db.review_workflow import ReviewItemAlreadyStagedError, ReviewStageResult
 from tcg_pipeline.settings import Settings
 
@@ -373,6 +380,53 @@ def test_review_decide_returns_409_for_competing_staged_decision(
     assert response.json()["detail"]["staged_by"] == str(other_user_id)
     assert response.json()["detail"]["staged_by_email"] == "other@example.com"
     assert response.json()["detail"]["decision_type"] == "keep_old"
+
+
+def test_review_queue_serializes_committed_decision_for_reviewed_tab() -> None:
+    decision_id = uuid.UUID("77777777-7777-7777-7777-777777777777")
+    committed_at = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    review_item = SimpleNamespace(
+        id=ITEM_ID,
+        project_id=PROJECT_ID,
+        source_run_id=None,
+        item_type=ReviewItemType.OVERRIDE_CONTRADICTION,
+        status=ReviewItemStatus.ACCEPTED,
+        state="committed",
+        priority=Priority.MEDIUM,
+        match_confidence=None,
+        payload={"field_name": "total_units"},
+        assigned_to=None,
+        created_at=datetime(2026, 4, 27, 10, 0, tzinfo=UTC),
+        resolved_at=committed_at,
+        resolved_by="allowed@example.com",
+        decisions=[
+            SimpleNamespace(
+                id=decision_id,
+                state="committed",
+                decision_type="accept_new",
+                staged_at=datetime(2026, 4, 28, 11, 0, tzinfo=UTC),
+                staged_by=USER_ID,
+                staged_by_email="allowed@example.com",
+                committed_at=committed_at,
+                committed_by=USER_ID,
+                committed_by_email="allowed@example.com",
+                decision_value=None,
+                decision_notes="Confirmed.",
+                source_url=None,
+                created_at=datetime(2026, 4, 28, 11, 0, tzinfo=UTC),
+            )
+        ],
+    )
+
+    serialized = review_router._serialize_review_item(review_item)
+
+    assert serialized.state == "committed"
+    assert serialized.active_decision is not None
+    assert serialized.active_decision.decision_id == decision_id
+    assert serialized.active_decision.state == "committed"
+    assert serialized.active_decision.decision_type == "accept_new"
+    assert serialized.active_decision.committed_by == USER_ID
+    assert serialized.active_decision.committed_by_email == "allowed@example.com"
 
 
 def test_phase_c_stubs_do_not_run_without_auth() -> None:

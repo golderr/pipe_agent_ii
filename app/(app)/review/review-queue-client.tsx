@@ -29,6 +29,7 @@ import {
   displayActor,
   fieldNameForItem,
   formatDate,
+  formatDateTime,
   formatValue,
   humanize,
   isStagedByMe,
@@ -37,6 +38,13 @@ import {
   sourceTextForItem,
   warningForItem
 } from "@/lib/review/payload";
+import {
+  buildReviewedFilterOptions,
+  buildReviewedRows,
+  filterReviewedRows,
+  type ReviewedDecisionFilters,
+  type ReviewedDecisionRow
+} from "@/lib/review/reviewed";
 import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type {
@@ -47,6 +55,7 @@ import type {
 } from "@/lib/review/types";
 
 type ReviewQueueClientProps = {
+  activeTab: "queue" | "reviewed";
   data: ReviewQueueData;
   jurisdictionId: string | null;
   currentUserId: string;
@@ -94,6 +103,7 @@ const SECTION_LABELS: Record<string, string> = {
 };
 
 export function ReviewQueueClient({
+  activeTab,
   data,
   jurisdictionId,
   currentUserId,
@@ -102,6 +112,10 @@ export function ReviewQueueClient({
   const router = useRouter();
   const [search, setSearch] = useState("");
   const [priorityFilter, setPriorityFilter] = useState("all");
+  const [reviewedFieldFilter, setReviewedFieldFilter] = useState("");
+  const [reviewedOutcomeFilter, setReviewedOutcomeFilter] = useState("");
+  const [reviewedDeciderFilter, setReviewedDeciderFilter] = useState("");
+  const [reviewedSort, setReviewedSort] = useState<ReviewedDecisionFilters["sort"]>("date_desc");
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const [focusedItemId, setFocusedItemId] = useState<string | null>(null);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
@@ -123,6 +137,25 @@ export function ReviewQueueClient({
   const selectedGroup = groups.find((group) => group.key === selectedGroupKey) ?? groups[0] ?? null;
   const focusedItem =
     selectedGroup?.items.find((item) => item.id === focusedItemId) ?? selectedGroup?.items[0] ?? null;
+  const reviewedRows = useMemo(
+    () => buildReviewedRows(data.reviewedItems, data.projects),
+    [data.projects, data.reviewedItems]
+  );
+  const reviewedFilters = useMemo(
+    () => buildReviewedFilterOptions(reviewedRows),
+    [reviewedRows]
+  );
+  const filteredReviewedRows = useMemo(
+    () =>
+      filterReviewedRows(reviewedRows, {
+        search,
+        field: reviewedFieldFilter,
+        outcome: reviewedOutcomeFilter,
+        decider: reviewedDeciderFilter,
+        sort: reviewedSort
+      }),
+    [reviewedDeciderFilter, reviewedFieldFilter, reviewedOutcomeFilter, reviewedRows, reviewedSort, search]
+  );
 
   const totalOpen = data.items.filter((item) => item.state === "open").length;
   const stagedMineCount = data.items.filter((item) =>
@@ -296,15 +329,29 @@ export function ReviewQueueClient({
           <div>
             <p className="text-xs font-medium uppercase tracking-normal text-slate-500">Review Queue</p>
             <h1 className="mt-1 text-xl font-semibold tracking-normal text-slate-950">
-              {data.items.length.toLocaleString()} active items
+              {activeTab === "reviewed"
+                ? `${filteredReviewedRows.length.toLocaleString()} reviewed decisions`
+                : `${data.items.length.toLocaleString()} active items`}
             </h1>
           </div>
           <div className="grid grid-cols-4 gap-2 text-sm sm:w-[34rem]">
             <Metric label="Open" value={totalOpen} />
             <Metric label="Mine" value={stagedMineCount} />
             <Metric label="Deferred" value={deferredCount} />
-            <Metric label="Undecided" value={undecidedCount} />
+            <Metric label="Reviewed" value={reviewedRows.length} />
           </div>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200 pt-3" role="tablist" aria-label="Review tabs">
+          <ReviewTabLink
+            active={activeTab === "queue"}
+            href={reviewPageHref("queue", jurisdictionId)}
+            label="Queue"
+          />
+          <ReviewTabLink
+            active={activeTab === "reviewed"}
+            href={reviewPageHref("reviewed", jurisdictionId)}
+            label="Reviewed"
+          />
         </div>
         <div className="mt-4 flex flex-col gap-2 lg:flex-row lg:items-center">
           <Input
@@ -313,24 +360,68 @@ export function ReviewQueueClient({
             placeholder="Search project, field, value, source"
             className="lg:max-w-md"
           />
-          <select
-            value={priorityFilter}
-            onChange={(event) => setPriorityFilter(event.target.value)}
-            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-          >
-            <option value="all">All priorities</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-            <option value="deferred">Deferred</option>
-          </select>
-          {search || priorityFilter !== "all" ? (
+          {activeTab === "reviewed" ? (
+            <>
+              <ReviewedSelect
+                label="Field"
+                value={reviewedFieldFilter}
+                onChange={setReviewedFieldFilter}
+                options={reviewedFilters.fields}
+              />
+              <ReviewedSelect
+                label="Outcome"
+                value={reviewedOutcomeFilter}
+                onChange={setReviewedOutcomeFilter}
+                options={reviewedFilters.outcomes}
+              />
+              <ReviewedSelect
+                label="Decider"
+                value={reviewedDeciderFilter}
+                onChange={setReviewedDeciderFilter}
+                options={reviewedFilters.deciders}
+              />
+              <select
+                aria-label="Reviewed sort"
+                value={reviewedSort}
+                onChange={(event) => setReviewedSort(event.target.value as ReviewedDecisionFilters["sort"])}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              >
+                <option value="date_desc">Newest first</option>
+                <option value="date_asc">Oldest first</option>
+                <option value="decider">Decider</option>
+                <option value="project">Project</option>
+              </select>
+            </>
+          ) : (
+            <select
+              value={priorityFilter}
+              onChange={(event) => setPriorityFilter(event.target.value)}
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+            >
+              <option value="all">All priorities</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+              <option value="deferred">Deferred</option>
+            </select>
+          )}
+          {hasActiveSearchOrFilter({
+            activeTab,
+            search,
+            priorityFilter,
+            reviewedFieldFilter,
+            reviewedOutcomeFilter,
+            reviewedDeciderFilter
+          }) ? (
             <Button
               variant="ghost"
               type="button"
               onClick={() => {
                 setSearch("");
                 setPriorityFilter("all");
+                setReviewedFieldFilter("");
+                setReviewedOutcomeFilter("");
+                setReviewedDeciderFilter("");
               }}
             >
               <RotateCcw className="size-4" aria-hidden="true" />
@@ -357,7 +448,9 @@ export function ReviewQueueClient({
         ) : null}
       </div>
 
-      {groups.length === 0 ? (
+      {activeTab === "reviewed" ? (
+        <ReviewedDecisionsView rows={filteredReviewedRows} jurisdictionId={jurisdictionId} />
+      ) : groups.length === 0 ? (
         <div className="px-5 py-8">
           <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-600">
             Review queue is clear for the current filters.
@@ -402,18 +495,164 @@ export function ReviewQueueClient({
         </div>
       )}
 
-      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 px-5 py-3 backdrop-blur md:left-56">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-sm text-slate-600">
-            Commit {stagedMineCount.toLocaleString()} decisions - {undecidedCount.toLocaleString()} undecided
-          </p>
-          <Button type="button" onClick={commitQueue} disabled={isPending}>
-            <Save className="size-4" aria-hidden="true" />
-            Commit {stagedMineCount.toLocaleString()} decisions
-          </Button>
+      {activeTab === "queue" ? (
+        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 px-5 py-3 backdrop-blur md:left-56">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-slate-600">
+              Commit {stagedMineCount.toLocaleString()} decisions - {undecidedCount.toLocaleString()} undecided
+            </p>
+            <Button type="button" onClick={commitQueue} disabled={isPending}>
+              <Save className="size-4" aria-hidden="true" />
+              Commit {stagedMineCount.toLocaleString()} decisions
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </main>
+  );
+}
+
+function ReviewTabLink({
+  active,
+  href,
+  label
+}: {
+  active: boolean;
+  href: string;
+  label: string;
+}) {
+  return (
+    <Link
+      aria-selected={active}
+      className={cn(
+        "rounded-md px-3 py-1.5 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700",
+        active
+          ? "bg-teal-700 text-white"
+          : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"
+      )}
+      href={href}
+      role="tab"
+    >
+      {label}
+    </Link>
+  );
+}
+
+function ReviewedSelect({
+  label,
+  value,
+  options,
+  onChange
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <select
+      aria-label={label}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+    >
+      <option value="">All {label.toLowerCase()}</option>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function ReviewedDecisionsView({
+  rows,
+  jurisdictionId
+}: {
+  rows: ReviewedDecisionRow[];
+  jurisdictionId: string | null;
+}) {
+  if (!rows.length) {
+    return (
+      <div className="px-5 py-8">
+        <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-600">
+          No reviewed decisions match the current filters.
         </div>
       </div>
-    </main>
+    );
+  }
+
+  return (
+    <section className="px-5 py-4">
+      <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
+        <div className="hidden grid-cols-[9rem_minmax(12rem,1.1fr)_9rem_8rem_minmax(10rem,1fr)_auto] gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs font-medium uppercase tracking-normal text-slate-500 lg:grid">
+          <span>Committed</span>
+          <span>Project</span>
+          <span>Field</span>
+          <span>Outcome</span>
+          <span>Decider</span>
+          <span>Links</span>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {rows.map((row) => (
+            <ReviewedDecisionListRow row={row} jurisdictionId={jurisdictionId} key={row.item.id} />
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ReviewedDecisionListRow({
+  row,
+  jurisdictionId
+}: {
+  row: ReviewedDecisionRow;
+  jurisdictionId: string | null;
+}) {
+  const project = row.project;
+  const detailHref = reviewItemHref(row.item.id, jurisdictionId);
+  const changesHref = project
+    ? `/pipeline/${project.id}?tab=changes&field=${encodeURIComponent(row.field)}`
+    : null;
+
+  return (
+    <article className="grid gap-3 px-4 py-3 text-sm lg:grid-cols-[9rem_minmax(12rem,1.1fr)_9rem_8rem_minmax(10rem,1fr)_auto] lg:items-start">
+      <span className="text-slate-500">{row.committedAt ? formatDateTime(row.committedAt) : "-"}</span>
+      <div className="min-w-0">
+        <p className="truncate font-medium text-slate-950">{project?.projectName ?? "Unlinked item"}</p>
+        <p className="mt-0.5 truncate text-xs text-slate-500">{project?.canonicalAddress ?? row.item.id}</p>
+      </div>
+      <span className="font-medium text-slate-800">{row.fieldLabel}</span>
+      <span className="w-fit rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-700">
+        {row.outcomeLabel}
+      </span>
+      <div className="min-w-0">
+        <p className="truncate text-slate-700" title={row.deciderLabel}>
+          {row.deciderLabel}
+        </p>
+        <p className="mt-0.5 truncate text-xs text-slate-500">
+          {formatValue(row.currentValue)} to {formatValue(row.proposedValue)}
+        </p>
+      </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        <Link
+          className="inline-flex h-8 items-center justify-center rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
+          href={detailHref}
+        >
+          Detail
+        </Link>
+        {changesHref ? (
+          <Link
+            className="inline-flex h-8 items-center justify-center rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
+            href={changesHref}
+          >
+            ChangeLog
+          </Link>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -1065,4 +1304,40 @@ function reviewItemHref(itemId: string, jurisdictionId: string | null) {
   }
   const query = params.toString();
   return query ? `/review/${itemId}?${query}` : `/review/${itemId}`;
+}
+
+function reviewPageHref(tab: "queue" | "reviewed", jurisdictionId: string | null) {
+  const params = new URLSearchParams();
+  if (tab === "reviewed") {
+    params.set("tab", "reviewed");
+  }
+  if (jurisdictionId) {
+    params.set("jurisdiction_id", jurisdictionId);
+  }
+  const query = params.toString();
+  return query ? `/review?${query}` : "/review";
+}
+
+function hasActiveSearchOrFilter({
+  activeTab,
+  search,
+  priorityFilter,
+  reviewedFieldFilter,
+  reviewedOutcomeFilter,
+  reviewedDeciderFilter
+}: {
+  activeTab: "queue" | "reviewed";
+  search: string;
+  priorityFilter: string;
+  reviewedFieldFilter: string;
+  reviewedOutcomeFilter: string;
+  reviewedDeciderFilter: string;
+}) {
+  if (search) {
+    return true;
+  }
+  if (activeTab === "reviewed") {
+    return Boolean(reviewedFieldFilter || reviewedOutcomeFilter || reviewedDeciderFilter);
+  }
+  return priorityFilter !== "all";
 }

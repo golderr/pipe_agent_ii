@@ -19,7 +19,9 @@ from tcg_pipeline.api.schemas import (
 )
 from tcg_pipeline.db.models import Priority, Project, ReviewDecision, ReviewItem
 from tcg_pipeline.db.review_workflow import (
+    REVIEW_DECISION_STATE_COMMITTED,
     REVIEW_DECISION_STATE_STAGED,
+    REVIEW_ITEM_STATE_COMMITTED,
     REVIEW_ITEM_STATE_OPEN,
     REVIEW_ITEM_STATE_STAGED,
     ReviewItemAlreadyStagedError,
@@ -47,10 +49,15 @@ def list_review_queue(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[ReviewQueueItemResponse]:
     states = [_clean_state(state)] if state else [REVIEW_ITEM_STATE_OPEN, REVIEW_ITEM_STATE_STAGED]
-    statement = (
-        select(ReviewItem)
-        .where(ReviewItem.state.in_(states))
-        .order_by(
+    statement = select(ReviewItem).where(ReviewItem.state.in_(states))
+    if states == [REVIEW_ITEM_STATE_COMMITTED]:
+        statement = statement.order_by(
+            ReviewItem.resolved_at.desc().nullslast(),
+            ReviewItem.created_at.desc(),
+            ReviewItem.id.asc(),
+        )
+    else:
+        statement = statement.order_by(
             case(
                 (ReviewItem.priority == Priority.HIGH, 0),
                 (ReviewItem.priority == Priority.MEDIUM, 1),
@@ -58,7 +65,6 @@ def list_review_queue(
             ),
             ReviewItem.created_at.asc(),
         )
-    )
     if jurisdiction_id is not None:
         statement = statement.join(Project, ReviewItem.project_id == Project.id).where(
             Project.jurisdiction_id == jurisdiction_id
@@ -201,6 +207,24 @@ def _serialize_review_item(review_item: ReviewItem) -> ReviewQueueItemResponse:
 
 
 def _active_decision_for_item(review_item: ReviewItem) -> ReviewDecision | None:
+    if review_item.state == REVIEW_ITEM_STATE_COMMITTED:
+        committed_decisions = [
+            decision
+            for decision in review_item.decisions
+            if decision.state == REVIEW_DECISION_STATE_COMMITTED
+        ]
+        if not committed_decisions:
+            return None
+        # Older/backfilled committed decisions may not have committed_at; created_at
+        # keeps the Reviewed tab deterministic without hiding those rows.
+        return sorted(
+            committed_decisions,
+            key=lambda decision: (
+                decision.committed_at or decision.created_at,
+                decision.created_at,
+            ),
+        )[-1]
+
     staged_decisions = [
         decision
         for decision in review_item.decisions
