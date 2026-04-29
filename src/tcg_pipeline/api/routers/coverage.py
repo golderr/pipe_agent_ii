@@ -41,6 +41,7 @@ from tcg_pipeline.db.models import (
     CoStarUploadStatus,
     Jurisdiction,
     ScrapeJob,
+    ScrapeJobKind,
     ScrapeJobStatus,
     ScrapeTriggerType,
     SourceRegistration,
@@ -152,7 +153,10 @@ def list_scrape_jobs(
     bounded_limit = min(max(limit, 1), 25)
     query = (
         select(ScrapeJob)
-        .where(ScrapeJob.jurisdiction_id == jurisdiction_id)
+        .where(
+            ScrapeJob.jurisdiction_id == jurisdiction_id,
+            ScrapeJob.kind == ScrapeJobKind.COLLECTOR_RUN.value,
+        )
         .order_by(ScrapeJob.queued_at.desc(), ScrapeJob.id.desc())
         .limit(bounded_limit)
     )
@@ -207,6 +211,7 @@ def enqueue_scrape_job(
 
     job = ScrapeJob(
         jurisdiction_id=jurisdiction_id,
+        kind=ScrapeJobKind.COLLECTOR_RUN.value,
         source_name=source_name,
         trigger_type=ScrapeTriggerType.USER_INITIATED,
         initiated_by_user_id=user.user_id,
@@ -333,6 +338,8 @@ def run_scrape_job(job_id: uuid.UUID) -> None:
 def start_scrape_job(session: Session, *, job_id: uuid.UUID) -> ScrapeExecutionPlan | None:
     job = session.get(ScrapeJob, job_id)
     if job is None or job.status != ScrapeJobStatus.QUEUED:
+        return None
+    if job.kind != ScrapeJobKind.COLLECTOR_RUN.value or job.jurisdiction_id is None:
         return None
     jurisdiction = _load_jurisdiction(session, job.jurisdiction_id)
     registration = _load_source_registration(
@@ -476,6 +483,7 @@ def _load_active_scrape_job(
         select(ScrapeJob)
         .where(
             ScrapeJob.jurisdiction_id == jurisdiction_id,
+            ScrapeJob.kind == ScrapeJobKind.COLLECTOR_RUN.value,
             ScrapeJob.source_name == source_name,
             ScrapeJob.status.in_(ACTIVE_SCRAPE_JOB_STATUSES),
         )
@@ -620,7 +628,9 @@ def _serialize_scrape_job(job: ScrapeJob) -> ScrapeJobResponse:
     return ScrapeJobResponse(
         id=job.id,
         jurisdiction_id=job.jurisdiction_id,
+        kind=job.kind,
         source_name=job.source_name,
+        target_payload=job.target_payload,
         trigger_type=job.trigger_type.value,
         initiated_by_user_id=job.initiated_by_user_id,
         initiated_by_email=job.initiated_by_email,

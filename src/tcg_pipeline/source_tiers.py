@@ -18,6 +18,10 @@ LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME = {
     "ladbs_cofo": "ladbs_cofo",
     "pipedream": "pipedream",
     "costar": "costar",
+    "bizjournals_la": "news_article",
+    "news_paste_a_link": "news_article",
+    "news_backfill": "news_article",
+    "news_reextraction": "news_article",
 }
 
 

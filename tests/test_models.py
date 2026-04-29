@@ -3,11 +3,20 @@ from sqlalchemy.orm import configure_mappers
 from tcg_pipeline.db.models import (
     DeveloperAlias,
     Evidence,
+    NewsArticle,
+    NewsExtraction,
+    NewsExtractionPass,
+    NewsProjectReference,
+    NewsSignalFlag,
+    NewsSource,
     Project,
     ProjectIdentifier,
     ProjectRelationship,
     RelationshipType,
     ResolutionLog,
+    ScrapeJob,
+    ScrapeJobKind,
+    SystemAlert,
 )
 
 
@@ -50,7 +59,51 @@ def test_evidence_indexes_are_declared() -> None:
     assert "ix_evidence_source_type" in index_names
     assert "ix_evidence_evidence_date" in index_names
     assert "ix_evidence_collected_at" in index_names
+    assert "ix_evidence_active_project_resolution" in index_names
     assert "uq_evidence_source_type_source_record_id_raw_data_hash" in index_names
+    assert "superseded_at" in Evidence.__table__.columns
+
+
+def test_news_research_indexes_are_declared() -> None:
+    news_source_indexes = {index.name for index in NewsSource.__table__.indexes}
+    news_article_indexes = {index.name for index in NewsArticle.__table__.indexes}
+    news_extraction_indexes = {index.name for index in NewsExtraction.__table__.indexes}
+    reference_indexes = {index.name for index in NewsProjectReference.__table__.indexes}
+    flag_indexes = {index.name for index in NewsSignalFlag.__table__.indexes}
+
+    assert "ix_news_sources_active" in news_source_indexes
+    assert "schedule_timezone" in NewsSource.__table__.columns
+    assert "ix_news_articles_published_at" in news_article_indexes
+    assert "ix_news_articles_triage_status" in news_article_indexes
+    assert "ix_news_extractions_article_id_created_at" in news_extraction_indexes
+    assert "ix_news_project_references_match_status" in reference_indexes
+    assert "ix_news_signal_flag_registry_active" in flag_indexes
+
+
+def test_scrape_job_news_extension_columns_are_declared() -> None:
+    index_names = {index.name for index in ScrapeJob.__table__.indexes}
+
+    assert "kind" in ScrapeJob.__table__.columns
+    assert "target_payload" in ScrapeJob.__table__.columns
+    assert ScrapeJob.__table__.columns["jurisdiction_id"].nullable is True
+    assert "ix_scrape_jobs_kind_status" in index_names
+    assert "uq_scrape_jobs_one_active_collector" in index_names
+    assert "uq_scrape_jobs_one_active_news_scrape" in index_names
+    assert {member.value for member in ScrapeJobKind} == {
+        "collector_run",
+        "news_scrape",
+        "news_paste_a_link",
+        "news_reextract",
+        "news_backfill_chunk",
+    }
+    assert NewsExtractionPass.REEXTRACTION.value == "reextraction"
+
+
+def test_system_alert_indexes_are_declared() -> None:
+    index_names = {index.name for index in SystemAlert.__table__.indexes}
+
+    assert "uq_system_alerts_active_key_scope" in index_names
+    assert "ix_system_alerts_active" not in index_names
 
 
 def test_resolution_log_and_developer_alias_indexes_are_declared() -> None:

@@ -21,6 +21,7 @@ from tcg_pipeline.db.models import (
     Market,
     Project,
     ScrapeJob,
+    ScrapeJobKind,
     ScrapeJobStatus,
     SourceRegistration,
     SourceRun,
@@ -81,6 +82,7 @@ def test_enqueue_scrape_job_records_worker_queue_backend(postgres_session: Sessi
         "message": "Queued for scraper worker.",
         "queue_backend": "rq",
     }
+    assert job.kind == ScrapeJobKind.COLLECTOR_RUN.value
 
 
 def test_enqueue_scrape_job_rejects_unsupported_inline_source(
@@ -130,6 +132,24 @@ def test_start_scrape_job_uses_incremental_cursor(postgres_session: Session) -> 
     assert plan.request.updated_since == cursor - timedelta(hours=24)
     assert job.status == ScrapeJobStatus.RUNNING
     assert job.progress["collection_mode"] == "incremental"
+
+
+def test_start_scrape_job_ignores_unscoped_news_jobs(postgres_session: Session) -> None:
+    _ensure_coverage_tables(postgres_session)
+    job = ScrapeJob(
+        jurisdiction_id=None,
+        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        source_name="news_paste_a_link",
+        target_payload={"url": "https://example.com/article"},
+        status=ScrapeJobStatus.QUEUED,
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+
+    plan = coverage_router.start_scrape_job(postgres_session, job_id=job.id)
+
+    assert plan is None
+    assert job.status == ScrapeJobStatus.QUEUED
 
 
 def test_complete_scrape_job_persists_records_and_updates_job(
@@ -412,3 +432,13 @@ def _ensure_coverage_tables(postgres_session: Session) -> None:
     ]
     if missing:
         pytest.skip(f"Apply the latest migrations before running coverage tests: {missing}")
+    scrape_job_columns = {
+        column["name"] for column in inspector.get_columns("scrape_jobs")
+    }
+    required_columns = {"kind", "target_payload"}
+    missing_columns = sorted(required_columns - scrape_job_columns)
+    if missing_columns:
+        pytest.skip(
+            "Apply migration 202604290020 before running coverage tests: "
+            f"{missing_columns}"
+        )

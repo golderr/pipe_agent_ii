@@ -15,7 +15,9 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -162,6 +164,59 @@ class ScrapeTriggerType(enum.StrEnum):
     SCHEDULED = "scheduled"
 
 
+class ScrapeJobKind(enum.StrEnum):
+    COLLECTOR_RUN = "collector_run"
+    NEWS_SCRAPE = "news_scrape"
+    NEWS_PASTE_A_LINK = "news_paste_a_link"
+    NEWS_REEXTRACT = "news_reextract"
+    NEWS_BACKFILL_CHUNK = "news_backfill_chunk"
+
+
+class NewsFetchStatus(enum.StrEnum):
+    PENDING = "pending"
+    FETCHED = "fetched"
+    FETCH_FAILED = "fetch_failed"
+    PARSE_FAILED = "parse_failed"
+    PAYWALLED = "paywalled"
+    DEAD_LINK = "dead_link"
+
+
+class NewsTriageStatus(enum.StrEnum):
+    PENDING = "pending"
+    RELEVANT = "relevant"
+    NOT_RELEVANT = "not_relevant"
+    ERROR = "error"
+
+
+class NewsExtractionPass(enum.StrEnum):
+    TRIAGE = "triage"
+    EXTRACTION = "extraction"
+    REEXTRACTION = "reextraction"
+
+
+class NewsExtractionParseStatus(enum.StrEnum):
+    OK = "ok"
+    PARSE_ERROR = "parse_error"
+    SCHEMA_INVALID = "schema_invalid"
+    REFUSED = "refused"
+    TRUNCATED = "truncated"
+
+
+class NewsMatchStatus(enum.StrEnum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    POSSIBLE = "possible"
+    NEW_CANDIDATE = "new_candidate"
+    DISCARDED = "discarded"
+    MANUAL_RELINK = "manual_relink"
+
+
+class NewsReferenceConfidence(enum.StrEnum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
 class CoStarUploadStatus(enum.StrEnum):
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -293,6 +348,7 @@ class Market(Base, TimestampMixin):
     child_markets: Mapped[list["Market"]] = relationship(back_populates="parent_market")
     jurisdictions: Mapped[list["Jurisdiction"]] = relationship(back_populates="market")
     projects: Mapped[list["Project"]] = relationship(back_populates="market_ref")
+    news_sources: Mapped[list["NewsSource"]] = relationship(back_populates="market")
 
 
 class Jurisdiction(Base, TimestampMixin):
@@ -328,6 +384,7 @@ class Jurisdiction(Base, TimestampMixin):
     source_runs: Mapped[list["SourceRun"]] = relationship(back_populates="jurisdiction")
     scrape_jobs: Mapped[list["ScrapeJob"]] = relationship(back_populates="jurisdiction")
     costar_uploads: Mapped[list["CoStarUpload"]] = relationship(back_populates="jurisdiction")
+    news_sources: Mapped[list["NewsSource"]] = relationship(back_populates="jurisdiction")
 
 
 class Project(Base, TimestampMixin):
@@ -710,6 +767,14 @@ class Evidence(Base):
         Index("ix_evidence_evidence_date", "evidence_date"),
         Index("ix_evidence_collected_at", "collected_at"),
         Index(
+            "ix_evidence_active_project_resolution",
+            "project_id",
+            text("evidence_date DESC NULLS LAST"),
+            text("collected_at DESC"),
+            "source_tier",
+            postgresql_where=text("superseded_at IS NULL"),
+        ),
+        Index(
             "uq_evidence_source_type_source_record_id_raw_data_hash",
             "source_type",
             "source_record_id",
@@ -741,9 +806,16 @@ class Evidence(Base):
     raw_data_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     extracted_fields: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     signal_flags: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped[Project | None] = relationship(back_populates="evidence_rows")
+    news_project_references: Mapped[list["NewsProjectReference"]] = relationship(
+        back_populates="matched_evidence"
+    )
 
 
 class DeveloperRegistry(Base, TimestampMixin):
@@ -878,27 +950,47 @@ class ScrapeJob(Base):
     __table_args__ = (
         Index("ix_scrape_jobs_jurisdiction_id_status", "jurisdiction_id", "status"),
         Index(
+            "ix_scrape_jobs_kind_status",
+            "kind",
+            "status",
+            "queued_at",
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+        Index(
             "ix_scrape_jobs_status_queued_at",
             "status",
             "queued_at",
             postgresql_where=text("status IN ('queued', 'running')"),
         ),
         Index(
-            "uq_scrape_jobs_one_active_per_source",
+            "uq_scrape_jobs_one_active_collector",
             "jurisdiction_id",
             "source_name",
             unique=True,
-            postgresql_where=text("status IN ('queued', 'running')"),
+            postgresql_where=text("kind = 'collector_run' AND status IN ('queued', 'running')"),
+        ),
+        Index(
+            "uq_scrape_jobs_one_active_news_scrape",
+            "source_name",
+            unique=True,
+            postgresql_where=text("kind = 'news_scrape' AND status IN ('queued', 'running')"),
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    jurisdiction_id: Mapped[uuid.UUID] = mapped_column(
+    jurisdiction_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("jurisdictions.id"),
+        nullable=True,
+    )
+    kind: Mapped[str] = mapped_column(
+        String(80),
         nullable=False,
+        default=ScrapeJobKind.COLLECTOR_RUN.value,
+        server_default=ScrapeJobKind.COLLECTOR_RUN.value,
     )
     source_name: Mapped[str] = mapped_column(Text, nullable=False)
+    target_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     trigger_type: Mapped[ScrapeTriggerType] = mapped_column(
         SCRAPE_TRIGGER_TYPE_ENUM,
         nullable=False,
@@ -929,7 +1021,7 @@ class ScrapeJob(Base):
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     progress: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    jurisdiction: Mapped[Jurisdiction] = relationship(back_populates="scrape_jobs")
+    jurisdiction: Mapped[Jurisdiction | None] = relationship(back_populates="scrape_jobs")
     source_run: Mapped[SourceRun | None] = relationship(back_populates="scrape_jobs")
 
 
@@ -969,6 +1061,507 @@ class CoStarUpload(Base):
 
     jurisdiction: Mapped[Jurisdiction] = relationship(back_populates="costar_uploads")
     source_run: Mapped[SourceRun | None] = relationship(back_populates="costar_uploads")
+
+
+class NewsSource(Base, TimestampMixin):
+    __tablename__ = "news_sources"
+    __table_args__ = (
+        Index("ix_news_sources_active", "active"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    collector_class: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    schedule_cron: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schedule_timezone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    market_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("markets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    jurisdiction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jurisdictions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    market: Mapped[Market | None] = relationship(back_populates="news_sources")
+    jurisdiction: Mapped[Jurisdiction | None] = relationship(back_populates="news_sources")
+    articles: Mapped[list["NewsArticle"]] = relationship(back_populates="source")
+
+
+class NewsArticle(Base, TimestampMixin):
+    __tablename__ = "news_articles"
+    __table_args__ = (
+        Index("ix_news_articles_news_source_id", "news_source_id"),
+        Index("ix_news_articles_published_at", text("published_at DESC NULLS LAST")),
+        Index("ix_news_articles_fetch_status", "fetch_status"),
+        Index("ix_news_articles_triage_status", "triage_status"),
+        Index("ix_news_articles_body_text_hash", "body_text_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    news_source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    url_canonical: Mapped[str] = mapped_column(Text, nullable=False)
+    url_original: Mapped[str] = mapped_column(Text, nullable=False)
+    url_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    fetch_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=NewsFetchStatus.PENDING.value,
+    )
+    fetch_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    first_attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    last_attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetch_error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_html_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    body_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_text_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    byline_author: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    publication_section: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list[str] | None] = mapped_column(ARRAY(Text()), nullable=True)
+    external_article_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str] = mapped_column(Text, nullable=False, default="en", server_default="en")
+    paywall_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    structural_signals: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    structural_signals_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    triage_status: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=NewsTriageStatus.PENDING.value,
+    )
+    triage_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    triage_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_extractions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    current_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_extractions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    current_extraction_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    ingest_method: Mapped[str] = mapped_column(Text, nullable=False)
+    ingested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    source: Mapped[NewsSource] = relationship(back_populates="articles")
+    extractions: Mapped[list["NewsExtraction"]] = relationship(
+        back_populates="article",
+        foreign_keys="NewsExtraction.article_id",
+    )
+    project_references: Mapped[list["NewsProjectReference"]] = relationship(
+        back_populates="article"
+    )
+
+
+class NewsExtraction(Base):
+    __tablename__ = "news_extractions"
+    __table_args__ = (
+        Index("ix_news_extractions_article_id_created_at", "article_id", text("created_at DESC")),
+        Index("ix_news_extractions_prompt_id_version", "prompt_id", "prompt_version"),
+        Index("ix_news_extractions_pass_triggered_by", "pass", "triggered_by"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_articles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pass_name: Mapped[str] = mapped_column(
+        "pass",
+        Text,
+        nullable=False,
+        default=NewsExtractionPass.TRIAGE.value,
+    )
+    triggered_by: Mapped[str] = mapped_column(Text, nullable=False)
+    supersedes_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_extractions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    prompt_id: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    model_provider: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="anthropic",
+        server_default="anthropic",
+    )
+    input_tokens_uncached: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens_cached: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    raw_response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=NewsExtractionParseStatus.OK.value,
+    )
+    parse_error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diagnostic: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    article: Mapped[NewsArticle] = relationship(
+        back_populates="extractions",
+        foreign_keys=[article_id],
+    )
+    project_references: Mapped[list["NewsProjectReference"]] = relationship(
+        back_populates="extraction"
+    )
+
+
+class NewsProjectReference(Base, TimestampMixin):
+    __tablename__ = "news_project_references"
+    __table_args__ = (
+        UniqueConstraint("extraction_id", "reference_index"),
+        Index("ix_news_project_references_article_id", "article_id"),
+        Index("ix_news_project_references_matched_project_id", "matched_project_id"),
+        Index("ix_news_project_references_match_status", "match_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    extraction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_extractions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_articles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reference_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    candidate_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_developer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_unit_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    candidate_unit_affordable: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    candidate_unit_market_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    candidate_product_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_age_restriction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_status_signal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_delivery_year_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_delivery_year_normalized: Mapped[date | None] = mapped_column(Date, nullable=True)
+    candidate_signal_flags: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    candidate_identifiers: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    candidate_neighborhood: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    candidate_lng: Mapped[float | None] = mapped_column(Float, nullable=True)
+    candidate_confidence: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=NewsReferenceConfidence.LOW.value,
+    )
+    passage_excerpts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    match_status: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=NewsMatchStatus.PENDING.value,
+    )
+    matched_project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    match_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    match_candidates: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    match_decision_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    matched_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("evidence.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    review_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("review_items.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    manual_relink_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    manual_relink_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    manual_relink_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    extraction: Mapped[NewsExtraction] = relationship(back_populates="project_references")
+    article: Mapped[NewsArticle] = relationship(back_populates="project_references")
+    matched_project: Mapped[Project | None] = relationship()
+    matched_evidence: Mapped[Evidence | None] = relationship(
+        back_populates="news_project_references"
+    )
+    review_item: Mapped[ReviewItem | None] = relationship()
+
+
+class NewsExtractionCost(Base):
+    __tablename__ = "news_extraction_costs"
+    __table_args__ = (
+        UniqueConstraint("cost_date", "pass", "model"),
+        Index("ix_news_extraction_costs_cost_date", text("cost_date DESC")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    cost_date: Mapped[date] = mapped_column(Date, nullable=False)
+    pass_name: Mapped[str] = mapped_column("pass", Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    input_tokens_uncached: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    input_tokens_cached: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    cost_usd: Mapped[float] = mapped_column(
+        Numeric(12, 6),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+
+class NewsCostCap(Base, TimestampMixin):
+    __tablename__ = "news_cost_caps"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False, unique=True)
+    daily_warn_usd: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False)
+    daily_hard_usd: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False)
+    override_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    override_hard_usd: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    override_set_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    override_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class NewsSignalFlag(Base):
+    __tablename__ = "news_signal_flag_registry"
+    __table_args__ = (
+        Index(
+            "ix_news_signal_flag_registry_active",
+            "active",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    flag_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    display_label: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    example_phrases: Mapped[list[str] | None] = mapped_column(ARRAY(Text()), nullable=True)
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    added_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ServiceCredential(Base):
+    __tablename__ = "service_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    payload_kid: Mapped[str] = mapped_column(Text, nullable=False)
+    set_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SystemAlert(Base):
+    __tablename__ = "system_alerts"
+    __table_args__ = (
+        Index(
+            "uq_system_alerts_active_key_scope",
+            "alert_key",
+            text("COALESCE(scope::text, '{}')"),
+            unique=True,
+            postgresql_where=text("cleared_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    alert_key: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    raised_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleared_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    cleared_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+
+    worker_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    process_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    active_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    active_job_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    heartbeat_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+
+
+class ServiceCredentialValidation(Base):
+    __tablename__ = "service_credential_validations"
+    __table_args__ = (
+        Index(
+            "ix_service_credential_validations_credential_validated_at",
+            "credential_slug",
+            text("validated_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    credential_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    validated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    validated_by_process: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class NewsAdminAction(Base):
+    __tablename__ = "news_admin_actions"
+    __table_args__ = (
+        Index(
+            "ix_news_admin_actions_kind_performed_at",
+            "action_kind",
+            text("performed_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    action_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    performed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    performed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    performed_by_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ReviewItem(Base):

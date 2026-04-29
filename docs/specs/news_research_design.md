@@ -209,6 +209,7 @@ CREATE TABLE news_sources (
   collector_class   TEXT NOT NULL,                   -- 'BizJournalsCollector'
   active            BOOLEAN NOT NULL DEFAULT TRUE,
   schedule_cron     TEXT,                            -- '0 13 * * *' (daily 06:00 PT)
+  schedule_timezone TEXT,                            -- IANA TZ for schedule_cron, e.g. 'America/Los_Angeles'
   config            JSONB,                           -- collector-specific config
   market_id         UUID REFERENCES markets(id),     -- null = multi-market
   jurisdiction_id   UUID REFERENCES jurisdictions(id),
@@ -222,9 +223,9 @@ CREATE INDEX ix_news_sources_active ON news_sources(active);
 Seeded with one row at migration time:
 
 ```sql
-INSERT INTO news_sources (slug, name, base_url, collector_class, schedule_cron, market_id, jurisdiction_id)
+INSERT INTO news_sources (slug, name, base_url, collector_class, schedule_cron, schedule_timezone, market_id, jurisdiction_id)
 VALUES ('bizjournals_la', 'L.A. Business Journal', 'https://www.bizjournals.com/losangeles',
-        'BizJournalsCollector', '0 13 * * *',
+        'BizJournalsCollector', '0 13 * * *', 'America/Los_Angeles',
         (SELECT id FROM markets WHERE slug = 'los_angeles'),
         (SELECT id FROM jurisdictions WHERE slug = 'city_of_los_angeles'));
 ```
@@ -530,7 +531,6 @@ CREATE TABLE system_alerts (
   cleared_reason      TEXT
 );
 
-CREATE INDEX ix_system_alerts_active ON system_alerts(alert_key, raised_at DESC) WHERE cleared_at IS NULL;
 CREATE UNIQUE INDEX uq_system_alerts_one_active_per_key_scope
   ON system_alerts(alert_key, COALESCE(scope::text, '{}'))
   WHERE cleared_at IS NULL;
@@ -617,7 +617,7 @@ The corrected posture:
 | `news_sources` | SELECT (full row) | full |
 | `news_articles` | **No direct SELECT.** Authenticated reads go through view `news_articles_summary` which excludes `raw_html` and `body_text`. | full row via `/research/articles/{id}` |
 | `news_extractions` | **No direct SELECT.** Authenticated reads go through view `news_extractions_summary` which excludes `output_json` and `raw_response_text` and exposes only `pass`, `prompt_id`, `prompt_version`, `model`, `cost_usd`, `parse_status`, timestamps. | full row via `/research/extractions/{id}/raw` |
-| `news_project_references` | SELECT (full row) — these are the structured per-project references the review queue references; no raw article content lives here. | full |
+| `news_project_references` | **No direct SELECT.** Authenticated reads go through `news_project_references_summary`, which excludes `passage_excerpts` because those carry article text snippets. | full row via FastAPI when review rendering needs excerpts |
 | `news_extraction_costs` | SELECT (full row) | full |
 | `news_cost_caps` | SELECT (full row) | full |
 | `news_signal_flag_registry` | SELECT (full row) | full |
@@ -631,21 +631,23 @@ The summary views are defined as:
 
 v2 declared these views with `security_invoker = true`. That was wrong: under invoker security, Postgres requires the *invoker* (the authenticated user) to hold privileges on the *underlying* tables — but we're explicitly revoking authenticated SELECT on `news_articles` and `news_extractions`. Authenticated reads through the views would fail with "permission denied for table news_articles".
 
-The correct mechanic uses **definer-security views owned by a dedicated read role**:
+The correct mechanic uses **definer-security summary views**:
 
 ```sql
--- 1. A dedicated role that exists solely to own the summary views and hold
---    SELECT on the wide columns. Not a login role.
+-- 1. A dedicated no-login marker role. Hosted Supabase pooler connections
+--    cannot reliably transfer view ownership to this role because ALTER OWNER
+--    requires SET ROLE privileges, so the migration leaves views owned by the
+--    migration owner. The security boundary is the projection plus grants below.
 CREATE ROLE news_summary_reader NOLOGIN;
-GRANT SELECT ON news_articles, news_extractions TO news_summary_reader;
 
 -- 2. Revoke authenticated SELECT on the underlying tables.
-REVOKE SELECT ON news_articles, news_extractions FROM authenticated;
+REVOKE SELECT ON news_articles, news_extractions, news_project_references
+FROM authenticated;
 
--- 3. Create the summary views, owned by news_summary_reader.
---    Postgres views default to running with the privileges of their owner
---    (security_definer is the default; security_invoker = false). Setting
---    the option explicitly here documents the intent.
+-- 3. Create the summary views. Postgres views default to running with the
+--    privileges of their owner (security_definer is the default;
+--    security_invoker = false). Setting the option explicitly documents
+--    the intent.
 CREATE VIEW news_articles_summary
 WITH (security_invoker = false) AS
 SELECT id, news_source_id, url_canonical, fetch_status, fetched_at, http_status, title,
@@ -653,7 +655,6 @@ SELECT id, news_source_id, url_canonical, fetch_status, fetched_at, http_status,
        triage_status, triage_at, current_extraction_id, current_extraction_version,
        ingest_method, ingested_by_user_id, created_at, updated_at
 FROM news_articles;
-ALTER VIEW news_articles_summary OWNER TO news_summary_reader;
 
 CREATE VIEW news_extractions_summary
 WITH (security_invoker = false) AS
@@ -661,19 +662,32 @@ SELECT id, article_id, pass, triggered_by, supersedes_extraction_id, prompt_id, 
        model, model_provider, input_tokens_uncached, input_tokens_cached, output_tokens,
        cost_usd, latency_ms, parse_status, parse_error_text, triggered_by_user_id, created_at
 FROM news_extractions;
-ALTER VIEW news_extractions_summary OWNER TO news_summary_reader;
+
+CREATE VIEW news_project_references_summary
+WITH (security_invoker = false) AS
+SELECT id, extraction_id, article_id, reference_index, candidate_name, candidate_address,
+       candidate_developer, candidate_unit_total, candidate_unit_affordable,
+       candidate_unit_market_rate, candidate_product_type, candidate_age_restriction,
+       candidate_status_signal, candidate_delivery_year_text,
+       candidate_delivery_year_normalized, candidate_signal_flags, candidate_identifiers,
+       candidate_neighborhood, candidate_lat, candidate_lng, candidate_confidence,
+       match_status, matched_project_id, match_confidence, match_reason, match_candidates,
+       match_decision_at, matched_evidence_id, review_item_id, manual_relink_by_user_id,
+       manual_relink_at, manual_relink_note, created_at, updated_at
+FROM news_project_references;
 
 -- 4. Grant authenticated SELECT on the views (the safe projection).
-GRANT SELECT ON news_articles_summary, news_extractions_summary TO authenticated;
+GRANT SELECT ON news_articles_summary, news_extractions_summary,
+  news_project_references_summary TO authenticated;
 ```
 
 How this resolves:
 
-- An authenticated PostgREST query against `news_articles_summary` runs through the view; the view executes with the privileges of `news_summary_reader` (its owner); `news_summary_reader` has `SELECT` on `news_articles`; the projection returns only the safe columns.
+- An authenticated PostgREST query against `news_articles_summary` runs through the view; the view executes with the privileges of the migration owner; the projection returns only the safe columns.
 - The same authenticated user querying `news_articles` directly is denied (no SELECT grant; RLS on the table also denies for completeness — see below).
 - Service-role connections (FastAPI's privileged session) bypass these grants entirely and read full rows.
 
-**Underlying-table RLS posture**: keep RLS enabled on `news_articles` and `news_extractions` with no policies for `authenticated` (deny-by-default). The combination of "RLS on, no authenticated policies, no authenticated SELECT grant" is belt-and-suspenders against accidental future grants.
+**Underlying-table RLS posture**: keep RLS enabled on `news_articles`, `news_extractions`, and `news_project_references` with no policies for `authenticated` (deny-by-default). The combination of "RLS on, no authenticated policies, no authenticated SELECT grant" is belt-and-suspenders against accidental future grants.
 
 **Why not a row-level security policy on the view itself?** Postgres doesn't apply RLS to views directly; RLS attaches to base tables. The definer-with-narrow-projection pattern above is idiomatic and is what we want for "public-projection of a private table" in PostgREST + Supabase setups.
 
@@ -691,11 +705,11 @@ Two Alembic migrations:
 
 **`2026_05_NN_create_news_research_phase_d_tables`** — the news content tables:
 
-0. Create `news_summary_reader` role (`NOLOGIN`) — needed before the views in steps 2–3.
+0. Create `news_summary_reader` role (`NOLOGIN`) as a marker role for the summary-view boundary.
 1. `news_sources` + seed `bizjournals_la`.
-2. `news_articles` + `news_articles_summary` view (owned by `news_summary_reader` per §4.14).
-3. `news_extractions` + `news_extractions_summary` view (owned by `news_summary_reader` per §4.14).
-4. `news_project_references`.
+2. `news_articles` + `news_articles_summary` view per §4.14.
+3. `news_extractions` + `news_extractions_summary` view per §4.14.
+4. `news_project_references` + `news_project_references_summary` view excluding `passage_excerpts`.
 5. `news_extraction_costs`.
 6. `news_cost_caps` + seed today's row.
 7. `news_signal_flag_registry` + seed initial flag set (§8.6).
@@ -1838,7 +1852,7 @@ Render starting plan: 1 worker instance, 1 scheduler-flagged. Scale to 2-3 worke
 
 ### 12.5 Scheduling
 
-`news_sources.schedule_cron` is read every 60 seconds by the scheduler tick. Cron expressions parsed via `croniter`. When a scheduled tick fires, the scheduler inserts a `scrape_jobs` row of kind `news_scrape` with `trigger_type='scheduled'`, then enqueues the matching RQ task.
+`news_sources.schedule_cron` and `news_sources.schedule_timezone` are read every 60 seconds by the scheduler tick. Cron expressions are parsed via `croniter` in the source's IANA timezone (for `bizjournals_la`, `America/Los_Angeles`) so the intended local fire time survives DST changes. When a scheduled tick fires, the scheduler inserts a `scrape_jobs` row of kind `news_scrape` with `trigger_type='scheduled'`, then enqueues the matching RQ task.
 
 Process restarts (Render redeploys, OOM kills) are tolerated: the scheduler re-evaluates cron on startup against `derive_last_scheduled_scrape(source)` (computed from `source_runs` per the helper above — no column on `news_sources`) to decide whether a missed tick should fire. Missed daily ticks fire at most once per day.
 

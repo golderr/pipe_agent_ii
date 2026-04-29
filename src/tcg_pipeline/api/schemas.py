@@ -228,8 +228,10 @@ class CoverageScrapeRequest(BaseModel):
 
 class ScrapeJobResponse(BaseModel):
     id: uuid.UUID
-    jurisdiction_id: uuid.UUID
+    jurisdiction_id: uuid.UUID | None
+    kind: str
     source_name: str
+    target_payload: Any | None
     trigger_type: str
     initiated_by_user_id: uuid.UUID | None
     initiated_by_email: str | None
