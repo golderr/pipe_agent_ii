@@ -103,6 +103,24 @@ def test_readiness_returns_503_when_check_fails() -> None:
     assert response.json()["detail"] == "database unavailable"
 
 
+def test_production_readiness_requires_redis_url() -> None:
+    app = create_app(
+        settings=Settings(
+            app_env="production",
+            redis_url=None,
+            allowed_emails="allowed@example.com",
+        ),
+        jwt_verifier=FakeVerifier(),
+        readiness_check=lambda: None,
+    )
+    client = TestClient(app)
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "REDIS_URL is required in production."
+
+
 def test_cors_allows_configured_frontend_origin() -> None:
     client = _client()
 

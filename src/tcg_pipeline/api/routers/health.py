@@ -6,6 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from tcg_pipeline.api.schemas import HealthResponse, ReadyResponse
 from tcg_pipeline.db.connection import get_engine
+from tcg_pipeline.settings import Settings
 
 router = APIRouter(tags=["health"])
 
@@ -23,6 +24,7 @@ def readyz(request: Request) -> ReadyResponse:
             readiness_check()
         else:
             _check_database_ready()
+        _check_required_services_ready(request.app.state.settings)
     except (RuntimeError, SQLAlchemyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -32,3 +34,15 @@ def readyz(request: Request) -> ReadyResponse:
 def _check_database_ready() -> None:
     with get_engine().connect() as connection:
         connection.execute(text("SELECT 1"))
+
+
+def _check_required_services_ready(settings: Settings) -> None:
+    if settings.app_env == "production" and not _clean(settings.redis_url):
+        raise RuntimeError("REDIS_URL is required in production.")
+
+
+def _clean(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text_value = value.strip()
+    return text_value or None

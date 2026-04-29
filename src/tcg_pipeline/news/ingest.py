@@ -17,6 +17,8 @@ from tcg_pipeline.db.models import NewsFetchStatus
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (compatible; TCGPipelineTracker/0.1; +https://tcg-pipeline.vercel.app)"
 )
+# Generic D.7a fallback only. D.2 BizJournals auth must add source-specific
+# login/paywall markers from news_sources.config.
 PAYWALL_PATTERN = re.compile(
     r"\b(subscribe|subscription|sign in|log in|login|register to read|already a subscriber)\b",
     re.IGNORECASE,

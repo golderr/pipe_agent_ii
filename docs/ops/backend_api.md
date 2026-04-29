@@ -53,9 +53,11 @@ closed, including local development, preview, and staging deployments.
 `ENABLE_PREVIEW_WRITES` only affects the Next.js server action guard. Keep it
 false unless a preview write session has an explicit target and owner.
 
-`REDIS_URL` enables durable RQ-backed scrape/news execution. If it is unset,
-local Coverage Refresh and paste-a-link article ingest fall back to FastAPI
-background tasks.
+`REDIS_URL` is required in production. `/readyz` returns `503` when
+`APP_ENV=production` and Redis is not configured, because news ingest and scrape
+jobs need the durable RQ worker boundary to survive deploys and process exits.
+If it is unset outside production, local Coverage Refresh and paste-a-link
+article ingest fall back to FastAPI background tasks.
 
 `GEOCODIO_API_KEY` and `ESRI_API_KEY` are optional for local development, but
 production project creation should configure both. Manual project creation tries
@@ -124,8 +126,8 @@ note?}`. In D.7a, `force_reextract=true` returns `400` because re-extraction is
 a later Phase D step. For a new URL, the API canonicalizes and hashes the URL,
 creates a pending `news_articles` row, creates a
 `scrape_jobs(kind='news_paste_a_link')` row, commits it, and enqueues the RQ
-task. If Redis is unavailable, local/dev execution falls back to a FastAPI
-background task.
+task. Redis is required in production; local/dev execution may fall back to a
+FastAPI background task when Redis is unavailable.
 
 The worker currently runs Pass 0 only: HTTP fetch, trafilatura body extraction,
 metadata parsing, paywall/dead-link/fetch-status detection, and durable

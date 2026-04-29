@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -188,7 +189,7 @@ def scheduler_tick(
 def run_news_paste_a_link_job(
     job_id: uuid.UUID,
     *,
-    fetcher=fetch_article_pass0,
+    fetcher: Callable[[str], ArticleFetchResult] = fetch_article_pass0,
 ) -> None:
     session_factory = get_session_factory()
     try:
@@ -274,6 +275,7 @@ def complete_news_paste_a_link_job(
 
     _apply_article_fetch_result(session, article=article, result=result)
     now = datetime.now(UTC)
+    fetched = result.fetch_status == NewsFetchStatus.FETCHED.value
     source_run = SourceRun(
         market=plan.market_slug,
         jurisdiction_id=plan.jurisdiction_id,
@@ -282,9 +284,9 @@ def complete_news_paste_a_link_job(
         trigger_type=ScrapeTriggerType.USER_INITIATED.value,
         initiated_by_user_id=plan.initiated_by_user_id,
         finished_at=now,
-        records_pulled=1 if result.fetch_status == NewsFetchStatus.FETCHED.value else 0,
-        rows_updated=1,
-        errors=result.error_text,
+        records_pulled=1 if fetched else 0,
+        rows_updated=1 if fetched else 0,
+        errors=_source_run_error_text(result),
     )
     session.add(source_run)
     session.flush()
@@ -393,6 +395,15 @@ def _apply_article_fetch_result(
                 f"Body text duplicates article {duplicate.id}.",
             )
     session.flush()
+
+
+def _source_run_error_text(result: ArticleFetchResult) -> str | None:
+    if result.fetch_status in {
+        NewsFetchStatus.FETCH_FAILED.value,
+        NewsFetchStatus.PARSE_FAILED.value,
+    }:
+        return result.error_text
+    return None
 
 
 def _append_note(existing_note: str | None, new_note: str) -> str:
