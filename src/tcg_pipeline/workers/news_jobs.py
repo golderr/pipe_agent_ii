@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.models import (
+    NewsArticle,
+    NewsFetchStatus,
     NewsSource,
     ScrapeJob,
     ScrapeJobKind,
@@ -22,6 +25,7 @@ from tcg_pipeline.db.models import (
     SourceRun,
     SystemAlert,
 )
+from tcg_pipeline.news.ingest import ArticleFetchResult, fetch_article_pass0
 from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.workers.heartbeat import write_worker_heartbeat
 
@@ -37,6 +41,18 @@ NEWS_JOB_TASK_BY_KIND = {
     ),
 }
 NEWS_JOB_KINDS = frozenset(NEWS_JOB_TASK_BY_KIND)
+
+
+@dataclass(frozen=True, slots=True)
+class NewsPasteLinkPlan:
+    job_id: uuid.UUID
+    article_id: uuid.UUID
+    url: str
+    source_name: str
+    market_slug: str
+    jurisdiction_id: uuid.UUID | None
+    initiated_by_user_id: uuid.UUID | None
+    initiated_by_email: str | None
 
 
 def enqueue_news_job_execution(
@@ -101,7 +117,7 @@ def start_news_scheduler_thread(
 
 
 def run_news_paste_a_link_task(scrape_job_id: str) -> None:
-    _run_unimplemented_news_job(uuid.UUID(scrape_job_id), ScrapeJobKind.NEWS_PASTE_A_LINK.value)
+    run_news_paste_a_link_job(uuid.UUID(scrape_job_id))
 
 
 def run_news_scrape_task(scrape_job_id: str) -> None:
@@ -169,6 +185,125 @@ def scheduler_tick(
     return enqueued_count
 
 
+def run_news_paste_a_link_job(
+    job_id: uuid.UUID,
+    *,
+    fetcher=fetch_article_pass0,
+) -> None:
+    session_factory = get_session_factory()
+    try:
+        with session_factory() as session:
+            plan = start_news_paste_a_link_job(session, job_id=job_id)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+        _record_news_job_failure(job_id, exc)
+        raise
+
+    if plan is None:
+        return
+
+    result = fetcher(plan.url)
+    with session_factory() as session:
+        try:
+            complete_news_paste_a_link_job(session, plan=plan, result=result)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+            session.rollback()
+            _record_news_job_failure(job_id, exc)
+            raise
+
+
+def start_news_paste_a_link_job(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+) -> NewsPasteLinkPlan | None:
+    job = _load_news_job(
+        session,
+        job_id=job_id,
+        expected_kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+    )
+    if job is None:
+        return None
+    payload = job.target_payload or {}
+    article_id = _payload_uuid(payload, "article_id")
+    article = session.get(NewsArticle, article_id)
+    if article is None:
+        raise RuntimeError("News paste-a-link job references a missing article.")
+    source = article.source
+    now = datetime.now(UTC)
+    article.fetch_attempts += 1
+    article.last_attempted_at = now
+    job.status = ScrapeJobStatus.RUNNING
+    job.started_at = now
+    job.progress = {
+        "message": "Fetching and parsing article.",
+        "article_id": str(article.id),
+    }
+    session.flush()
+    return NewsPasteLinkPlan(
+        job_id=job.id,
+        article_id=article.id,
+        url=str(payload.get("url_canonical") or article.url_canonical),
+        source_name=source.slug,
+        market_slug=source.market.slug if source.market else "unscoped",
+        jurisdiction_id=job.jurisdiction_id or source.jurisdiction_id,
+        initiated_by_user_id=job.initiated_by_user_id,
+        initiated_by_email=job.initiated_by_email,
+    )
+
+
+def complete_news_paste_a_link_job(
+    session: Session,
+    *,
+    plan: NewsPasteLinkPlan,
+    result: ArticleFetchResult,
+) -> ScrapeJob:
+    article = session.execute(
+        select(NewsArticle)
+        .where(NewsArticle.id == plan.article_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if article is None:
+        raise RuntimeError("News article disappeared before Pass 0 completion.")
+    job = session.get(ScrapeJob, plan.job_id)
+    if job is None:
+        raise RuntimeError("News scrape job disappeared before Pass 0 completion.")
+    if job.status != ScrapeJobStatus.RUNNING:
+        return job
+
+    _apply_article_fetch_result(session, article=article, result=result)
+    now = datetime.now(UTC)
+    source_run = SourceRun(
+        market=plan.market_slug,
+        jurisdiction_id=plan.jurisdiction_id,
+        source_name=plan.source_name,
+        collection_mode="single",
+        trigger_type=ScrapeTriggerType.USER_INITIATED.value,
+        initiated_by_user_id=plan.initiated_by_user_id,
+        finished_at=now,
+        records_pulled=1 if result.fetch_status == NewsFetchStatus.FETCHED.value else 0,
+        rows_updated=1,
+        errors=result.error_text,
+    )
+    session.add(source_run)
+    session.flush()
+
+    job.status = ScrapeJobStatus.COMPLETED
+    job.completed_at = now
+    job.source_run_id = source_run.id
+    job.error_text = None
+    job.progress = {
+        "message": "Article ingest completed.",
+        "article_id": str(article.id),
+        "fetch_status": article.fetch_status,
+        "http_status": article.http_status,
+        "body_text_chars": len(article.body_text or ""),
+    }
+    session.flush()
+    return job
+
+
 def _run_unimplemented_news_job(job_id: uuid.UUID, expected_kind: str) -> None:
     session_factory = get_session_factory()
     now = datetime.now(UTC)
@@ -207,6 +342,94 @@ def _load_news_job(
         return None
     if job.kind != expected_kind:
         raise RuntimeError(f"Expected {expected_kind} job, found {job.kind}.")
+    return job
+
+
+def _payload_uuid(payload: dict, key: str) -> uuid.UUID:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise RuntimeError(f"News scrape job payload is missing '{key}'.")
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise RuntimeError(f"News scrape job payload has invalid '{key}'.") from exc
+
+
+def _apply_article_fetch_result(
+    session: Session,
+    *,
+    article: NewsArticle,
+    result: ArticleFetchResult,
+) -> None:
+    now = datetime.now(UTC)
+    article.fetch_status = result.fetch_status
+    article.fetched_at = now if result.fetch_status == NewsFetchStatus.FETCHED.value else None
+    article.fetch_error_text = result.error_text
+    article.http_status = result.http_status
+    article.raw_html = result.raw_html
+    article.raw_html_hash = result.raw_html_hash
+    article.body_text = result.body_text
+    article.body_text_hash = result.body_text_hash
+    article.title = result.title
+    article.byline_author = result.byline_author
+    article.published_at = result.published_at
+    article.publication_section = result.publication_section
+    article.tags = result.tags
+    article.external_article_id = result.external_article_id
+    article.language = result.language or "en"
+    article.paywall_state = result.paywall_state
+    if result.body_text_hash:
+        duplicate = session.execute(
+            select(NewsArticle)
+            .where(
+                NewsArticle.body_text_hash == result.body_text_hash,
+                NewsArticle.id != article.id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if duplicate is not None:
+            article.notes = _append_note(
+                article.notes,
+                f"Body text duplicates article {duplicate.id}.",
+            )
+    session.flush()
+
+
+def _append_note(existing_note: str | None, new_note: str) -> str:
+    if existing_note and existing_note.strip():
+        return f"{existing_note.rstrip()}\n{new_note}"
+    return new_note
+
+
+def _record_news_job_failure(job_id: uuid.UUID, error: Exception) -> None:
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        try:
+            mark_news_job_failed(session, job_id=job_id, error=error)
+            session.commit()
+        except Exception:
+            session.rollback()
+
+
+def mark_news_job_failed(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+    error: Exception,
+) -> ScrapeJob | None:
+    job = session.get(ScrapeJob, job_id)
+    if job is None or job.status in {ScrapeJobStatus.COMPLETED, ScrapeJobStatus.CANCELLED}:
+        return job
+    job.status = ScrapeJobStatus.FAILED
+    job.completed_at = datetime.now(UTC)
+    job.error_text = str(error)
+    job.progress = {"message": "News job failed."}
+    if job.target_payload and isinstance(job.target_payload.get("article_id"), str):
+        article = session.get(NewsArticle, uuid.UUID(job.target_payload["article_id"]))
+        if article is not None:
+            article.fetch_status = NewsFetchStatus.FETCH_FAILED.value
+            article.fetch_error_text = str(error)
+    session.flush()
     return job
 
 

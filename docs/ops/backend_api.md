@@ -53,8 +53,9 @@ closed, including local development, preview, and staging deployments.
 `ENABLE_PREVIEW_WRITES` only affects the Next.js server action guard. Keep it
 false unless a preview write session has an explicit target and owner.
 
-`REDIS_URL` enables durable RQ-backed scrape execution. If it is unset, local
-Coverage Refresh falls back to FastAPI background tasks.
+`REDIS_URL` enables durable RQ-backed scrape/news execution. If it is unset,
+local Coverage Refresh and paste-a-link article ingest fall back to FastAPI
+background tasks.
 
 `GEOCODIO_API_KEY` and `ESRI_API_KEY` are optional for local development, but
 production project creation should configure both. Manual project creation tries
@@ -104,6 +105,38 @@ rather than threads inside a single process.
 Set the same environment variables as local, with production values. The Render
 service should not be used by Vercel preview writes until the preview/staging
 policy is revisited for Phase C.
+
+For production worker monitoring, set a stable `WORKER_NAME` per Render worker
+service. If it is omitted, the worker falls back to a hostname/PID-derived name,
+which is useful locally but creates stale heartbeat rows across redeploys.
+
+## D.7a Research Article Ingest
+
+Paste-a-link uses the FastAPI write boundary:
+
+```text
+POST /research/articles
+GET  /research/articles/{article_id}
+```
+
+`POST /research/articles` accepts `{url, force_reextract?, force_project_id?,
+note?}`. In D.7a, `force_reextract=true` returns `400` because re-extraction is
+a later Phase D step. For a new URL, the API canonicalizes and hashes the URL,
+creates a pending `news_articles` row, creates a
+`scrape_jobs(kind='news_paste_a_link')` row, commits it, and enqueues the RQ
+task. If Redis is unavailable, local/dev execution falls back to a FastAPI
+background task.
+
+The worker currently runs Pass 0 only: HTTP fetch, trafilatura body extraction,
+metadata parsing, paywall/dead-link/fetch-status detection, and durable
+`news_articles` updates. It also records a `source_runs` audit row and completes
+the scrape job. Pass 1 structural extraction and LLM extraction are later Phase
+D steps.
+
+`GET /research/articles/{article_id}` is an allowlisted FastAPI admin read. It
+returns article metadata and `body_text`; raw HTML remains stored in the DB but
+is not projected in this response. Authenticated PostgREST users still do not
+receive direct `SELECT` on `news_articles`.
 
 ## Preview Write Policy
 

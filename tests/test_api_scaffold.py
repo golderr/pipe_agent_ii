@@ -458,7 +458,9 @@ def _fake_scrape_job() -> object:
     return SimpleNamespace(
         id=JOB_ID,
         jurisdiction_id=JURISDICTION_ID,
+        kind="collector_run",
         source_name="ladbs_permits",
+        target_payload=None,
         trigger_type=ScrapeTriggerType.USER_INITIATED,
         initiated_by_user_id=USER_ID,
         initiated_by_email="allowed@example.com",

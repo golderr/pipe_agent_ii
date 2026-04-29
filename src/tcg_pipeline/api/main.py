@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from tcg_pipeline.api.auth import SupabaseJWTVerifier, TokenVerifier
-from tcg_pipeline.api.routers import auth, coverage, evidence, health, projects, review
+from tcg_pipeline.api.routers import auth, coverage, evidence, health, projects, research, review
 from tcg_pipeline.settings import Settings, get_settings
 
 ReadinessCheck = Callable[[], None]
@@ -46,6 +46,7 @@ def create_app(
     app.include_router(review.router)
     app.include_router(coverage.router)
     app.include_router(evidence.router)
+    app.include_router(research.router)
 
     @app.get("/")
     def root() -> dict[str, str]:

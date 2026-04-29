@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -264,3 +264,83 @@ class CoStarUploadResponse(BaseModel):
     source_run_id: uuid.UUID | None
     status: str
     error_text: str | None
+
+
+class ResearchArticleCreateRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=4000)
+    force_reextract: bool = False
+    force_project_id: uuid.UUID | None = None
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def url_must_be_absolute_http_url(cls, value: str) -> str:
+        text = value.strip()
+        if not text.lower().startswith(("http://", "https://")):
+            raise ValueError("URL must start with http:// or https://.")
+        return text
+
+
+class ResearchArticleCreateResponse(BaseModel):
+    article_id: uuid.UUID
+    scrape_job_id: uuid.UUID | None
+    status: str
+    existing_article: bool
+
+
+class ResearchArticleDetail(BaseModel):
+    id: uuid.UUID
+    news_source_id: uuid.UUID
+    source_name: str
+    url_canonical: str
+    url_original: str
+    fetch_status: str
+    fetch_attempts: int
+    fetched_at: str | None
+    fetch_error_text: str | None
+    http_status: int | None
+    title: str | None
+    byline_author: str | None
+    published_at: str | None
+    publication_section: str | None
+    tags: list[str] | None
+    external_article_id: str | None
+    language: str
+    paywall_state: str | None
+    body_text: str | None
+    body_text_hash: str | None
+    raw_html_hash: str | None
+    ingest_method: str
+    ingested_by_user_id: uuid.UUID | None
+    notes: str | None
+    created_at: str
+    updated_at: str
+
+
+class ResearchExtractionSummary(BaseModel):
+    id: uuid.UUID
+    pass_name: str
+    triggered_by: str
+    prompt_id: str
+    prompt_version: str
+    model: str
+    parse_status: str
+    created_at: str
+
+
+class ResearchReferenceSummary(BaseModel):
+    id: uuid.UUID
+    extraction_id: uuid.UUID
+    reference_index: int
+    candidate_name: str | None
+    candidate_address: str | None
+    candidate_developer: str | None
+    match_status: str
+    matched_project_id: uuid.UUID | None
+
+
+class ResearchArticleDetailResponse(BaseModel):
+    article: ResearchArticleDetail
+    scrape_jobs: list[ScrapeJobResponse]
+    extractions: list[ResearchExtractionSummary]
+    references: list[ResearchReferenceSummary]

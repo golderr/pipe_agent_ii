@@ -11,13 +11,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from tcg_pipeline.db.models import (
     Jurisdiction,
     Market,
+    NewsArticle,
+    NewsFetchStatus,
     NewsSource,
     ScrapeJob,
     ScrapeJobKind,
     ScrapeJobStatus,
+    SourceRun,
     SystemAlert,
     WorkerHeartbeat,
 )
+from tcg_pipeline.news.ingest import ArticleFetchResult
 from tcg_pipeline.settings import Settings
 from tcg_pipeline.workers import news_jobs, scrape_jobs
 from tcg_pipeline.workers.heartbeat import (
@@ -188,9 +192,9 @@ def test_unimplemented_news_task_marks_job_failed_and_alerts(
     _ensure_worker_tables(postgres_session)
     job = ScrapeJob(
         jurisdiction_id=None,
-        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
-        source_name="news_paste_a_link",
-        target_payload={"url": "https://example.com/article"},
+        kind=ScrapeJobKind.NEWS_REEXTRACT.value,
+        source_name="news_reextraction",
+        target_payload={"article_id": str(uuid.uuid4())},
         status=ScrapeJobStatus.QUEUED,
     )
     postgres_session.add(job)
@@ -211,7 +215,7 @@ def test_unimplemented_news_task_marks_job_failed_and_alerts(
     )
 
     with pytest.raises(NotImplementedError, match="not implemented"):
-        news_jobs.run_news_paste_a_link_task(str(job.id))
+        news_jobs.run_news_reextract_task(str(job.id))
 
     postgres_session.expire_all()
     refreshed_job = postgres_session.get(ScrapeJob, job.id)
@@ -227,7 +231,7 @@ def test_unimplemented_news_task_marks_job_failed_and_alerts(
     ).scalar_one()
     assert alert.scope == {
         "job_id": str(job.id),
-        "kind": ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        "kind": ScrapeJobKind.NEWS_REEXTRACT.value,
     }
 
 
@@ -266,6 +270,81 @@ def test_raise_system_alert_upserts_active_alert(postgres_session: Session) -> N
     assert alert.severity == "warning"
     assert alert.message == "Second message."
     assert alert.detail == {"attempt": 2}
+
+
+def test_paste_link_worker_runs_pass0_and_completes_job(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical="https://example.com/pass0-worker",
+        url_original="https://example.com/pass0-worker?utm_source=test",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.PENDING.value,
+        ingest_method=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    job = ScrapeJob(
+        jurisdiction_id=source.jurisdiction_id,
+        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        source_name=source.slug,
+        target_payload={
+            "article_id": str(article.id),
+            "url": article.url_original,
+            "url_canonical": article.url_canonical,
+            "url_hash": article.url_hash,
+        },
+        status=ScrapeJobStatus.QUEUED,
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+    result = ArticleFetchResult(
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        final_url=article.url_canonical,
+        http_status=200,
+        raw_html="<html><body>Article</body></html>",
+        raw_html_hash="rawhash",
+        body_text="Developer announced a 140-unit project in Los Angeles.",
+        body_text_hash="bodyhash",
+        title="Developer announces project",
+        byline_author="Ava Reporter",
+        published_at=datetime(2026, 4, 28, 20, 0, tzinfo=UTC),
+        publication_section="Real Estate",
+        tags=["housing"],
+        external_article_id="article-1",
+        paywall_state="open",
+    )
+
+    news_jobs.run_news_paste_a_link_job(job.id, fetcher=lambda _url: result)
+
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_job is not None
+    assert refreshed_article is not None
+    assert refreshed_job.status == ScrapeJobStatus.COMPLETED
+    assert refreshed_job.source_run_id is not None
+    assert refreshed_job.progress["fetch_status"] == NewsFetchStatus.FETCHED.value
+    assert refreshed_article.fetch_status == NewsFetchStatus.FETCHED.value
+    assert refreshed_article.fetch_attempts == 1
+    assert refreshed_article.title == "Developer announces project"
+    assert refreshed_article.body_text == result.body_text
+    source_run = postgres_session.get(SourceRun, refreshed_job.source_run_id)
+    assert source_run is not None
+    assert source_run.source_name == "news_paste_a_link"
+    assert source_run.collection_mode == "single"
+    assert source_run.records_pulled == 1
 
 
 def test_duplicate_scheduled_news_job_keeps_session_usable(
@@ -351,3 +430,12 @@ def _ensure_news_scheduler_tables(postgres_session: Session) -> None:
     ]
     if missing:
         pytest.skip(f"Apply D.1 migrations before running scheduler tests: {missing}")
+
+
+def _news_source(postgres_session: Session, slug: str) -> NewsSource:
+    source = postgres_session.execute(
+        select(NewsSource).where(NewsSource.slug == slug)
+    ).scalar_one_or_none()
+    if source is None:
+        pytest.skip(f"Apply latest Phase D migrations before running worker tests: {slug}")
+    return source

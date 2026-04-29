@@ -32,6 +32,19 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
     assert news_source["market_id"] is not None
     assert news_source["jurisdiction_id"] is not None
 
+    paste_source = postgres_session.execute(
+        text(
+            """
+            SELECT news_sources.slug, jurisdictions.slug AS jurisdiction_slug
+            FROM news_sources
+            JOIN jurisdictions ON jurisdictions.id = news_sources.jurisdiction_id
+            WHERE news_sources.slug = 'news_paste_a_link'
+            """
+        )
+    ).mappings().one_or_none()
+    assert paste_source is not None
+    assert paste_source["jurisdiction_slug"] == "unknown_unscoped"
+
     sentinel = postgres_session.execute(
         text(
             """
