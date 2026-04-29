@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     scrape_job_timeout_seconds: int = 900
     scrape_job_result_ttl_seconds: int = 86400
     scrape_job_failure_ttl_seconds: int = 604800
+    worker_name: str | None = None
+    worker_heartbeat_interval_seconds: int = 30
+    worker_health_port: int = 8081
+    worker_health_max_age_seconds: int = 300
+    news_scheduler_leader: bool = False
+    news_scheduler_interval_seconds: int = 60
+    news_scheduler_catchup_hours: int = 24
 
     api_cors_origins: str = "http://localhost:3000"
     api_auth_audience: str = "authenticated"

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.utils.logging import configure_logging
+from tcg_pipeline.workers.health import start_worker_health_server
+from tcg_pipeline.workers.heartbeat import start_heartbeat_thread
+from tcg_pipeline.workers.news_jobs import start_news_scheduler_thread
 
 LOGGER = logging.getLogger(__name__)
 
@@ -119,12 +124,39 @@ def run_worker(
     redis_cls, queue_cls, worker_cls = _rq_imports()
     connection = redis_cls.from_url(redis_url)
     queue = queue_cls(queue_name or resolved_settings.scrape_job_queue_name, connection=connection)
+    session_factory = _session_factory()
+    worker_name = _worker_name(resolved_settings)
+    start_heartbeat_thread(
+        worker_name=worker_name,
+        session_factory=session_factory,
+        interval_seconds=resolved_settings.worker_heartbeat_interval_seconds,
+        metadata_factory=lambda: {"queue_name": queue.name},
+    )
+    start_worker_health_server(
+        worker_name=worker_name,
+        session_factory=session_factory,
+        port=resolved_settings.worker_health_port,
+        max_age_seconds=resolved_settings.worker_health_max_age_seconds,
+    )
+    start_news_scheduler_thread(settings=resolved_settings, session_factory=session_factory)
     worker = worker_cls([queue], connection=connection)
     return worker.work(burst=burst)
 
 
 def _settings(settings: Settings | None) -> Settings:
     return settings or get_settings()
+
+
+def _session_factory():
+    from tcg_pipeline.db.connection import get_session_factory
+
+    return get_session_factory()
+
+
+def _worker_name(settings: Settings) -> str:
+    if settings.worker_name:
+        return settings.worker_name
+    return f"scrape-worker-{socket.gethostname()}-{os.getpid()}"
 
 
 def _clean(value: str | None) -> str | None:
