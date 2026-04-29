@@ -27,6 +27,7 @@ from tcg_pipeline.db.models import (
     SystemAlert,
 )
 from tcg_pipeline.news.ingest import ArticleFetchResult, fetch_article_pass0
+from tcg_pipeline.news.structural import apply_structural_signals
 from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.workers.heartbeat import write_worker_heartbeat
 
@@ -51,6 +52,7 @@ class NewsPasteLinkPlan:
     url: str
     source_name: str
     market_slug: str
+    market_id: uuid.UUID | None
     jurisdiction_id: uuid.UUID | None
     initiated_by_user_id: uuid.UUID | None
     initiated_by_email: str | None
@@ -248,6 +250,7 @@ def start_news_paste_a_link_job(
         url=str(payload.get("url_canonical") or article.url_canonical),
         source_name=source.slug,
         market_slug=source.market.slug if source.market else "unscoped",
+        market_id=source.market_id,
         jurisdiction_id=job.jurisdiction_id or source.jurisdiction_id,
         initiated_by_user_id=job.initiated_by_user_id,
         initiated_by_email=job.initiated_by_email,
@@ -276,6 +279,14 @@ def complete_news_paste_a_link_job(
     _apply_article_fetch_result(session, article=article, result=result)
     now = datetime.now(UTC)
     fetched = result.fetch_status == NewsFetchStatus.FETCHED.value
+    if fetched:
+        apply_structural_signals(
+            session,
+            article=article,
+            market_slug=plan.market_slug,
+            market_id=plan.market_id,
+            now=now,
+        )
     source_run = SourceRun(
         market=plan.market_slug,
         jurisdiction_id=plan.jurisdiction_id,

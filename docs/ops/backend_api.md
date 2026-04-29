@@ -129,11 +129,11 @@ creates a pending `news_articles` row, creates a
 task. Redis is required in production; local/dev execution may fall back to a
 FastAPI background task when Redis is unavailable.
 
-The worker currently runs Pass 0 only: HTTP fetch, trafilatura body extraction,
-metadata parsing, paywall/dead-link/fetch-status detection, and durable
-`news_articles` updates. It also records a `source_runs` audit row and completes
-the scrape job. Pass 1 structural extraction and LLM extraction are later Phase
-D steps.
+The worker runs Pass 0 and Pass 1 for successfully fetched articles: HTTP fetch,
+trafilatura body extraction, metadata parsing, paywall/dead-link/fetch-status
+detection, durable `news_articles` updates, and structural signal extraction into
+`news_articles.structural_signals`. It also records a `source_runs` audit row and
+completes the scrape job. LLM triage/extraction remains a later Phase D step.
 
 `GET /research/articles/{article_id}` is an allowlisted FastAPI admin read. It
 returns article metadata and `body_text`; raw HTML remains stored in the DB but

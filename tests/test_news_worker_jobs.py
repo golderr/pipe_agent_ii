@@ -340,6 +340,13 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
     assert refreshed_article.fetch_attempts == 1
     assert refreshed_article.title == "Developer announces project"
     assert refreshed_article.body_text == result.body_text
+    assert refreshed_article.structural_signals_at is not None
+    assert refreshed_article.structural_signals is not None
+    assert any(
+        signal["extractor"] == "unit_count"
+        and signal["canonical"] == 140
+        for signal in refreshed_article.structural_signals["signals"]
+    )
     source_run = postgres_session.get(SourceRun, refreshed_job.source_run_id)
     assert source_run is not None
     assert source_run.source_name == "news_paste_a_link"
