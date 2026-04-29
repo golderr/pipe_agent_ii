@@ -148,6 +148,12 @@ It also records a `source_runs` audit row and completes the scrape job. Matching
 evidence creation, review items, and re-extraction triggers remain later Phase D
 steps.
 
+If Pass 2b extraction raises after Pass 0/1/2a succeeded, the scrape job still
+completes because the article ingest and triage state are durable. The job
+progress records `extraction_skipped_reason = "error"` and
+`extraction_error_text` for admin follow-up; forced retry/re-extraction is a
+later Phase D path.
+
 Pass 2a/2b use the active prompts in `config/news_prompts.yaml` and prompt files
 under `src/tcg_pipeline/news/prompts/`. Pass 2b renders the known
 developer/project glossary and signal-flag registry into cached system prompt
@@ -157,6 +163,8 @@ Postgres advisory lock before Anthropic calls, then true-ups
 `news_extraction_costs` after each response is parsed. Token accounting tracks
 regular input, cache-creation input, cache-read input, and output tokens
 separately so cache writes are billed at their higher provider rate.
+Pass 2b reserves `$0.75` before each Opus extraction to cover the cache-miss
+case for the current LA glossary size.
 
 `GET /research/articles/{article_id}` is an allowlisted FastAPI admin read. It
 returns article metadata and `body_text`; raw HTML remains stored in the DB but

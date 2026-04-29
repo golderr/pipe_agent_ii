@@ -257,8 +257,15 @@ def run_news_paste_a_link_job(
         try:
             extraction_result = extraction_runner(ingest_result.article_id)
         except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
-            _record_news_job_failure(job_id, exc)
-            raise
+            extraction_result = NewsExtractionRunResult(
+                article_id=ingest_result.article_id,
+                extraction_id=None,
+                relevance=None,
+                reference_count=0,
+                parse_status=None,
+                skipped_reason="error",
+                error_text=str(exc),
+            )
     with session_factory() as session:
         try:
             finish_news_paste_a_link_job(
@@ -428,6 +435,7 @@ def finish_news_paste_a_link_job(
         job.progress["extraction_parse_status"] = extraction_result.parse_status
         job.progress["extraction_reference_count"] = extraction_result.reference_count
         job.progress["extraction_skipped_reason"] = extraction_result.skipped_reason
+        job.progress["extraction_error_text"] = extraction_result.error_text
     elif ingest_result.fetched:
         if triage_result is None:
             job.progress["triage_status"] = "skipped"

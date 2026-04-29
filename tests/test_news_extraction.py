@@ -19,9 +19,12 @@ from tcg_pipeline.db.models import (
     NewsSignalFlag,
     NewsSource,
     NewsTriageStatus,
+    PipelineStatus,
+    Project,
     SystemAlert,
 )
 from tcg_pipeline.news.extraction import (
+    EXTRACTION_ESTIMATED_COST_USD,
     ExtractionLLMResponse,
     NewsExtractionRunResult,
     parse_extraction_response,
@@ -29,7 +32,7 @@ from tcg_pipeline.news.extraction import (
     run_news_extraction_for_article,
 )
 from tcg_pipeline.news.llm import LLMUsage
-from tcg_pipeline.news.prompts import render_extraction_prompt
+from tcg_pipeline.news.prompts import render_extraction_prompt, render_news_glossary
 from tcg_pipeline.settings import Settings
 
 
@@ -78,6 +81,57 @@ def test_parse_extraction_response_does_not_trust_truncated_or_refused_json() ->
     assert truncated.parse_status == NewsExtractionParseStatus.TRUNCATED.value
     assert refused.payload is None
     assert refused.parse_status == NewsExtractionParseStatus.REFUSED.value
+
+
+def test_extraction_reservation_estimate_covers_opus_cache_miss_headroom() -> None:
+    assert EXTRACTION_ESTIMATED_COST_USD == Decimal("0.75")
+
+
+def test_render_news_glossary_excludes_inactive_and_deleted_projects(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    unique_id = uuid.uuid4().hex
+    active_project = Project(
+        canonical_address=f"100 {unique_id[:8]} Main St",
+        market=source.market.slug if source.market else "unscoped",
+        market_id=source.market_id,
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name=f"Active News Project {unique_id}",
+        pipeline_status=PipelineStatus.PROPOSED,
+    )
+    inactive_project = Project(
+        canonical_address=f"200 {unique_id[:8]} Main St",
+        market=source.market.slug if source.market else "unscoped",
+        market_id=source.market_id,
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name=f"Inactive News Project {unique_id}",
+        pipeline_status=PipelineStatus.INACTIVE,
+    )
+    deleted_project = Project(
+        canonical_address=f"300 {unique_id[:8]} Main St",
+        market=source.market.slug if source.market else "unscoped",
+        market_id=source.market_id,
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name=f"Deleted News Project {unique_id}",
+        pipeline_status=PipelineStatus.DELETE_DUPLICATE,
+    )
+    article = _article(source)
+    postgres_session.add_all([active_project, inactive_project, deleted_project, article])
+    postgres_session.flush()
+
+    glossary = render_news_glossary(postgres_session, article)
+
+    assert active_project.project_name in glossary
+    assert inactive_project.project_name not in glossary
+    assert deleted_project.project_name not in glossary
 
 
 def test_persist_extraction_response_writes_extraction_references_article_pointer_and_cost(

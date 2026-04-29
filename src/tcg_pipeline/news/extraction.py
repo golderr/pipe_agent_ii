@@ -44,7 +44,7 @@ from tcg_pipeline.news.prompts import RenderedPrompt, render_extraction_prompt
 from tcg_pipeline.settings import Settings, get_settings
 
 EXTRACTION_TRIGGERED_BY = "initial"
-EXTRACTION_ESTIMATED_COST_USD = Decimal("0.30")
+EXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
 EXTRACTION_TEMPERATURE = 0
 EXTRACTION_MAX_TOKENS = 2500
 EXTRACTION_TOOL_NAME = "emit_project_extraction"
@@ -76,6 +76,7 @@ class NewsExtractionRunResult:
     reference_count: int
     parse_status: str | None
     skipped_reason: str | None = None
+    error_text: str | None = None
 
 
 class ExtractionLLMClient(Protocol):

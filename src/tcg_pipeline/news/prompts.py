@@ -16,12 +16,19 @@ from tcg_pipeline.db.models import (
     DeveloperRegistry,
     NewsArticle,
     NewsSignalFlag,
+    PipelineStatus,
     Project,
 )
 
 PROMPT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "news_prompts.yaml"
 PROMPT_ROOT = Path(__file__).with_name("prompts")
 PROMPT_ID_RE = re.compile(r".+_v\d+")
+GLOSSARY_EXCLUDED_PROJECT_STATUSES = (
+    PipelineStatus.INACTIVE,
+    PipelineStatus.DELETE_DUPLICATE,
+    PipelineStatus.DELETE_OUTSIDE_MARKET_AREA,
+    PipelineStatus.DELETE_NOT_RESIDENTIAL,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,9 +188,12 @@ def render_news_glossary(session: Session, article: NewsArticle) -> str:
     if developer_count == 0:
         developer_lines.append("- none")
 
-    project_query = select(Project).order_by(Project.project_name.asc().nulls_last())
+    project_query = select(Project).where(
+        ~Project.pipeline_status.in_(GLOSSARY_EXCLUDED_PROJECT_STATUSES)
+    )
     if market_id is not None:
         project_query = project_query.where(Project.market_id == market_id)
+    project_query = project_query.order_by(Project.project_name.asc().nulls_last())
     project_lines = ["Projects:"]
     project_count = 0
     for project in session.execute(project_query).scalars():

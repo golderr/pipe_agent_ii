@@ -2196,8 +2196,8 @@ Using current Anthropic pricing (April 2026 rates encoded in code):
 | Pass | Model | Input | Cache creation | Cache read | Output | Per-article cost |
 |---|---|---|---|---|---|---|
 | 2a triage | Haiku 4.5 | ~3K tokens | first-call static prompt writes only | near-zero | ~100 tokens | ~$0.005 |
-| 2b extract | Opus 4.7 | ~3K tokens | first-call static prompt writes only | ~10K tokens | ~1.5K tokens | ~$0.05 (cached) |
-| 3 reextract | Opus 4.7 | ~3.5K tokens | first-call static prompt writes only | ~10K tokens | ~1.5K tokens | ~$0.05 |
+| 2b extract | Opus 4.7 | ~5K article tokens | glossary/system cache writes on miss | ~30K+ glossary tokens on hit | ~1K tokens | ~$0.20 cached / ~$0.75 cache miss |
+| 3 reextract | Opus 4.7 | ~5K article tokens | glossary/system cache writes on miss | ~30K+ glossary tokens on hit | ~1K tokens | ~$0.20 cached / ~$0.75 cache miss |
 
 Cost accounting tracks regular input, cache-creation input, cache-read input,
 and output separately because Anthropic bills cache writes above the base input
@@ -2210,7 +2210,11 @@ Assume:
 - 60% triaged relevant (broad-net): 30 articles to Pass 2.
 - 20% trigger Pass 3: 6 articles to Pass 3.
 
-Daily cost: `50 × $0.005 (triage) + 30 × $0.05 (extract) + 6 × $0.05 (reextract) = $0.25 + $1.50 + $0.30 = ~$2.05/day`.
+Daily cost depends on cache-hit behavior. For a tight scrape batch, a working
+estimate is `50 × $0.005 (triage) + 30 × $0.20 (extract) + 6 × $0.20
+(reextract) = $0.25 + $6.00 + $1.20 = ~$7.45/day`. Sporadic paste-a-link calls
+are reserved at `$0.75` each to cover cache misses against the current LA
+glossary size.
 
 This is well under the $25 warn cap. The cap exists to catch:
 
@@ -2222,9 +2226,14 @@ This is well under the $25 warn cap. The cap exists to catch:
 
 v1 priced the 8-week backfill at 2,800 articles, which conflicted with §12.7's estimate of ~200 URLs. The 200-URL figure is the realistic LABJ real-estate volume (LABJ publishes ~25–30 real-estate-tagged articles per week, of which most reach the section index). v2 reconciles to ~200.
 
-For ~200 URLs: triage all = ~$1. Pass 2 on 60% (~120 articles) = ~$6. Pass 3 on 20% of those (~24 articles) = ~$1.20. Total backfill ~$8–$10.
+For ~200 URLs: triage all = ~$1. Pass 2 on 60% (~120 articles) at cached-batch
+rates is roughly ~$24. Pass 3 on 20% of those (~24 articles) is roughly ~$5.
+Total backfill is now expected around ~$30-$40 depending on cache hit rate and
+article length.
 
-This fits comfortably in a single day under the $25 warn cap; no cap bump required. Researcher kicks off the backfill in the morning; it completes over a few hours.
+This may need a temporary cap bump above the default $35 hard cap or a multi-day
+backfill window. Researcher kicks off the backfill in the morning; it completes
+over a few hours when cap headroom allows.
 
 The 2,800-article figure remains useful as an upper bound when planning capacity for D.8 multi-source expansion; treat it as "headroom we have if we add 5+ news sources" rather than the BizJournals backfill estimate.
 

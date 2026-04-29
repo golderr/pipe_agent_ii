@@ -395,6 +395,95 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
     assert source_run.errors is None
 
 
+def test_paste_link_worker_completes_when_extraction_stage_errors(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical="https://example.com/extraction-error-worker",
+        url_original="https://example.com/extraction-error-worker",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.PENDING.value,
+        ingest_method=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    job = ScrapeJob(
+        jurisdiction_id=source.jurisdiction_id,
+        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        source_name=source.slug,
+        target_payload={
+            "article_id": str(article.id),
+            "url": article.url_original,
+            "url_canonical": article.url_canonical,
+            "url_hash": article.url_hash,
+        },
+        status=ScrapeJobStatus.QUEUED,
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+    result = ArticleFetchResult(
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        final_url=article.url_canonical,
+        http_status=200,
+        raw_html="<html><body>Article</body></html>",
+        raw_html_hash="rawhash",
+        body_text="Developer announced a 140-unit project in Los Angeles.",
+        body_text_hash="bodyhash",
+        title="Developer announces project",
+        published_at=datetime(2026, 4, 28, 20, 0, tzinfo=UTC),
+        paywall_state="open",
+    )
+
+    def fake_triage_runner(article_id: uuid.UUID) -> NewsTriageRunResult:
+        with task_session_factory() as session:
+            triage_article = session.get(NewsArticle, article_id)
+            assert triage_article is not None
+            triage_article.triage_status = NewsTriageStatus.RELEVANT.value
+            session.commit()
+        return NewsTriageRunResult(
+            article_id=article_id,
+            extraction_id=uuid.uuid4(),
+            triage_status=NewsTriageStatus.RELEVANT.value,
+            relevant=True,
+            reason="Article mentions a development project.",
+            parse_status="ok",
+        )
+
+    def failing_extraction_runner(_article_id: uuid.UUID) -> NewsExtractionRunResult:
+        raise RuntimeError("Anthropic 429")
+
+    news_jobs.run_news_paste_a_link_job(
+        job.id,
+        fetcher=lambda _url: result,
+        triage_runner=fake_triage_runner,
+        extraction_runner=failing_extraction_runner,
+    )
+
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_job is not None
+    assert refreshed_article is not None
+    assert refreshed_job.status == ScrapeJobStatus.COMPLETED
+    assert refreshed_job.error_text is None
+    assert refreshed_job.progress["triage_status"] == NewsTriageStatus.RELEVANT.value
+    assert refreshed_job.progress["extraction_skipped_reason"] == "error"
+    assert refreshed_job.progress["extraction_error_text"] == "Anthropic 429"
+    assert refreshed_article.fetch_status == NewsFetchStatus.FETCHED.value
+    assert refreshed_article.triage_status == NewsTriageStatus.RELEVANT.value
+
+
 def test_paste_link_worker_does_not_count_paywall_as_useful_update(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,
