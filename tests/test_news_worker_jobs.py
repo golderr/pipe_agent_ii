@@ -14,6 +14,7 @@ from tcg_pipeline.db.models import (
     NewsArticle,
     NewsFetchStatus,
     NewsSource,
+    NewsTriageStatus,
     ScrapeJob,
     ScrapeJobKind,
     ScrapeJobStatus,
@@ -22,6 +23,7 @@ from tcg_pipeline.db.models import (
     WorkerHeartbeat,
 )
 from tcg_pipeline.news.ingest import ArticleFetchResult
+from tcg_pipeline.news.triage import NewsTriageRunResult
 from tcg_pipeline.settings import Settings
 from tcg_pipeline.workers import news_jobs, scrape_jobs
 from tcg_pipeline.workers.heartbeat import (
@@ -325,8 +327,31 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
         external_article_id="article-1",
         paywall_state="open",
     )
+    triage_extraction_id = uuid.uuid4()
 
-    news_jobs.run_news_paste_a_link_job(job.id, fetcher=lambda _url: result)
+    def fake_triage_runner(article_id: uuid.UUID) -> NewsTriageRunResult:
+        assert article_id == article.id
+        with task_session_factory() as session:
+            triage_article = session.get(NewsArticle, article_id)
+            assert triage_article is not None
+            assert triage_article.structural_signals is not None
+            triage_article.triage_status = NewsTriageStatus.RELEVANT.value
+            triage_article.triage_at = datetime(2026, 4, 28, 20, 1, tzinfo=UTC)
+            session.commit()
+        return NewsTriageRunResult(
+            article_id=article_id,
+            extraction_id=triage_extraction_id,
+            triage_status=NewsTriageStatus.RELEVANT.value,
+            relevant=True,
+            reason="Article mentions a development project.",
+            parse_status="ok",
+        )
+
+    news_jobs.run_news_paste_a_link_job(
+        job.id,
+        fetcher=lambda _url: result,
+        triage_runner=fake_triage_runner,
+    )
 
     postgres_session.expire_all()
     refreshed_job = postgres_session.get(ScrapeJob, job.id)
@@ -336,7 +361,10 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
     assert refreshed_job.status == ScrapeJobStatus.COMPLETED
     assert refreshed_job.source_run_id is not None
     assert refreshed_job.progress["fetch_status"] == NewsFetchStatus.FETCHED.value
+    assert refreshed_job.progress["triage_status"] == NewsTriageStatus.RELEVANT.value
+    assert refreshed_job.progress["triage_extraction_id"] == str(triage_extraction_id)
     assert refreshed_article.fetch_status == NewsFetchStatus.FETCHED.value
+    assert refreshed_article.triage_status == NewsTriageStatus.RELEVANT.value
     assert refreshed_article.fetch_attempts == 1
     assert refreshed_article.title == "Developer announces project"
     assert refreshed_article.body_text == result.body_text

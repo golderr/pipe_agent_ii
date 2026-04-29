@@ -59,6 +59,12 @@ jobs need the durable RQ worker boundary to survive deploys and process exits.
 If it is unset outside production, local Coverage Refresh and paste-a-link
 article ingest fall back to FastAPI background tasks.
 
+`ANTHROPIC_API_KEY` is required before enabling Phase D Pass 2a triage in a
+worker environment. `NEWS_TRIAGE_MODEL` defaults to
+`claude-haiku-4-5-20251001`, and `NEWS_TRIAGE_MAX_TOKENS` defaults to `300`.
+Successful article fetches now call Anthropic from the worker after Pass 1; a
+missing key fails the scrape job instead of silently skipping triage.
+
 `GEOCODIO_API_KEY` and `ESRI_API_KEY` are optional for local development, but
 production project creation should configure both. Manual project creation tries
 Geocodio first and automatically falls back to Esri when the Geocodio result is
@@ -129,11 +135,18 @@ creates a pending `news_articles` row, creates a
 task. Redis is required in production; local/dev execution may fall back to a
 FastAPI background task when Redis is unavailable.
 
-The worker runs Pass 0 and Pass 1 for successfully fetched articles: HTTP fetch,
-trafilatura body extraction, metadata parsing, paywall/dead-link/fetch-status
-detection, durable `news_articles` updates, and structural signal extraction into
-`news_articles.structural_signals`. It also records a `source_runs` audit row and
-completes the scrape job. LLM triage/extraction remains a later Phase D step.
+The worker runs Pass 0, Pass 1, and Pass 2a for successfully fetched articles:
+HTTP fetch, trafilatura body extraction, metadata parsing,
+paywall/dead-link/fetch-status detection, durable `news_articles` updates,
+structural signal extraction into `news_articles.structural_signals`, and Haiku
+triage into `news_extractions(pass='triage')`. It also records a `source_runs`
+audit row and completes the scrape job. Full extraction/matching remains a later
+Phase D step.
+
+Pass 2a uses the active prompt in `config/news_prompts.yaml` and prompt files
+under `src/tcg_pipeline/news/prompts/triage_v1/`. Cost-cap enforcement reserves
+estimated spend under a Postgres advisory lock before the Anthropic call, then
+true-ups `news_extraction_costs` after the response is parsed.
 
 `GET /research/articles/{article_id}` is an allowlisted FastAPI admin read. It
 returns article metadata and `body_text`; raw HTML remains stored in the DB but

@@ -28,6 +28,7 @@ from tcg_pipeline.db.models import (
 )
 from tcg_pipeline.news.ingest import ArticleFetchResult, fetch_article_pass0
 from tcg_pipeline.news.structural import apply_structural_signals
+from tcg_pipeline.news.triage import NewsTriageRunResult, run_news_triage_for_article
 from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.workers.heartbeat import write_worker_heartbeat
 
@@ -56,6 +57,17 @@ class NewsPasteLinkPlan:
     jurisdiction_id: uuid.UUID | None
     initiated_by_user_id: uuid.UUID | None
     initiated_by_email: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NewsPasteLinkIngestResult:
+    job_id: uuid.UUID
+    article_id: uuid.UUID
+    source_run_id: uuid.UUID | None
+    fetched: bool
+    fetch_status: str | None
+    http_status: int | None
+    body_text_chars: int
 
 
 def enqueue_news_job_execution(
@@ -192,6 +204,9 @@ def run_news_paste_a_link_job(
     job_id: uuid.UUID,
     *,
     fetcher: Callable[[str], ArticleFetchResult] = fetch_article_pass0,
+    triage_runner: Callable[[uuid.UUID], NewsTriageRunResult] | None = (
+        run_news_triage_for_article
+    ),
 ) -> None:
     session_factory = get_session_factory()
     try:
@@ -206,9 +221,33 @@ def run_news_paste_a_link_job(
         return
 
     result = fetcher(plan.url)
+    ingest_result: NewsPasteLinkIngestResult
     with session_factory() as session:
         try:
-            complete_news_paste_a_link_job(session, plan=plan, result=result)
+            ingest_result = complete_news_paste_a_link_job(
+                session,
+                plan=plan,
+                result=result,
+            )
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+            session.rollback()
+            _record_news_job_failure(job_id, exc)
+            raise
+    triage_result: NewsTriageRunResult | None = None
+    if ingest_result.fetched and triage_runner is not None:
+        try:
+            triage_result = triage_runner(ingest_result.article_id)
+        except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+            _record_news_job_failure(job_id, exc)
+            raise
+    with session_factory() as session:
+        try:
+            finish_news_paste_a_link_job(
+                session,
+                ingest_result=ingest_result,
+                triage_result=triage_result,
+            )
             session.commit()
         except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
             session.rollback()
@@ -262,7 +301,7 @@ def complete_news_paste_a_link_job(
     *,
     plan: NewsPasteLinkPlan,
     result: ArticleFetchResult,
-) -> ScrapeJob:
+) -> NewsPasteLinkIngestResult:
     article = session.execute(
         select(NewsArticle)
         .where(NewsArticle.id == plan.article_id)
@@ -274,7 +313,15 @@ def complete_news_paste_a_link_job(
     if job is None:
         raise RuntimeError("News scrape job disappeared before Pass 0 completion.")
     if job.status != ScrapeJobStatus.RUNNING:
-        return job
+        return NewsPasteLinkIngestResult(
+            job_id=job.id,
+            article_id=article.id,
+            source_run_id=job.source_run_id,
+            fetched=article.fetch_status == NewsFetchStatus.FETCHED.value,
+            fetch_status=article.fetch_status,
+            http_status=article.http_status,
+            body_text_chars=len(article.body_text or ""),
+        )
 
     _apply_article_fetch_result(session, article=article, result=result)
     now = datetime.now(UTC)
@@ -302,17 +349,58 @@ def complete_news_paste_a_link_job(
     session.add(source_run)
     session.flush()
 
-    job.status = ScrapeJobStatus.COMPLETED
-    job.completed_at = now
     job.source_run_id = source_run.id
     job.error_text = None
     job.progress = {
-        "message": "Article ingest completed.",
+        "message": "Article ingest completed; triage pending.",
         "article_id": str(article.id),
         "fetch_status": article.fetch_status,
         "http_status": article.http_status,
         "body_text_chars": len(article.body_text or ""),
     }
+    session.flush()
+    return NewsPasteLinkIngestResult(
+        job_id=job.id,
+        article_id=article.id,
+        source_run_id=source_run.id,
+        fetched=fetched,
+        fetch_status=article.fetch_status,
+        http_status=article.http_status,
+        body_text_chars=len(article.body_text or ""),
+    )
+
+
+def finish_news_paste_a_link_job(
+    session: Session,
+    *,
+    ingest_result: NewsPasteLinkIngestResult,
+    triage_result: NewsTriageRunResult | None,
+) -> ScrapeJob:
+    job = session.get(ScrapeJob, ingest_result.job_id)
+    if job is None:
+        raise RuntimeError("News scrape job disappeared before completion.")
+    if job.status != ScrapeJobStatus.RUNNING:
+        return job
+    now = datetime.now(UTC)
+    job.status = ScrapeJobStatus.COMPLETED
+    job.completed_at = now
+    job.error_text = None
+    job.progress = {
+        "message": "Article ingest completed.",
+        "article_id": str(ingest_result.article_id),
+        "fetch_status": ingest_result.fetch_status,
+        "http_status": ingest_result.http_status,
+        "body_text_chars": ingest_result.body_text_chars,
+    }
+    if triage_result is not None:
+        job.progress["triage_status"] = triage_result.triage_status
+        job.progress["triage_extraction_id"] = (
+            str(triage_result.extraction_id) if triage_result.extraction_id else None
+        )
+        job.progress["triage_skipped_reason"] = triage_result.skipped_reason
+    elif ingest_result.fetched:
+        job.progress["triage_status"] = "skipped"
+        job.progress["triage_skipped_reason"] = "disabled"
     session.flush()
     return job
 
