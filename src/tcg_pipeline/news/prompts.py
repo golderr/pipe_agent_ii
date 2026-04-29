@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from tcg_pipeline.db.models import NewsArticle
 
 PROMPT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "news_prompts.yaml"
 PROMPT_ROOT = Path(__file__).with_name("prompts")
+PROMPT_ID_RE = re.compile(r".+_v\d+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,10 @@ def load_active_prompt(pass_name: str, *, config_path: Path = PROMPT_CONFIG_PATH
 
 
 def load_prompt(prompt_id: str) -> PromptTemplate:
+    if not PROMPT_ID_RE.fullmatch(prompt_id):
+        raise RuntimeError(
+            f"Invalid news prompt id '{prompt_id}'. Expected convention '<name>_v<number>'."
+        )
     prompt_dir = PROMPT_ROOT / prompt_id
     if not prompt_dir.is_dir():
         raise RuntimeError(f"News prompt directory does not exist: {prompt_id}")

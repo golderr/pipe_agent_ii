@@ -10,6 +10,8 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 import anthropic
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.db.connection import get_session_factory
@@ -20,6 +22,7 @@ from tcg_pipeline.db.models import (
     NewsExtractionPass,
     NewsFetchStatus,
     NewsTriageStatus,
+    SystemAlert,
 )
 from tcg_pipeline.news.costs import (
     record_llm_cost,
@@ -36,10 +39,17 @@ TRIAGE_TEMPERATURE = 0
 DEFAULT_TRIAGE_MODEL = "claude-haiku-4-5-20251001"
 MODEL_PRICING_USD_PER_MILLION = {
     DEFAULT_TRIAGE_MODEL: {
-        "input_uncached": Decimal("1.00"),
-        "input_cached": Decimal("0.10"),
+        "input": Decimal("1.00"),
+        "input_cache_creation": Decimal("1.25"),
+        "input_cache_read": Decimal("0.10"),
         "output": Decimal("5.00"),
-    }
+    },
+    "claude-opus-4-7": {
+        "input": Decimal("15.00"),
+        "input_cache_creation": Decimal("18.75"),
+        "input_cache_read": Decimal("1.50"),
+        "output": Decimal("75.00"),
+    },
 }
 UNCERTAINTY_MARKERS = (
     "might be",
@@ -56,6 +66,7 @@ UNCERTAINTY_MARKERS = (
 @dataclass(frozen=True, slots=True)
 class LLMUsage:
     input_tokens_uncached: int
+    input_tokens_cache_creation: int
     input_tokens_cached: int
     output_tokens: int
 
@@ -178,7 +189,22 @@ def run_news_triage_for_article(
             )
         rendered_prompt = render_triage_prompt(article)
 
+    if client is None and not resolved_settings.anthropic_api_key:
+        with resolved_session_factory() as session:
+            _raise_missing_api_key_alert(session, now=current)
+            session.commit()
+        return NewsTriageRunResult(
+            article_id=article_id,
+            extraction_id=None,
+            triage_status=NewsTriageStatus.PENDING.value,
+            relevant=None,
+            reason=None,
+            parse_status=None,
+            skipped_reason="no_api_key",
+    )
+
     triage_client = client or build_anthropic_triage_client(resolved_settings)
+    _pricing_for_model(triage_client.model)
     with resolved_session_factory() as session:
         reservation = reserve_llm_cost(
             session,
@@ -259,6 +285,7 @@ def persist_triage_response(
     cost_usd = calculate_llm_cost_usd(
         llm_response.model,
         input_tokens_uncached=llm_response.usage.input_tokens_uncached,
+        input_tokens_cache_creation=llm_response.usage.input_tokens_cache_creation,
         input_tokens_cached=llm_response.usage.input_tokens_cached,
         output_tokens=llm_response.usage.output_tokens,
     )
@@ -267,6 +294,7 @@ def persist_triage_response(
         pass_name=NewsExtractionPass.TRIAGE.value,
         model=llm_response.model,
         input_tokens_uncached=llm_response.usage.input_tokens_uncached,
+        input_tokens_cache_creation=llm_response.usage.input_tokens_cache_creation,
         input_tokens_cached=llm_response.usage.input_tokens_cached,
         output_tokens=llm_response.usage.output_tokens,
         cost_usd=cost_usd,
@@ -285,6 +313,7 @@ def persist_triage_response(
         prompt_hash=rendered_prompt.prompt_hash,
         model=llm_response.model,
         input_tokens_uncached=llm_response.usage.input_tokens_uncached,
+        input_tokens_cache_creation=llm_response.usage.input_tokens_cache_creation,
         input_tokens_cached=llm_response.usage.input_tokens_cached,
         output_tokens=llm_response.usage.output_tokens,
         cost_usd=cost_usd,
@@ -329,6 +358,13 @@ def parse_triage_response(raw_text: str, *, stop_reason: str | None = None) -> P
         parse_status = NewsExtractionParseStatus.TRUNCATED.value
     elif stop_reason == "refusal":
         parse_status = NewsExtractionParseStatus.REFUSED.value
+    if parse_status != NewsExtractionParseStatus.OK.value:
+        return ParsedTriageResponse(
+            decision=None,
+            parse_status=parse_status,
+            parse_error_text=stop_reason,
+            output_json=None,
+        )
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -388,19 +424,25 @@ def calculate_llm_cost_usd(
     model: str,
     *,
     input_tokens_uncached: int,
+    input_tokens_cache_creation: int,
     input_tokens_cached: int,
     output_tokens: int,
 ) -> Decimal:
-    pricing = MODEL_PRICING_USD_PER_MILLION.get(
-        model,
-        MODEL_PRICING_USD_PER_MILLION[DEFAULT_TRIAGE_MODEL],
-    )
+    pricing = _pricing_for_model(model)
     cost = (
-        Decimal(input_tokens_uncached) * pricing["input_uncached"]
-        + Decimal(input_tokens_cached) * pricing["input_cached"]
+        Decimal(input_tokens_uncached) * pricing["input"]
+        + Decimal(input_tokens_cache_creation) * pricing["input_cache_creation"]
+        + Decimal(input_tokens_cached) * pricing["input_cache_read"]
         + Decimal(output_tokens) * pricing["output"]
     ) / Decimal(1_000_000)
     return cost.quantize(Decimal("0.000001"))
+
+
+def _pricing_for_model(model: str) -> dict[str, Decimal]:
+    pricing = MODEL_PRICING_USD_PER_MILLION.get(model)
+    if pricing is None:
+        raise RuntimeError(f"Unknown news LLM model pricing: {model}")
+    return pricing
 
 
 def _persist_triage_api_error(
@@ -424,6 +466,7 @@ def _persist_triage_api_error(
         prompt_hash=rendered_prompt.prompt_hash,
         model=model,
         input_tokens_uncached=0,
+        input_tokens_cache_creation=0,
         input_tokens_cached=0,
         output_tokens=0,
         cost_usd=Decimal("0"),
@@ -455,10 +498,40 @@ def _anthropic_usage(usage: Any) -> LLMUsage:
     cache_creation = int(getattr(usage, "cache_creation_input_tokens", None) or 0)
     input_tokens = int(getattr(usage, "input_tokens", None) or 0)
     return LLMUsage(
-        input_tokens_uncached=input_tokens + cache_creation,
+        input_tokens_uncached=input_tokens,
+        input_tokens_cache_creation=cache_creation,
         input_tokens_cached=cache_read,
         output_tokens=int(getattr(usage, "output_tokens", None) or 0),
     )
+
+
+def _raise_missing_api_key_alert(session: Session, *, now: datetime) -> None:
+    statement = (
+        insert(SystemAlert)
+        .values(
+            alert_key="news_anthropic_api_key_missing",
+            severity="warning",
+            scope={"component": "news_triage"},
+            message="ANTHROPIC_API_KEY is not configured; news triage is skipped.",
+            detail={"skipped_reason": "no_api_key"},
+            raised_at=now,
+            last_seen_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[
+                SystemAlert.alert_key,
+                text("COALESCE(scope::text, '{}')"),
+            ],
+            index_where=text("cleared_at IS NULL"),
+            set_={
+                "severity": "warning",
+                "message": "ANTHROPIC_API_KEY is not configured; news triage is skipped.",
+                "detail": {"skipped_reason": "no_api_key"},
+                "last_seen_at": now,
+            },
+        )
+    )
+    session.execute(statement)
 
 
 def _strip_json_fence(raw_text: str) -> str:

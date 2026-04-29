@@ -115,6 +115,7 @@ def record_llm_cost(
     pass_name: str,
     model: str,
     input_tokens_uncached: int,
+    input_tokens_cache_creation: int,
     input_tokens_cached: int,
     output_tokens: int,
     cost_usd: Decimal,
@@ -137,6 +138,7 @@ def record_llm_cost(
         model=model,
         call_count=1,
         input_tokens_uncached=input_tokens_uncached,
+        input_tokens_cache_creation=input_tokens_cache_creation,
         input_tokens_cached=input_tokens_cached,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
@@ -177,6 +179,8 @@ def active_cost_cap(
 
 
 def current_day_spend(session: Session, *, cost_date: date) -> Decimal:
+    # Reservation rows can briefly go negative while a completed call true-ups its
+    # estimate to actual cost. The daily spend check intentionally sums all rows.
     spent = session.execute(
         select(func.coalesce(func.sum(NewsExtractionCost.cost_usd), 0)).where(
             NewsExtractionCost.cost_date == cost_date
@@ -193,6 +197,7 @@ def _increment_cost_rollup(
     model: str,
     call_count: int = 0,
     input_tokens_uncached: int = 0,
+    input_tokens_cache_creation: int = 0,
     input_tokens_cached: int = 0,
     output_tokens: int = 0,
     cost_usd: Decimal = Decimal("0"),
@@ -205,6 +210,7 @@ def _increment_cost_rollup(
             model=model,
             call_count=call_count,
             input_tokens_uncached=input_tokens_uncached,
+            input_tokens_cache_creation=input_tokens_cache_creation,
             input_tokens_cached=input_tokens_cached,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
@@ -219,6 +225,10 @@ def _increment_cost_rollup(
                 "call_count": NewsExtractionCost.call_count + call_count,
                 "input_tokens_uncached": (
                     NewsExtractionCost.input_tokens_uncached + input_tokens_uncached
+                ),
+                "input_tokens_cache_creation": (
+                    NewsExtractionCost.input_tokens_cache_creation
+                    + input_tokens_cache_creation
                 ),
                 "input_tokens_cached": (
                     NewsExtractionCost.input_tokens_cached + input_tokens_cached

@@ -58,6 +58,29 @@ def test_structural_regex_extractors_capture_core_article_signals() -> None:
         assert body_text[signal.offset_start : signal.offset_end] == signal.raw_match
 
 
+def test_structural_unit_count_ignores_partial_match_inside_price() -> None:
+    signals = extract_structural_signals(
+        "The report mentioned a $200,000 unit price and a 140-unit project.",
+        market_slug="los_angeles",
+    )
+
+    unit_counts = [signal for signal in signals if signal.extractor == "unit_count"]
+    assert [(signal.raw_match, signal.canonical) for signal in unit_counts] == [
+        ("140-unit", 140)
+    ]
+
+
+def test_structural_date_signals_anchor_relative_dates_to_publication_date() -> None:
+    signals = extract_structural_signals(
+        "The city hearing is Tuesday.",
+        published_at=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    date_signal = next(signal for signal in signals if signal.extractor == "date")
+    assert date_signal.raw_match == "Tuesday"
+    assert date_signal.canonical == "2026-04-28"
+
+
 def test_structural_payload_has_version_timestamp_and_sorted_signals() -> None:
     now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
 
@@ -125,6 +148,7 @@ def test_apply_structural_signals_writes_article_payload(postgres_session: Sessi
         (),
         {
             "body_text": "Developer announced a 140-unit project in Los Angeles.",
+            "published_at": None,
             "structural_signals": None,
             "structural_signals_at": None,
         },

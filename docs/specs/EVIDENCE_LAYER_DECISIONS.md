@@ -639,6 +639,30 @@ Rationale:
 - Articles often capture operator-stated timeline updates before automated source refreshes catch up.
 - Treating this as a delivery-date-specific override preserves the general evidence model while still reflecting how timeline updates appear in practice.
 
+### 21f-bis. News Delivery Phrase Canonicalization
+
+**Date:** 2026-04-29
+
+Phase D structural extraction canonicalizes imprecise article delivery phrases to
+stable synthetic dates before the LLM extraction pass sees them.
+
+Decisions:
+
+- Quarter phrases use the midpoint month of the quarter: Q1 -> February 1,
+  Q2 -> May 1, Q3 -> August 1, Q4 -> November 1.
+- Seasonal phrases use midpoint months: spring -> April 1, summer -> July 1,
+  fall -> October 1, winter -> January 1 of the stated year.
+- Timing phrases use coarse period markers: early -> March 1, mid -> July 1,
+  late -> November 1.
+- Bare weekday/date phrases are parsed relative to the article publication date
+  when available, not the worker runtime date.
+
+Rationale:
+
+- The canonical values are anchors for extraction and review, not claims that
+  the source stated an exact day.
+- Stable article-relative parsing keeps re-extraction deterministic.
+
 ### 21g. Developer Override Protection During Canonicalization Apply
 
 **Date:** 2026-04-23

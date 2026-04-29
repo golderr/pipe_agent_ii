@@ -322,7 +322,8 @@ CREATE TABLE news_extractions (
 
   -- LLM input/output
   input_tokens_uncached    INTEGER,
-  input_tokens_cached      INTEGER,                   -- prompt-cache hits
+  input_tokens_cache_creation INTEGER,                 -- prompt-cache write tokens
+  input_tokens_cached      INTEGER,                   -- prompt-cache read tokens
   output_tokens            INTEGER,
   cost_usd                 NUMERIC(10, 6),            -- per-extraction cost
   latency_ms               INTEGER,
@@ -428,6 +429,7 @@ CREATE TABLE news_extraction_costs (
   model               TEXT NOT NULL,
   call_count          INTEGER NOT NULL DEFAULT 0,
   input_tokens_uncached BIGINT NOT NULL DEFAULT 0,
+  input_tokens_cache_creation BIGINT NOT NULL DEFAULT 0,
   input_tokens_cached BIGINT NOT NULL DEFAULT 0,
   output_tokens       BIGINT NOT NULL DEFAULT 0,
   cost_usd            NUMERIC(12, 6) NOT NULL DEFAULT 0,
@@ -2188,13 +2190,17 @@ Render env variables are visible to anyone with project access in the Render das
 
 ### 17.1 Per-article cost expectations
 
-Using current Anthropic pricing (April 2026 rates encoded in `pricing.py`):
+Using current Anthropic pricing (April 2026 rates encoded in code):
 
-| Pass | Model | Input (uncached) | Input (cached) | Output | Per-article cost |
-|---|---|---|---|---|---|
-| 2a triage | Haiku 4.5 | ~3K tokens | 0 (small static) | ~100 tokens | ~$0.005 |
-| 2b extract | Opus 4.7 | ~3K tokens | ~10K tokens | ~1.5K tokens | ~$0.05 (cached) |
-| 3 reextract | Opus 4.7 | ~3.5K tokens | ~10K tokens | ~1.5K tokens | ~$0.05 |
+| Pass | Model | Input | Cache creation | Cache read | Output | Per-article cost |
+|---|---|---|---|---|---|---|
+| 2a triage | Haiku 4.5 | ~3K tokens | first-call static prompt writes only | near-zero | ~100 tokens | ~$0.005 |
+| 2b extract | Opus 4.7 | ~3K tokens | first-call static prompt writes only | ~10K tokens | ~1.5K tokens | ~$0.05 (cached) |
+| 3 reextract | Opus 4.7 | ~3.5K tokens | first-call static prompt writes only | ~10K tokens | ~1.5K tokens | ~$0.05 |
+
+Cost accounting tracks regular input, cache-creation input, cache-read input,
+and output separately because Anthropic bills cache writes above the base input
+rate and cache reads below it.
 
 ### 17.2 Daily budget
 

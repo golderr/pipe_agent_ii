@@ -62,8 +62,10 @@ article ingest fall back to FastAPI background tasks.
 `ANTHROPIC_API_KEY` is required before enabling Phase D Pass 2a triage in a
 worker environment. `NEWS_TRIAGE_MODEL` defaults to
 `claude-haiku-4-5-20251001`, and `NEWS_TRIAGE_MAX_TOKENS` defaults to `300`.
-Successful article fetches now call Anthropic from the worker after Pass 1; a
-missing key fails the scrape job instead of silently skipping triage.
+Successful article fetches call Anthropic from the worker after Pass 1. If the
+key is missing, the scrape job still completes with Pass 0/1 data persisted,
+triage remains `pending`, and `system_alerts.alert_key =
+news_anthropic_api_key_missing` is raised.
 
 `GEOCODIO_API_KEY` and `ESRI_API_KEY` are optional for local development, but
 production project creation should configure both. Manual project creation tries
@@ -146,7 +148,9 @@ Phase D step.
 Pass 2a uses the active prompt in `config/news_prompts.yaml` and prompt files
 under `src/tcg_pipeline/news/prompts/triage_v1/`. Cost-cap enforcement reserves
 estimated spend under a Postgres advisory lock before the Anthropic call, then
-true-ups `news_extraction_costs` after the response is parsed.
+true-ups `news_extraction_costs` after the response is parsed. Token accounting
+tracks regular input, cache-creation input, cache-read input, and output tokens
+separately so cache writes are billed at their higher provider rate.
 
 `GET /research/articles/{article_id}` is an allowlisted FastAPI admin read. It
 returns article metadata and `body_text`; raw HTML remains stored in the DB but

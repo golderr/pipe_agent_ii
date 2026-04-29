@@ -1232,6 +1232,7 @@ class NewsExtraction(Base):
         server_default="anthropic",
     )
     input_tokens_uncached: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens_cache_creation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_tokens_cached: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
@@ -1366,6 +1367,12 @@ class NewsExtractionCost(Base):
     model: Mapped[str] = mapped_column(Text, nullable=False)
     call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     input_tokens_uncached: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    input_tokens_cache_creation: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
         default=0,

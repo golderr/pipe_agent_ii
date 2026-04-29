@@ -21,14 +21,16 @@ from tcg_pipeline.db.models import (
     SystemAlert,
 )
 from tcg_pipeline.news.costs import reserve_llm_cost
-from tcg_pipeline.news.prompts import render_triage_prompt
+from tcg_pipeline.news.prompts import load_prompt, render_triage_prompt
 from tcg_pipeline.news.triage import (
     LLMUsage,
     TriageLLMResponse,
+    calculate_llm_cost_usd,
     parse_triage_response,
     persist_triage_response,
     run_news_triage_for_article,
 )
+from tcg_pipeline.settings import Settings
 
 
 def test_parse_triage_response_overrides_uncertain_negative() -> None:
@@ -55,6 +57,47 @@ def test_parse_triage_response_rejects_schema_drift() -> None:
     assert parsed.decision is None
     assert parsed.parse_status == NewsExtractionParseStatus.SCHEMA_INVALID.value
     assert parsed.parse_error_text is not None
+
+
+def test_parse_triage_response_does_not_trust_truncated_or_refused_json() -> None:
+    truncated = parse_triage_response(
+        '{"relevant": true, "reason": "Looks relevant."}',
+        stop_reason="max_tokens",
+    )
+    refused = parse_triage_response(
+        '{"relevant": true, "reason": "Looks relevant."}',
+        stop_reason="refusal",
+    )
+
+    assert truncated.decision is None
+    assert truncated.parse_status == NewsExtractionParseStatus.TRUNCATED.value
+    assert refused.decision is None
+    assert refused.parse_status == NewsExtractionParseStatus.REFUSED.value
+
+
+def test_prompt_loader_rejects_prompt_ids_without_version_suffix() -> None:
+    with pytest.raises(RuntimeError, match="Expected convention"):
+        load_prompt("triage")
+
+
+def test_llm_cost_calculation_prices_cache_creation_separately() -> None:
+    cost = calculate_llm_cost_usd(
+        "claude-haiku-4-5-20251001",
+        input_tokens_uncached=1000,
+        input_tokens_cache_creation=1000,
+        input_tokens_cached=1000,
+        output_tokens=100,
+    )
+
+    assert cost == Decimal("0.002850")
+    with pytest.raises(RuntimeError, match="Unknown news LLM model pricing"):
+        calculate_llm_cost_usd(
+            "claude-unknown",
+            input_tokens_uncached=1,
+            input_tokens_cache_creation=0,
+            input_tokens_cached=0,
+            output_tokens=0,
+        )
 
 
 def test_persist_triage_response_writes_extraction_article_status_and_cost(
@@ -96,6 +139,7 @@ def test_persist_triage_response_writes_extraction_article_status_and_cost(
         model="claude-haiku-4-5-20251001",
         usage=LLMUsage(
             input_tokens_uncached=1000,
+            input_tokens_cache_creation=25,
             input_tokens_cached=100,
             output_tokens=50,
         ),
@@ -134,9 +178,10 @@ def test_persist_triage_response_writes_extraction_article_status_and_cost(
     ).scalar_one()
     assert cost.call_count == 1
     assert cost.input_tokens_uncached == 1000
+    assert cost.input_tokens_cache_creation == 25
     assert cost.input_tokens_cached == 100
     assert cost.output_tokens == 50
-    assert Decimal(cost.cost_usd) == Decimal("0.001260")
+    assert Decimal(cost.cost_usd) == Decimal("0.001291")
 
 
 def test_run_news_triage_for_article_reserves_calls_client_and_true_ups(
@@ -179,6 +224,7 @@ def test_run_news_triage_for_article_reserves_calls_client_and_true_ups(
                 model=self.model,
                 usage=LLMUsage(
                     input_tokens_uncached=100,
+                    input_tokens_cache_creation=5,
                     input_tokens_cached=0,
                     output_tokens=10,
                 ),
@@ -206,6 +252,58 @@ def test_run_news_triage_for_article_reserves_calls_client_and_true_ups(
         )
     ).scalar_one()
     assert Decimal(reservation.cost_usd) == Decimal("0.000000")
+
+
+def test_run_news_triage_for_article_skips_and_alerts_without_api_key(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_triage_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical=f"https://example.com/no-key-{uuid.uuid4().hex}",
+        url_original="https://example.com/no-key",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        body_text="A developer filed plans for apartments.",
+        body_text_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        structural_signals={
+            "extractor_version": "v1",
+            "ran_at": "2026-04-29T12:00:00+00:00",
+            "signals": [],
+        },
+        title="Plans filed",
+        ingest_method="news_paste_a_link",
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    result = run_news_triage_for_article(
+        article.id,
+        settings=Settings(app_env="test", anthropic_api_key=None),
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.skipped_reason == "no_api_key"
+    assert result.triage_status == NewsTriageStatus.PENDING.value
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_article is not None
+    assert refreshed_article.triage_status == NewsTriageStatus.PENDING.value
+    alert = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.alert_key == "news_anthropic_api_key_missing"
+        )
+    ).scalar_one()
+    assert alert.severity == "warning"
+    assert alert.scope == {"component": "news_triage"}
 
 
 def test_reserve_llm_cost_hard_cap_creates_alert(postgres_session: Session) -> None:
@@ -253,6 +351,17 @@ def _ensure_news_triage_tables(postgres_session: Session) -> None:
     ]
     if missing:
         pytest.skip(f"Apply Phase D migrations before running triage tests: {missing}")
+    extraction_columns = {
+        column["name"] for column in inspector.get_columns("news_extractions")
+    }
+    cost_columns = {
+        column["name"] for column in inspector.get_columns("news_extraction_costs")
+    }
+    if (
+        "input_tokens_cache_creation" not in extraction_columns
+        or "input_tokens_cache_creation" not in cost_columns
+    ):
+        pytest.skip("Apply migration 202604290022 before running triage tests.")
 
 
 def _news_source(postgres_session: Session) -> NewsSource:

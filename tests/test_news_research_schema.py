@@ -111,6 +111,7 @@ def test_news_summary_views_hide_raw_content_and_use_reader_role(
     extraction_columns = _relation_columns(postgres_session, "news_extractions_summary")
     assert "output_json" not in extraction_columns
     assert "raw_response_text" not in extraction_columns
+    assert "input_tokens_cache_creation" in extraction_columns
 
     reference_columns = _relation_columns(postgres_session, "news_project_references_summary")
     assert "passage_excerpts" not in reference_columns
@@ -156,6 +157,17 @@ def _ensure_news_schema(postgres_session: Session) -> None:
     }
     if "schedule_timezone" not in news_source_columns:
         pytest.skip("Apply the latest D.1 news schema migration before running tests.")
+    extraction_columns = {
+        column["name"] for column in inspector.get_columns("news_extractions")
+    }
+    cost_columns = {
+        column["name"] for column in inspector.get_columns("news_extraction_costs")
+    }
+    if (
+        "input_tokens_cache_creation" not in extraction_columns
+        or "input_tokens_cache_creation" not in cost_columns
+    ):
+        pytest.skip("Apply migration 202604290022 before running news schema tests.")
     missing_views = [
         view_name
         for view_name in (

@@ -34,7 +34,7 @@ class StructuralSignal:
 
 
 UNIT_COUNT_RE = re.compile(
-    r"\b(?P<count>\d{2,5})[-\s]?"
+    r"(?<![\d.,])(?P<count>\d{2,5})[-\s]?"
     r"(?P<label>unit|units|apartment|apartments|residences|residential\s+units|"
     r"condos|condominium|condominiums|keys|rooms)\b",
     re.IGNORECASE,
@@ -159,6 +159,7 @@ def build_structural_signals_payload(
     session: Session | None = None,
     market_slug: str | None = None,
     market_id: uuid.UUID | None = None,
+    published_at: datetime | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     ran_at = now or datetime.now(UTC)
@@ -167,6 +168,7 @@ def build_structural_signals_payload(
         session=session,
         market_slug=market_slug,
         market_id=market_id,
+        published_at=published_at,
     )
     return {
         "extractor_version": STRUCTURAL_EXTRACTOR_VERSION,
@@ -191,6 +193,7 @@ def apply_structural_signals(
         session=session,
         market_slug=market_slug,
         market_id=market_id,
+        published_at=article.published_at,
         now=ran_at,
     )
     article.structural_signals_at = ran_at
@@ -202,12 +205,13 @@ def extract_structural_signals(
     session: Session | None = None,
     market_slug: str | None = None,
     market_id: uuid.UUID | None = None,
+    published_at: datetime | None = None,
 ) -> list[StructuralSignal]:
     signals: list[StructuralSignal] = []
     signals.extend(_unit_count_signals(body_text))
     signals.extend(_address_signals(body_text, market_slug=market_slug))
     signals.extend(_regex_identifier_signals(body_text))
-    signals.extend(_date_signals(body_text))
+    signals.extend(_date_signals(body_text, relative_base=published_at))
     signals.extend(_status_phrase_signals(body_text))
     signals.extend(_delivery_phrase_signals(body_text))
     signals.extend(_product_type_signals(body_text))
@@ -320,10 +324,20 @@ def _regex_identifier_signals(body_text: str) -> list[StructuralSignal]:
     return signals
 
 
-def _date_signals(body_text: str) -> list[StructuralSignal]:
+def _date_signals(
+    body_text: str,
+    *,
+    relative_base: datetime | None,
+) -> list[StructuralSignal]:
+    settings: dict[str, object] = {
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "TIMEZONE": "UTC",
+    }
+    if relative_base is not None:
+        settings["RELATIVE_BASE"] = _as_utc_datetime(relative_base)
     matches = search_dates(
         body_text,
-        settings={"RETURN_AS_TIMEZONE_AWARE": True, "TIMEZONE": "UTC"},
+        settings=settings,
     )
     if not matches:
         return []
@@ -361,6 +375,12 @@ def _is_plausible_date_match(raw: str) -> bool:
     if re.fullmatch(r"\d{1,4}", cleaned):
         return False
     return bool(DATE_LIKE_RE.search(cleaned))
+
+
+def _as_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _status_phrase_signals(body_text: str) -> list[StructuralSignal]:
