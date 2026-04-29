@@ -7,7 +7,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -171,45 +172,28 @@ def scheduler_tick(
 def _run_unimplemented_news_job(job_id: uuid.UUID, expected_kind: str) -> None:
     session_factory = get_session_factory()
     now = datetime.now(UTC)
-    try:
-        with session_factory() as session:
-            job = _load_news_job(session, job_id=job_id, expected_kind=expected_kind)
-            if job is None:
-                return
-            job.status = ScrapeJobStatus.RUNNING
-            job.started_at = now
-            job.progress = {"message": f"Running {expected_kind}."}
-            session.flush()
-            write_worker_heartbeat(
-                session,
-                worker_name=f"job:{expected_kind}",
-                active_job_id=job.id,
-                active_job_started_at=now,
-                metadata={"kind": expected_kind},
-            )
-            session.commit()
-
-        raise NotImplementedError(
-            f"{expected_kind} pipeline is not implemented until later Phase D."
+    error = NotImplementedError(
+        f"{expected_kind} pipeline is not implemented until later Phase D."
+    )
+    with session_factory() as session:
+        job = _load_news_job(session, job_id=job_id, expected_kind=expected_kind)
+        if job is None:
+            return
+        job.status = ScrapeJobStatus.FAILED
+        job.started_at = now
+        job.completed_at = now
+        job.error_text = str(error)
+        job.progress = {"message": "News job failed.", "error": str(error)}
+        raise_system_alert(
+            session,
+            alert_key="news_job_failed",
+            severity="warning",
+            message="News job failed.",
+            scope={"job_id": str(job_id), "kind": expected_kind},
+            detail={"error": str(error)},
         )
-    except Exception as exc:
-        with session_factory() as session:
-            job = session.get(ScrapeJob, job_id)
-            if job is not None:
-                job.status = ScrapeJobStatus.FAILED
-                job.completed_at = datetime.now(UTC)
-                job.error_text = str(exc)
-                job.progress = {"message": "News job failed."}
-            raise_system_alert(
-                session,
-                alert_key="news_job_failed",
-                severity="warning",
-                message="News job failed.",
-                scope={"job_id": str(job_id), "kind": expected_kind},
-                detail={"error": str(exc)},
-            )
-            session.commit()
-        raise
+        session.commit()
+    raise error
 
 
 def _load_news_job(
@@ -302,16 +286,10 @@ def raise_system_alert(
     detail: dict | None = None,
 ) -> SystemAlert:
     normalized_scope = scope or {}
-    alert = session.execute(
-        select(SystemAlert).where(
-            SystemAlert.alert_key == alert_key,
-            SystemAlert.scope == normalized_scope,
-            SystemAlert.cleared_at.is_(None),
-        )
-    ).scalar_one_or_none()
     now = datetime.now(UTC)
-    if alert is None:
-        alert = SystemAlert(
+    statement = (
+        insert(SystemAlert)
+        .values(
             alert_key=alert_key,
             severity=severity,
             scope=normalized_scope,
@@ -320,11 +298,23 @@ def raise_system_alert(
             raised_at=now,
             last_seen_at=now,
         )
-        session.add(alert)
-    else:
-        alert.severity = severity
-        alert.message = message
-        alert.detail = detail
-        alert.last_seen_at = now
-    session.flush()
+        .on_conflict_do_update(
+            index_elements=[
+                SystemAlert.alert_key,
+                text("COALESCE(scope::text, '{}')"),
+            ],
+            index_where=text("cleared_at IS NULL"),
+            set_={
+                "severity": severity,
+                "message": message,
+                "detail": detail,
+                "last_seen_at": now,
+            },
+        )
+        .returning(SystemAlert.id)
+    )
+    alert_id = session.execute(statement).scalar_one()
+    alert = session.get(SystemAlert, alert_id)
+    if alert is None:
+        raise RuntimeError("System alert upsert did not return a persisted row.")
     return alert

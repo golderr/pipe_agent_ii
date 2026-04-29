@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -15,6 +16,7 @@ from tcg_pipeline.db.models import (
     ScrapeJobKind,
     ScrapeJobStatus,
     SystemAlert,
+    WorkerHeartbeat,
 )
 from tcg_pipeline.settings import Settings
 from tcg_pipeline.workers import news_jobs, scrape_jobs
@@ -89,6 +91,43 @@ def test_scheduled_fire_time_respects_last_run_and_catchup() -> None:
     assert already_ran is None
 
 
+def test_scheduled_fire_time_respects_los_angeles_timezone() -> None:
+    pytest.importorskip("croniter")
+
+    summer_fire = news_jobs._scheduled_fire_time(
+        schedule_cron="0 13 * * *",
+        schedule_timezone="America/Los_Angeles",
+        last_run_at=None,
+        now=datetime(2026, 4, 28, 20, 1, tzinfo=UTC),
+        catchup_hours=24,
+    )
+    winter_fire = news_jobs._scheduled_fire_time(
+        schedule_cron="0 13 * * *",
+        schedule_timezone="America/Los_Angeles",
+        last_run_at=None,
+        now=datetime(2026, 1, 15, 21, 1, tzinfo=UTC),
+        catchup_hours=24,
+    )
+
+    assert summer_fire == datetime(2026, 4, 28, 20, 0, tzinfo=UTC)
+    assert winter_fire == datetime(2026, 1, 15, 21, 0, tzinfo=UTC)
+
+
+def test_worker_settings_validate_positive_intervals() -> None:
+    Settings(app_env="test", worker_health_port=0)
+
+    with pytest.raises(ValidationError):
+        Settings(app_env="test", worker_heartbeat_interval_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(app_env="test", worker_health_max_age_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(app_env="test", news_scheduler_interval_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(app_env="test", news_scheduler_catchup_hours=0)
+    with pytest.raises(ValidationError):
+        Settings(app_env="test", worker_health_port=-1)
+
+
 def test_heartbeat_write_and_freshness(postgres_session: Session) -> None:
     _ensure_worker_tables(postgres_session)
     now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
@@ -115,6 +154,33 @@ def test_heartbeat_write_and_freshness(postgres_session: Session) -> None:
     )
 
 
+def test_heartbeat_write_refreshes_process_started_at(postgres_session: Session) -> None:
+    _ensure_worker_tables(postgres_session)
+    worker_name = f"test-worker-{uuid.uuid4().hex}"
+    first_started_at = datetime(2026, 4, 28, 11, 0, tzinfo=UTC)
+    second_started_at = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+
+    write_worker_heartbeat(
+        postgres_session,
+        worker_name=worker_name,
+        now=datetime(2026, 4, 28, 11, 1, tzinfo=UTC),
+        process_started_at=first_started_at,
+    )
+    postgres_session.flush()
+    write_worker_heartbeat(
+        postgres_session,
+        worker_name=worker_name,
+        now=datetime(2026, 4, 28, 12, 1, tzinfo=UTC),
+        process_started_at=second_started_at,
+    )
+    postgres_session.flush()
+
+    postgres_session.expire_all()
+    heartbeat = postgres_session.get(WorkerHeartbeat, worker_name)
+    assert heartbeat is not None
+    assert heartbeat.process_started_at == second_started_at
+
+
 def test_unimplemented_news_task_marks_job_failed_and_alerts(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -136,6 +202,13 @@ def test_unimplemented_news_task_marks_job_failed_and_alerts(
         class_=Session,
     )
     monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+    monkeypatch.setattr(
+        news_jobs,
+        "write_worker_heartbeat",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Placeholder task should not write RUNNING heartbeat."
+        ),
+    )
 
     with pytest.raises(NotImplementedError, match="not implemented"):
         news_jobs.run_news_paste_a_link_task(str(job.id))
@@ -145,6 +218,10 @@ def test_unimplemented_news_task_marks_job_failed_and_alerts(
     assert refreshed_job is not None
     assert refreshed_job.status == ScrapeJobStatus.FAILED
     assert "not implemented" in (refreshed_job.error_text or "")
+    assert refreshed_job.progress == {
+        "message": "News job failed.",
+        "error": refreshed_job.error_text,
+    }
     alert = postgres_session.execute(
         select(SystemAlert).where(SystemAlert.alert_key == "news_job_failed")
     ).scalar_one()
@@ -152,6 +229,43 @@ def test_unimplemented_news_task_marks_job_failed_and_alerts(
         "job_id": str(job.id),
         "kind": ScrapeJobKind.NEWS_PASTE_A_LINK.value,
     }
+
+
+def test_raise_system_alert_upserts_active_alert(postgres_session: Session) -> None:
+    _ensure_worker_tables(postgres_session)
+    alert_key = f"test-alert-{uuid.uuid4().hex}"
+    scope = {"source": "test"}
+
+    first = news_jobs.raise_system_alert(
+        postgres_session,
+        alert_key=alert_key,
+        severity="info",
+        message="First message.",
+        scope=scope,
+        detail={"attempt": 1},
+    )
+    postgres_session.flush()
+    second = news_jobs.raise_system_alert(
+        postgres_session,
+        alert_key=alert_key,
+        severity="warning",
+        message="Second message.",
+        scope=scope,
+        detail={"attempt": 2},
+    )
+    postgres_session.flush()
+
+    assert second.id == first.id
+    alert_count = postgres_session.execute(
+        select(SystemAlert).where(SystemAlert.alert_key == alert_key)
+    ).scalars().all()
+    assert len(alert_count) == 1
+    postgres_session.expire_all()
+    alert = postgres_session.get(SystemAlert, first.id)
+    assert alert is not None
+    assert alert.severity == "warning"
+    assert alert.message == "Second message."
+    assert alert.detail == {"attempt": 2}
 
 
 def test_duplicate_scheduled_news_job_keeps_session_usable(

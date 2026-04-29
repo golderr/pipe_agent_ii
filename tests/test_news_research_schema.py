@@ -110,10 +110,34 @@ def test_news_summary_views_hide_raw_content_and_use_reader_role(
     assert not _has_select(postgres_session, "authenticated", "news_project_references")
 
 
+def test_news_scrape_active_dedup_index_is_source_scoped(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_schema(postgres_session)
+    indexdef = postgres_session.execute(
+        text(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'scrape_jobs'
+              AND indexname = 'uq_scrape_jobs_one_active_news_scrape'
+            """
+        )
+    ).scalar_one_or_none()
+
+    assert indexdef is not None
+    assert "(source_name)" in indexdef
+    assert "kind)::text = 'news_scrape'" in indexdef
+    assert "COALESCE" not in indexdef
+
+
 def _ensure_news_schema(postgres_session: Session) -> None:
     inspector = inspect(postgres_session.bind)
     if not inspector.has_table("news_sources"):
         pytest.skip("Apply migration 202604290019 before running news schema tests.")
+    if not inspector.has_table("scrape_jobs"):
+        pytest.skip("Apply migration 202604290020 before running news schema tests.")
     news_source_columns = {
         column["name"] for column in inspector.get_columns("news_sources")
     }

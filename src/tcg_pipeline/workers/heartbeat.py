@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from tcg_pipeline.db.models import WorkerHeartbeat
 
 LOGGER = logging.getLogger(__name__)
+_PROCESS_STARTED_AT = datetime.now(UTC)
 
 
 def write_worker_heartbeat(
@@ -23,12 +24,14 @@ def write_worker_heartbeat(
     active_job_started_at: datetime | None = None,
     metadata: dict | None = None,
     now: datetime | None = None,
+    process_started_at: datetime | None = None,
 ) -> None:
     heartbeat_at = now or datetime.now(UTC)
+    started_at = process_started_at or _PROCESS_STARTED_AT
     statement = insert(WorkerHeartbeat).values(
         worker_name=worker_name,
         last_heartbeat_at=heartbeat_at,
-        process_started_at=heartbeat_at,
+        process_started_at=started_at,
         active_job_id=active_job_id,
         active_job_started_at=active_job_started_at,
         heartbeat_metadata=metadata,
@@ -38,6 +41,7 @@ def write_worker_heartbeat(
             index_elements=[WorkerHeartbeat.worker_name],
             set_={
                 "last_heartbeat_at": heartbeat_at,
+                "process_started_at": started_at,
                 "active_job_id": active_job_id,
                 "active_job_started_at": active_job_started_at,
                 "metadata": metadata,
