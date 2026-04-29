@@ -18,6 +18,7 @@ DECISION_CARD_ITEM_TYPES = {
     ReviewItemType.STATUS_CHANGE,
     ReviewItemType.OVERRIDE_CONTRADICTION,
 }
+MAX_UPSERT_ATTEMPTS = 3
 
 
 def upsert_decision_card_review_item(
@@ -48,28 +49,90 @@ def upsert_decision_card_review_item(
         proposed_value=proposed_value,
         evidence_ids=_evidence_ids_from_payload(payload),
     )
-    existing = _active_item_for_field(
+    last_integrity_error: IntegrityError | None = None
+    for _attempt in range(MAX_UPSERT_ATTEMPTS):
+        existing = _active_item_for_field(
+            session,
+            project_id=project_id,
+            item_type=item_type,
+            field_name=field_name,
+        )
+        if existing is not None:
+            if proposed_values_match(existing.payload, proposed_value):
+                _refresh_decision_card(
+                    existing,
+                    priority=priority,
+                    payload=normalized_payload,
+                    source_run_id=source_run_id,
+                    match_confidence=match_confidence,
+                    winning_evidence_id=winning_evidence_id,
+                    contradicted_override_id=contradicted_override_id,
+                    contradiction_priority=contradiction_priority,
+                )
+                return existing, False
+            invalidate_decision_card(existing, reason="proposal_changed")
+
+        item = _new_decision_card_review_item(
+            project_id=project_id,
+            source_run_id=source_run_id,
+            item_type=item_type,
+            field_name=field_name,
+            priority=priority,
+            payload=normalized_payload,
+            match_confidence=match_confidence,
+            winning_evidence_id=winning_evidence_id,
+            contradicted_override_id=contradicted_override_id,
+            contradiction_priority=contradiction_priority,
+        )
+        try:
+            with session.begin_nested():
+                session.add(item)
+                session.flush()
+            return item, True
+        except IntegrityError as exc:
+            last_integrity_error = exc
+
+    existing_after_retries = _active_item_for_field(
         session,
         project_id=project_id,
         item_type=item_type,
         field_name=field_name,
     )
-    if existing is not None:
-        if proposed_values_match(existing.payload, proposed_value):
-            _refresh_decision_card(
-                existing,
-                priority=priority,
-                payload=normalized_payload,
-                source_run_id=source_run_id,
-                match_confidence=match_confidence,
-                winning_evidence_id=winning_evidence_id,
-                contradicted_override_id=contradicted_override_id,
-                contradiction_priority=contradiction_priority,
-            )
-            return existing, False
-        invalidate_decision_card(existing, reason="proposal_changed")
+    if existing_after_retries is not None and proposed_values_match(
+        existing_after_retries.payload,
+        proposed_value,
+    ):
+        _refresh_decision_card(
+            existing_after_retries,
+            priority=priority,
+            payload=normalized_payload,
+            source_run_id=source_run_id,
+            match_confidence=match_confidence,
+            winning_evidence_id=winning_evidence_id,
+            contradicted_override_id=contradicted_override_id,
+            contradiction_priority=contradiction_priority,
+        )
+        return existing_after_retries, False
+    if last_integrity_error is not None:
+        raise last_integrity_error
+    msg = "Unable to upsert decision-card review item after retries."
+    raise RuntimeError(msg)
 
-    item = ReviewItem(
+
+def _new_decision_card_review_item(
+    *,
+    project_id: uuid.UUID,
+    source_run_id: uuid.UUID | None,
+    item_type: ReviewItemType,
+    field_name: str,
+    priority: Priority,
+    payload: Mapping[str, Any],
+    match_confidence: float | None,
+    winning_evidence_id: uuid.UUID | None,
+    contradicted_override_id: uuid.UUID | None,
+    contradiction_priority: str | None,
+) -> ReviewItem:
+    return ReviewItem(
         project_id=project_id,
         source_run_id=source_run_id,
         item_type=item_type,
@@ -79,55 +142,10 @@ def upsert_decision_card_review_item(
         match_confidence=match_confidence,
         field_name=field_name,
         winning_evidence_id=winning_evidence_id,
-        payload=normalized_payload,
+        payload=payload,
         contradicted_override_id=contradicted_override_id,
         contradiction_priority=contradiction_priority,
     )
-    try:
-        with session.begin_nested():
-            session.add(item)
-            session.flush()
-        return item, True
-    except IntegrityError:
-        existing_after_race = _active_item_for_field(
-            session,
-            project_id=project_id,
-            item_type=item_type,
-            field_name=field_name,
-        )
-        if existing_after_race is None:
-            raise
-        if not proposed_values_match(existing_after_race.payload, proposed_value):
-            invalidate_decision_card(existing_after_race, reason="proposal_changed")
-            with session.begin_nested():
-                item = ReviewItem(
-                    project_id=project_id,
-                    source_run_id=source_run_id,
-                    item_type=item_type,
-                    status=ReviewItemStatus.OPEN,
-                    state="open",
-                    priority=priority,
-                    match_confidence=match_confidence,
-                    field_name=field_name,
-                    winning_evidence_id=winning_evidence_id,
-                    payload=normalized_payload,
-                    contradicted_override_id=contradicted_override_id,
-                    contradiction_priority=contradiction_priority,
-                )
-                session.add(item)
-                session.flush()
-            return item, True
-        _refresh_decision_card(
-            existing_after_race,
-            priority=priority,
-            payload=normalized_payload,
-            source_run_id=source_run_id,
-            match_confidence=match_confidence,
-            winning_evidence_id=winning_evidence_id,
-            contradicted_override_id=contradicted_override_id,
-            contradiction_priority=contradiction_priority,
-        )
-        return existing_after_race, False
 
 
 def invalidate_decision_card(review_item: ReviewItem, *, reason: str) -> None:
@@ -288,7 +306,6 @@ def _active_item_for_field(
             ReviewItem.state.in_(ACTIVE_REVIEW_STATES),
         )
         .order_by(ReviewItem.created_at.asc(), ReviewItem.id.asc())
-        .with_for_update()
     ).scalars().first()
 
 

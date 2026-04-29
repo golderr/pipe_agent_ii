@@ -25,6 +25,21 @@ from tcg_pipeline.db.models import (
 )
 
 
+def _review_items_by_field(
+    session: Session,
+    *,
+    source_run_id,
+    project_id,
+) -> dict[str, ReviewItem]:
+    rows = session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == source_run_id,
+            ReviewItem.project_id == project_id,
+        )
+    ).scalars().all()
+    return {str(row.field_name): row for row in rows}
+
+
 def test_persist_collected_records_creates_status_change_review_item(
     postgres_session: Session,
 ) -> None:
@@ -72,7 +87,7 @@ def test_persist_collected_records_creates_status_change_review_item(
     assert result.matched_by_address == 1
     assert result.inserted_source_records == 1
     assert result.inserted_identifiers == 1
-    assert result.status_change_review_items == 1
+    assert result.status_change_review_items == 3
     assert result.source_min_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
     assert result.source_max_updated_at == datetime(2020, 5, 4, 9, 18, 23, 851000, tzinfo=UTC)
 
@@ -87,12 +102,13 @@ def test_persist_collected_records_creates_status_change_review_item(
     assert source_run.new_matches == 1
     assert source_run.updates_found == 1
 
-    review_item = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.source_run_id == result.source_run_id,
-            ReviewItem.project_id == project.id,
-        )
-    ).scalar_one()
+    review_items = _review_items_by_field(
+        postgres_session,
+        source_run_id=result.source_run_id,
+        project_id=project.id,
+    )
+    assert set(review_items) == {"pipeline_status", "total_units", "date_delivery"}
+    review_item = review_items["pipeline_status"]
     assert review_item.item_type == ReviewItemType.STATUS_CHANGE
     assert review_item.project_id == project.id
     assert review_item.field_name == "pipeline_status"
@@ -116,13 +132,16 @@ def test_persist_collected_records_creates_status_change_review_item(
             "priority": "high",
         }
     ]
-    assert review_item.payload["changes"] == [
+    assert review_item.payload["changes"] == []
+    assert review_items["total_units"].payload["changes"] == [
         {
             "field": "total_units",
             "old_value": None,
             "new_value": 260,
             "priority": "medium",
         },
+    ]
+    assert review_items["date_delivery"].payload["changes"] == [
         {
             "field": "date_delivery",
             "old_value": None,
@@ -513,7 +532,7 @@ def test_persist_collected_records_matches_existing_project_when_new_candidates_
     assert result.inserted_identifiers == 1
     assert result.new_candidate_review_items == 0
     assert result.suppressed_new_candidate_records == 0
-    assert result.status_change_review_items == 1
+    assert result.status_change_review_items == 2
 
     source_record = postgres_session.execute(
         select(ProjectSourceRecord).where(
@@ -524,12 +543,13 @@ def test_persist_collected_records_matches_existing_project_when_new_candidates_
     ).scalar_one()
     assert source_record.project_id == project.id
 
-    review_item = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.source_run_id == result.source_run_id,
-            ReviewItem.project_id == project.id,
-        )
-    ).scalar_one()
+    review_items = _review_items_by_field(
+        postgres_session,
+        source_run_id=result.source_run_id,
+        project_id=project.id,
+    )
+    assert set(review_items) == {"total_units", "date_delivery"}
+    review_item = review_items["total_units"]
     assert review_item.item_type == ReviewItemType.STATUS_CHANGE
     assert review_item.payload["status_suggestion"] is None
     assert review_item.payload["changes"] == [
@@ -539,6 +559,8 @@ def test_persist_collected_records_matches_existing_project_when_new_candidates_
             "new_value": 5,
             "priority": "medium",
         },
+    ]
+    assert review_items["date_delivery"].payload["changes"] == [
         {
             "field": "date_delivery",
             "old_value": None,
@@ -641,12 +663,13 @@ def test_persist_collected_records_flags_unit_split_mismatch_when_total_changes(
     )
     postgres_session.flush()
 
-    assert result.status_change_review_items == 1
+    assert result.status_change_review_items == 2
 
     review_item = postgres_session.execute(
         select(ReviewItem).where(
             ReviewItem.source_run_id == result.source_run_id,
             ReviewItem.project_id == project.id,
+            ReviewItem.field_name == "total_units",
         )
     ).scalar_one()
     assert {
@@ -692,13 +715,14 @@ def test_persist_collected_records_reviews_resolved_developer_change(
     )
     postgres_session.flush()
 
-    assert result.status_change_review_items == 1
-    review_item = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.source_run_id == result.source_run_id,
-            ReviewItem.project_id == project.id,
-        )
-    ).scalar_one()
+    review_items = _review_items_by_field(
+        postgres_session,
+        source_run_id=result.source_run_id,
+        project_id=project.id,
+    )
+    assert result.status_change_review_items == len(review_items)
+    assert "developer" in review_items
+    review_item = review_items["developer"]
     assert {
         "field": "developer",
         "old_value": "Old Dev",
@@ -752,6 +776,7 @@ def test_persist_collected_records_flags_fuzzy_developer_review_without_field_de
         select(ReviewItem).where(
             ReviewItem.source_run_id == result.source_run_id,
             ReviewItem.project_id == project.id,
+            ReviewItem.field_name == "developer",
         )
     ).scalar_one()
 

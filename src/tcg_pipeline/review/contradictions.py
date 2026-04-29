@@ -440,6 +440,7 @@ def _supporting_evidence_ids(
         select(Evidence).where(
             Evidence.project_id == project.id,
             Evidence.extracted_fields.isnot(None),
+            Evidence.extracted_fields.op("?")(field_name),
         )
     ).scalars().all()
     supporting: list[uuid.UUID] = []
@@ -447,6 +448,9 @@ def _supporting_evidence_ids(
         field_payload = (evidence.extracted_fields or {}).get(field_name)
         if not isinstance(field_payload, Mapping) or "value" not in field_payload:
             continue
+        # Evidence values are expected to be normalized field values, not raw source
+        # signal tokens. For example, pipeline_status evidence should say
+        # "Approved", not "building_permit_issued".
         if not values_contradict(
             field_name,
             override_value,

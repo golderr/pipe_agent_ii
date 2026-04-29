@@ -323,25 +323,13 @@ database session.
 True merge into an existing project is not implemented in C.g.
 
 C.g does not collect APNs, permit/case identifiers, or source URLs at creation
-time. Alembic `202604280016` adds a partial unique index on
-`projects(market_id, canonical_address)` for rows with a non-null `market_id`.
-If two manual creates race past the application-level matcher, the losing insert
-is translated into the same `created = false` duplicate-candidate response
-instead of a 500.
-
-Before applying `202604280016` to a persistent environment, check for existing
-duplicates:
-
-```sql
-SELECT market_id, canonical_address, COUNT(*) AS duplicate_count, ARRAY_AGG(id) AS project_ids
-FROM projects
-WHERE market_id IS NOT NULL
-GROUP BY market_id, canonical_address
-HAVING COUNT(*) > 1;
-```
-
-The migration also runs this preflight and fails before creating the index if
-duplicates are still present.
+time. C.tail.6 serializes same-address manual creates with a transaction-scoped
+Postgres advisory lock on `(market_id, canonical_address)`, then runs the normal
+duplicate matcher while holding that lock. This prevents two concurrent manual
+creates from both passing the duplicate check, while still allowing legitimate
+multi-phase projects that share an address when a researcher explicitly chooses
+`force_create=true`. Alembic `202604280016` is a no-op marker revision for this
+code-level lock.
 
 ## C.h Review Staging + Commit
 
@@ -503,7 +491,20 @@ Before applying `202604280018` to a database that already has review items:
 3. Run `python scripts/collapse_duplicate_review_items.py --apply` once the dry
    run is clean.
 4. Apply `alembic upgrade head`.
-5. Smoke-check `/review`, Coverage queue counts, and one Project Detail review
+5. Confirm field-based active review items were classified:
+
+   ```sql
+   SELECT COUNT(*)
+   FROM review_items
+   WHERE item_type IN ('status_change', 'override_contradiction')
+     AND state IN ('open', 'staged')
+     AND field_name IS NULL;
+   ```
+
+   The expected count is `0`; manually classify or invalidate any rows returned
+   before relying on the unique decision-card invariant.
+
+6. Smoke-check `/review`, Coverage queue counts, and one Project Detail review
    link for a project that previously had duplicate status-change rows.
 
 ## Auth Notes

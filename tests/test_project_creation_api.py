@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -456,39 +455,36 @@ def test_create_project_force_creates_despite_duplicate(postgres_session: Sessio
     assert project_count == 2
 
 
-def test_create_project_force_returns_duplicate_when_unique_lock_loses(
+def test_create_project_rechecks_duplicates_after_address_lock(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_project_creation_api_tables(postgres_session)
     market, jurisdiction = _market_and_jurisdiction("race")
-    existing = _project(
-        "321 WEST RACE STREET LOS ANGELES CA 90012",
-        market=market,
-        jurisdiction=jurisdiction,
-        project_name="Race Winner",
-    )
-    postgres_session.add_all([market, jurisdiction, existing])
+    postgres_session.add_all([market, jurisdiction])
     postgres_session.flush()
-    original_flush = postgres_session.flush
+    competing_project_id: uuid.UUID | None = None
 
-    def fake_flush(*args: object, **kwargs: object) -> None:
-        pending_duplicate = any(
-            isinstance(obj, Project)
-            and obj is not existing
-            and obj.canonical_address == existing.canonical_address
-            and obj.market_id == market.id
-            for obj in postgres_session.new
+    def fake_lock(
+        session: Session,
+        *,
+        market_id: uuid.UUID,
+        canonical_address: str,
+    ) -> None:
+        nonlocal competing_project_id
+        competing = _project(
+            canonical_address,
+            market=market,
+            jurisdiction=jurisdiction,
+            project_name="Race Winner",
         )
-        if pending_duplicate:
-            raise IntegrityError(
-                "INSERT",
-                {},
-                Exception("uq_projects_market_id_canonical_address"),
-            )
-        original_flush(*args, **kwargs)
+        session.add(competing)
+        session.flush()
+        competing_project_id = competing.id
 
-    monkeypatch.setattr(postgres_session, "flush", fake_flush)
+    from tcg_pipeline.api import project_creation
+
+    monkeypatch.setattr(project_creation, "_acquire_project_create_address_lock", fake_lock)
     client = _client(postgres_session)
 
     response = client.post(
@@ -498,7 +494,6 @@ def test_create_project_force_returns_duplicate_when_unique_lock_loses(
             "market_id": str(market.id),
             "jurisdiction_id": str(jurisdiction.id),
             "zip": "90012",
-            "force_create": True,
         },
         headers=_auth_headers(),
     )
@@ -513,8 +508,8 @@ def test_create_project_force_returns_duplicate_when_unique_lock_loses(
 
     assert body["created"] is False
     assert body["project_id"] is None
-    assert body["canonical_address"] == existing.canonical_address
-    assert body["duplicate_candidates"][0]["project_id"] == str(existing.id)
+    assert body["canonical_address"] == "321 WEST RACE STREET LOS ANGELES CA 90012"
+    assert body["duplicate_candidates"][0]["project_id"] == str(competing_project_id)
     assert body["duplicate_candidates"][0]["match_type"] == "address"
     assert body["change_log_entries_created"] == 0
     assert body["geocoding"] is None

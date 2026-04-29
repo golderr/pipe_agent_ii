@@ -242,7 +242,7 @@ Source → Collector → RawRecord → match_raw_record()
 
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
-| C.tail.6 | DB-level duplicate lock for project creation | `done` | 2026-04-28: Added Alembic `202604280016`, which preflights existing duplicates and creates partial unique index `uq_projects_market_id_canonical_address` on `(market_id, canonical_address)` where `market_id IS NOT NULL`. `create_project` now wraps the project insert in a savepoint and translates that unique-index race into the existing `created = false` duplicate-candidate response, including when `force_create=true`. |
+| C.tail.6 | DB-level duplicate lock for project creation | `done` | 2026-04-28: Added transaction-scoped Postgres advisory locking around manual `create_project` duplicate checks, keyed by `(market_id, canonical_address)`. This serializes same-address manual create races so the second request re-runs the matcher after the first commits and returns the existing `created = false` duplicate-candidate response. Alembic `202604280016` is a no-op marker revision; a unique index on `projects(market_id, canonical_address)` was rejected because legitimate multi-phase projects can share one address. |
 
 ##### UX and audit polish
 

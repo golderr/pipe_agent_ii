@@ -34,6 +34,8 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
+    # Existing rows receive the migration timestamp; new writes maintain this
+    # value through application-level decision-card refreshes/invalidations.
     op.create_foreign_key(
         op.f("fk_review_items_winning_evidence_id_evidence"),
         "review_items",

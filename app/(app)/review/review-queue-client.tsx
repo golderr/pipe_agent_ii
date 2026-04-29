@@ -941,7 +941,7 @@ function ReviewItemRow({
 
           {supportingEvidence.length || dissentingEvidence.length ? (
             <div className="mt-3 grid gap-2 lg:grid-cols-2">
-              <EvidenceSummarySection label="Supporting" rows={supportingEvidence} defaultOpen />
+              <EvidenceSummarySection label="Supporting" rows={supportingEvidence} />
               <EvidenceSummarySection label="Against" rows={dissentingEvidence} />
             </div>
           ) : null}

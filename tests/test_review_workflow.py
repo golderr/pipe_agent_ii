@@ -1405,6 +1405,7 @@ def test_reject_status_change_creates_review_protected_override_and_newer_eviden
             ReviewItem.source_run_id == collect_result.source_run_id,
             ReviewItem.project_id == project.id,
             ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+            ReviewItem.field_name == "pipeline_status",
         )
     ).scalar_one()
     assert project.pipeline_status == PipelineStatus.APPROVED

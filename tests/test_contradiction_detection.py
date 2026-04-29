@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from tcg_pipeline.db.models import (
     DeveloperAlias,
     DeveloperRegistry,
+    Evidence,
     PipelineStatus,
     Priority,
     Project,
@@ -223,6 +224,69 @@ def test_unit_string_and_integer_values_do_not_contradict_when_equal() -> None:
     assert values_contradict("total_units", "120", "126") is True
 
 
+def test_pipeline_status_supporting_evidence_uses_resolved_status_values(
+    postgres_session: Session,
+) -> None:
+    _ensure_contradiction_tables(postgres_session)
+    project = _project("926 STATUS SUPPORT WAY LOS ANGELES CA 90012")
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(_override(project, field_name="pipeline_status", value="Approved"))
+    supporting_evidence = Evidence(
+        project_id=project.id,
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="manual",
+        source_record_id="status-supporting",
+        collected_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+        extracted_fields={"pipeline_status": {"value": "Approved", "confidence": "high"}},
+    )
+    candidate_evidence = Evidence(
+        project_id=project.id,
+        source_type="ladbs_inspection",
+        source_tier=1,
+        ingest_method="manual",
+        source_record_id="status-candidate",
+        collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        extracted_fields={
+            "pipeline_status": {
+                "value": "Under Construction",
+                "confidence": "high",
+            }
+        },
+    )
+    postgres_session.add_all([supporting_evidence, candidate_evidence])
+    postgres_session.flush()
+
+    result = detect_project_contradictions(
+        postgres_session,
+        project=project,
+        field_resolutions={
+            "pipeline_status": _resolution(
+                field_name="pipeline_status",
+                override_value="Approved",
+                candidate_value="Under Construction",
+                candidate_evidence_ids=[candidate_evidence.id],
+            )
+        },
+    )
+    postgres_session.flush()
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalar_one()
+
+    assert result.created_count == 1
+    assert review_item.field_name == "pipeline_status"
+    assert review_item.winning_evidence_id == candidate_evidence.id
+    assert set(review_item.payload["evidence_ids"]) == {
+        str(candidate_evidence.id),
+        str(supporting_evidence.id),
+    }
+
+
 def test_detect_project_contradictions_invalidates_stale_item_and_drops_staged_decision(
     postgres_session: Session,
 ) -> None:
@@ -342,6 +406,7 @@ def _resolution(
     mode: str = "review_protected",
     include_baseline: bool = True,
     candidate_is_newer: bool = True,
+    candidate_evidence_ids: list[uuid.UUID | str] | None = None,
 ) -> FieldResolution:
     baseline = (
         {
@@ -367,7 +432,10 @@ def _resolution(
             "candidate_value": candidate_value,
             "candidate_rule_applied": "most_recent_wins",
             "candidate_confidence": "medium",
-            "candidate_evidence_ids": [str(uuid.uuid4())],
+            "candidate_evidence_ids": [
+                str(evidence_id)
+                for evidence_id in (candidate_evidence_ids or [uuid.uuid4()])
+            ],
             "candidate_evidence_date": "2026-05-01",
             "candidate_evidence_frontier": {
                 "evidence_date": "2026-05-01",

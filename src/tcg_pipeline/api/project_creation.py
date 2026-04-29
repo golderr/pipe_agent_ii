@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -73,6 +73,11 @@ def create_project(
             status_code=422,
             detail="canonical_address could not be normalized.",
         )
+    _acquire_project_create_address_lock(
+        session,
+        market_id=market.id,
+        canonical_address=normalized_address.canonical_address,
+    )
 
     match_result = match_raw_record(
         session,
@@ -267,6 +272,28 @@ def _is_project_address_unique_conflict(exc: IntegrityError) -> bool:
         return True
     return PROJECT_ADDRESS_UNIQUE_INDEX in str(exc.orig) or PROJECT_ADDRESS_UNIQUE_INDEX in str(
         exc
+    )
+
+
+def _acquire_project_create_address_lock(
+    session: Session,
+    *,
+    market_id: uuid.UUID,
+    canonical_address: str,
+) -> None:
+    session.execute(
+        text(
+            """
+            SELECT pg_advisory_xact_lock(
+                hashtext(:market_key),
+                hashtext(:address_key)
+            )
+            """
+        ),
+        {
+            "market_key": str(market_id),
+            "address_key": canonical_address,
+        },
     )
 
 
