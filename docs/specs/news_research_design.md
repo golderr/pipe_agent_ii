@@ -1375,9 +1375,10 @@ Cost bound: Pass 3a fires for ~10–25% of relevant articles; Pass 3b fires for 
 Every LLM call's response includes token-usage metadata. We compute cost using the model's published rates and persist:
 
 - `input_tokens_uncached` — first-time tokens in this call.
+- `input_tokens_cache_creation` — prompt-cache write tokens billed at the provider's cache-creation rate.
 - `input_tokens_cached` — tokens served from prompt cache (cheaper).
 - `output_tokens` — generation.
-- `cost_usd` — computed in code from a static rate table (versioned in `src/tcg_pipeline/news/pricing.py`) so we can correct historical cost if the rate table changes.
+- `cost_usd` — computed in code from a static rate table (currently in `src/tcg_pipeline/news/llm.py`) so we can correct historical cost if the rate table changes.
 
 The trigger or worker-side aggregation updates `news_extraction_costs` daily-rollup keyed by `(cost_date, pass, model)`.
 
@@ -2233,7 +2234,7 @@ The "static" portion of the prompt — system prompt + glossary + signal-flag re
 
 ### 17.5 Pricing changes
 
-Pricing rates live in `src/tcg_pipeline/news/pricing.py` as a versioned dict. When Anthropic changes prices, we add a new dict version and `cost_usd` for new extractions uses the new rates. Old extractions retain their original cost figures.
+Pricing rates live in `src/tcg_pipeline/news/llm.py` as a versioned dict. When Anthropic changes prices, we add a new dict version and `cost_usd` for new extractions uses the new rates. Old extractions retain their original cost figures.
 
 ---
 
@@ -2536,7 +2537,7 @@ v1 listed D.W as "Render Worker scaffold." That's wrong — C.tail.1 already shi
 | **D.7a** | Paste-a-link minimal vertical: FastAPI `POST /research/articles` writes a `scrape_jobs(kind='news_paste_a_link')` row and enqueues into RQ; worker fetches via httpx + trafilatura; Pass 0 (ingest) only; admin view shows article + body + metadata. | 2 days | D.W |
 | **D.3a** | Pass 1 structural extractor library + tests. Wired automatically after Pass 0. Adds `news_articles.structural_signals`. | 2 days | D.7a |
 | **D.3b** | Pass 2a triage (Haiku) — prompt + structured output + cost tracking + `news_extraction_costs` rollup writes. | 1 day | D.3a |
-| **D.3c** | Pass 2b extraction (Opus) — prompt + structured output schema + glossary cache + signal-flag registry consumption. Materially-changed gating wired but not exercised. | 3 days | D.3b |
+| **D.3c** | Pass 2b extraction (Opus) — prompt + structured output schema + glossary cache + signal-flag registry consumption. Matching, evidence writes, and materially-changed gating remain in D.3d/D.4. | 3 days | D.3b |
 | **D.3d** | Extraction-time Pass 3a: Pass 1/2 conflict, low-confidence, parse-error/refusal triggers (NOT match-triggered, which ships in D.4). | 1 day | D.3c |
 | **D.4** | Article matcher (`news_matcher`) — Tier 1/2/3/4 from §9. Match-triggered Pass 3b on `new_candidate`. Evidence integrator with post-apply review semantics per §10. SourceRun creation per §10.3. Connect to existing `_link_orphan_evidence` for orphan accept paths. End-to-end: paste-a-link → fetch → extract → match → evidence row → `resolve_project(apply=True)` → STATUS_CHANGE/OVERRIDE_CONTRADICTION review item. | 4 days | D.3d |
 | **D.4-resolver** | Implement §21f recent-article delivery-date priority in the resolver (`delivery_year.py` `_select_explicit_delivery_observation`). Add resolver-side filter `WHERE evidence.superseded_at IS NULL` so re-extraction supersession works. | 1 day | D.4 |

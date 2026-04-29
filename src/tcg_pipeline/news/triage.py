@@ -29,6 +29,13 @@ from tcg_pipeline.news.costs import (
     release_llm_cost_reservation,
     reserve_llm_cost,
 )
+from tcg_pipeline.news.llm import (
+    DEFAULT_TRIAGE_MODEL,
+    LLMUsage,
+    anthropic_usage,
+    calculate_llm_cost_usd,
+    pricing_for_model,
+)
 from tcg_pipeline.news.prompts import RenderedPrompt, render_triage_prompt
 from tcg_pipeline.settings import Settings, get_settings
 
@@ -36,21 +43,6 @@ TRIAGE_TRIGGERED_BY = "initial"
 TRIAGE_ESTIMATED_COST_USD = Decimal("0.00625")
 TRIAGE_MAX_TOKENS = 300
 TRIAGE_TEMPERATURE = 0
-DEFAULT_TRIAGE_MODEL = "claude-haiku-4-5-20251001"
-MODEL_PRICING_USD_PER_MILLION = {
-    DEFAULT_TRIAGE_MODEL: {
-        "input": Decimal("1.00"),
-        "input_cache_creation": Decimal("1.25"),
-        "input_cache_read": Decimal("0.10"),
-        "output": Decimal("5.00"),
-    },
-    "claude-opus-4-7": {
-        "input": Decimal("15.00"),
-        "input_cache_creation": Decimal("18.75"),
-        "input_cache_read": Decimal("1.50"),
-        "output": Decimal("75.00"),
-    },
-}
 UNCERTAINTY_MARKERS = (
     "might be",
     "possibly",
@@ -61,14 +53,6 @@ UNCERTAINTY_MARKERS = (
     "appears to",
     "seems to",
 )
-
-
-@dataclass(frozen=True, slots=True)
-class LLMUsage:
-    input_tokens_uncached: int
-    input_tokens_cache_creation: int
-    input_tokens_cached: int
-    output_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +136,7 @@ class AnthropicTriageClient:
             for block in response.content
             if getattr(block, "type", None) == "text"
         )
-        usage = _anthropic_usage(response.usage)
+        usage = anthropic_usage(response.usage)
         return TriageLLMResponse(
             text=text,
             model=response.model,
@@ -204,7 +188,7 @@ def run_news_triage_for_article(
     )
 
     triage_client = client or build_anthropic_triage_client(resolved_settings)
-    _pricing_for_model(triage_client.model)
+    pricing_for_model(triage_client.model)
     with resolved_session_factory() as session:
         reservation = reserve_llm_cost(
             session,
@@ -420,31 +404,6 @@ def parse_triage_response(raw_text: str, *, stop_reason: str | None = None) -> P
     )
 
 
-def calculate_llm_cost_usd(
-    model: str,
-    *,
-    input_tokens_uncached: int,
-    input_tokens_cache_creation: int,
-    input_tokens_cached: int,
-    output_tokens: int,
-) -> Decimal:
-    pricing = _pricing_for_model(model)
-    cost = (
-        Decimal(input_tokens_uncached) * pricing["input"]
-        + Decimal(input_tokens_cache_creation) * pricing["input_cache_creation"]
-        + Decimal(input_tokens_cached) * pricing["input_cache_read"]
-        + Decimal(output_tokens) * pricing["output"]
-    ) / Decimal(1_000_000)
-    return cost.quantize(Decimal("0.000001"))
-
-
-def _pricing_for_model(model: str) -> dict[str, Decimal]:
-    pricing = MODEL_PRICING_USD_PER_MILLION.get(model)
-    if pricing is None:
-        raise RuntimeError(f"Unknown news LLM model pricing: {model}")
-    return pricing
-
-
 def _persist_triage_api_error(
     session: Session,
     *,
@@ -490,18 +449,6 @@ def _persist_triage_api_error(
         relevant=None,
         reason=None,
         parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
-    )
-
-
-def _anthropic_usage(usage: Any) -> LLMUsage:
-    cache_read = int(getattr(usage, "cache_read_input_tokens", None) or 0)
-    cache_creation = int(getattr(usage, "cache_creation_input_tokens", None) or 0)
-    input_tokens = int(getattr(usage, "input_tokens", None) or 0)
-    return LLMUsage(
-        input_tokens_uncached=input_tokens,
-        input_tokens_cache_creation=cache_creation,
-        input_tokens_cached=cache_read,
-        output_tokens=int(getattr(usage, "output_tokens", None) or 0),
     )
 
 

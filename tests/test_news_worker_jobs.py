@@ -22,6 +22,7 @@ from tcg_pipeline.db.models import (
     SystemAlert,
     WorkerHeartbeat,
 )
+from tcg_pipeline.news.extraction import NewsExtractionRunResult
 from tcg_pipeline.news.ingest import ArticleFetchResult
 from tcg_pipeline.news.triage import NewsTriageRunResult
 from tcg_pipeline.settings import Settings
@@ -328,6 +329,7 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
         paywall_state="open",
     )
     triage_extraction_id = uuid.uuid4()
+    extraction_id = uuid.uuid4()
 
     def fake_triage_runner(article_id: uuid.UUID) -> NewsTriageRunResult:
         assert article_id == article.id
@@ -351,6 +353,13 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
         job.id,
         fetcher=lambda _url: result,
         triage_runner=fake_triage_runner,
+        extraction_runner=lambda article_id: NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=extraction_id,
+            relevance="confirmed",
+            reference_count=1,
+            parse_status="ok",
+        ),
     )
 
     postgres_session.expire_all()
@@ -363,6 +372,8 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
     assert refreshed_job.progress["fetch_status"] == NewsFetchStatus.FETCHED.value
     assert refreshed_job.progress["triage_status"] == NewsTriageStatus.RELEVANT.value
     assert refreshed_job.progress["triage_extraction_id"] == str(triage_extraction_id)
+    assert refreshed_job.progress["extraction_id"] == str(extraction_id)
+    assert refreshed_job.progress["extraction_reference_count"] == 1
     assert refreshed_article.fetch_status == NewsFetchStatus.FETCHED.value
     assert refreshed_article.triage_status == NewsTriageStatus.RELEVANT.value
     assert refreshed_article.fetch_attempts == 1
@@ -433,7 +444,11 @@ def test_paste_link_worker_does_not_count_paywall_as_useful_update(
         error_text="Article appears paywalled.",
     )
 
-    news_jobs.run_news_paste_a_link_job(job.id, fetcher=lambda _url: result)
+    news_jobs.run_news_paste_a_link_job(
+        job.id,
+        fetcher=lambda _url: result,
+        extraction_runner=None,
+    )
 
     postgres_session.expire_all()
     refreshed_job = postgres_session.get(ScrapeJob, job.id)

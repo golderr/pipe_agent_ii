@@ -59,13 +59,14 @@ jobs need the durable RQ worker boundary to survive deploys and process exits.
 If it is unset outside production, local Coverage Refresh and paste-a-link
 article ingest fall back to FastAPI background tasks.
 
-`ANTHROPIC_API_KEY` is required before enabling Phase D Pass 2a triage in a
-worker environment. `NEWS_TRIAGE_MODEL` defaults to
-`claude-haiku-4-5-20251001`, and `NEWS_TRIAGE_MAX_TOKENS` defaults to `300`.
+`ANTHROPIC_API_KEY` is required before enabling Phase D LLM passes in a worker
+environment. `NEWS_TRIAGE_MODEL` defaults to `claude-haiku-4-5-20251001`, and
+`NEWS_TRIAGE_MAX_TOKENS` defaults to `300`. `NEWS_EXTRACT_MODEL` defaults to
+`claude-opus-4-7`, and `NEWS_EXTRACT_MAX_TOKENS` defaults to `2500`.
 Successful article fetches call Anthropic from the worker after Pass 1. If the
-key is missing, the scrape job still completes with Pass 0/1 data persisted,
-triage remains `pending`, and `system_alerts.alert_key =
-news_anthropic_api_key_missing` is raised.
+key is missing, the scrape job still completes with durable non-LLM data
+persisted, the relevant LLM pass remains pending/skipped, and
+`system_alerts.alert_key = news_anthropic_api_key_missing` is raised.
 
 `GEOCODIO_API_KEY` and `ESRI_API_KEY` are optional for local development, but
 production project creation should configure both. Manual project creation tries
@@ -137,19 +138,24 @@ creates a pending `news_articles` row, creates a
 task. Redis is required in production; local/dev execution may fall back to a
 FastAPI background task when Redis is unavailable.
 
-The worker runs Pass 0, Pass 1, and Pass 2a for successfully fetched articles:
-HTTP fetch, trafilatura body extraction, metadata parsing,
-paywall/dead-link/fetch-status detection, durable `news_articles` updates,
-structural signal extraction into `news_articles.structural_signals`, and Haiku
-triage into `news_extractions(pass='triage')`. It also records a `source_runs`
-audit row and completes the scrape job. Full extraction/matching remains a later
-Phase D step.
+The worker runs Pass 0, Pass 1, Pass 2a, and Pass 2b for successfully fetched
+and triage-relevant articles: HTTP fetch, trafilatura body extraction, metadata
+parsing, paywall/dead-link/fetch-status detection, durable `news_articles`
+updates, structural signal extraction into `news_articles.structural_signals`,
+Haiku triage into `news_extractions(pass='triage')`, and Opus extraction into
+`news_extractions(pass='extraction')` plus pending `news_project_references`.
+It also records a `source_runs` audit row and completes the scrape job. Matching,
+evidence creation, review items, and re-extraction triggers remain later Phase D
+steps.
 
-Pass 2a uses the active prompt in `config/news_prompts.yaml` and prompt files
-under `src/tcg_pipeline/news/prompts/triage_v1/`. Cost-cap enforcement reserves
-estimated spend under a Postgres advisory lock before the Anthropic call, then
-true-ups `news_extraction_costs` after the response is parsed. Token accounting
-tracks regular input, cache-creation input, cache-read input, and output tokens
+Pass 2a/2b use the active prompts in `config/news_prompts.yaml` and prompt files
+under `src/tcg_pipeline/news/prompts/`. Pass 2b renders the known
+developer/project glossary and signal-flag registry into cached system prompt
+blocks, with article metadata, structural signals, and offset-marked body text
+in the user block. Cost-cap enforcement reserves estimated spend under a
+Postgres advisory lock before Anthropic calls, then true-ups
+`news_extraction_costs` after each response is parsed. Token accounting tracks
+regular input, cache-creation input, cache-read input, and output tokens
 separately so cache writes are billed at their higher provider rate.
 
 `GET /research/articles/{article_id}` is an allowlisted FastAPI admin read. It

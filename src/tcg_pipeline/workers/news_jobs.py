@@ -26,6 +26,10 @@ from tcg_pipeline.db.models import (
     SourceRun,
     SystemAlert,
 )
+from tcg_pipeline.news.extraction import (
+    NewsExtractionRunResult,
+    run_news_extraction_for_article,
+)
 from tcg_pipeline.news.ingest import ArticleFetchResult, fetch_article_pass0
 from tcg_pipeline.news.structural import apply_structural_signals
 from tcg_pipeline.news.triage import NewsTriageRunResult, run_news_triage_for_article
@@ -207,6 +211,9 @@ def run_news_paste_a_link_job(
     triage_runner: Callable[[uuid.UUID], NewsTriageRunResult] | None = (
         run_news_triage_for_article
     ),
+    extraction_runner: Callable[[uuid.UUID], NewsExtractionRunResult] | None = (
+        run_news_extraction_for_article
+    ),
 ) -> None:
     session_factory = get_session_factory()
     try:
@@ -241,12 +248,24 @@ def run_news_paste_a_link_job(
         except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
             _record_news_job_failure(job_id, exc)
             raise
+    extraction_result: NewsExtractionRunResult | None = None
+    if (
+        triage_result is not None
+        and triage_result.relevant is True
+        and extraction_runner is not None
+    ):
+        try:
+            extraction_result = extraction_runner(ingest_result.article_id)
+        except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+            _record_news_job_failure(job_id, exc)
+            raise
     with session_factory() as session:
         try:
             finish_news_paste_a_link_job(
                 session,
                 ingest_result=ingest_result,
                 triage_result=triage_result,
+                extraction_result=extraction_result,
             )
             session.commit()
         except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
@@ -375,6 +394,7 @@ def finish_news_paste_a_link_job(
     *,
     ingest_result: NewsPasteLinkIngestResult,
     triage_result: NewsTriageRunResult | None,
+    extraction_result: NewsExtractionRunResult | None,
 ) -> ScrapeJob:
     job = session.get(ScrapeJob, ingest_result.job_id)
     if job is None:
@@ -398,9 +418,22 @@ def finish_news_paste_a_link_job(
             str(triage_result.extraction_id) if triage_result.extraction_id else None
         )
         job.progress["triage_skipped_reason"] = triage_result.skipped_reason
+    if extraction_result is not None:
+        job.progress["extraction_id"] = (
+            str(extraction_result.extraction_id)
+            if extraction_result.extraction_id
+            else None
+        )
+        job.progress["extraction_relevance"] = extraction_result.relevance
+        job.progress["extraction_parse_status"] = extraction_result.parse_status
+        job.progress["extraction_reference_count"] = extraction_result.reference_count
+        job.progress["extraction_skipped_reason"] = extraction_result.skipped_reason
     elif ingest_result.fetched:
-        job.progress["triage_status"] = "skipped"
-        job.progress["triage_skipped_reason"] = "disabled"
+        if triage_result is None:
+            job.progress["triage_status"] = "skipped"
+            job.progress["triage_skipped_reason"] = "disabled"
+        elif triage_result.relevant is True:
+            job.progress["extraction_skipped_reason"] = "disabled"
     session.flush()
     return job
 
