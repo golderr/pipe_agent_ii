@@ -5,6 +5,22 @@ export type PayloadRow = {
   value: string;
 };
 
+export type NewsContext = {
+  articleId: string | null;
+  extractionId: string | null;
+  referenceId: string | null;
+  referenceIndex: number | null;
+  extractionConfidence: string | null;
+  structuralDisagreement: Record<string, unknown> | null;
+  extractionVersion: number | null;
+  promptId: string | null;
+  promptVersion: string | null;
+  evidenceId: string | null;
+  articleTitle: string | null;
+  publishedAt: string | null;
+  url: string | null;
+};
+
 export function isStagedByMe(
   item: ReviewQueueItem,
   currentUserId: string,
@@ -118,6 +134,11 @@ export function proposedValueForItem(item: ReviewQueueItem) {
 
 export function sourceTextForItem(item: ReviewQueueItem) {
   const payload = item.payload;
+  const newsContext = newsContextForItem(item);
+  if (newsContext) {
+    const source = newsContext.articleTitle ?? "News article";
+    return newsContext.publishedAt ? `${source} - ${formatDate(newsContext.publishedAt)}` : source;
+  }
   const candidate = asRecord(payload?.candidate);
   const frontier = asRecord(candidate?.evidence_frontier);
   const source = asString(frontier?.source_type) ?? asString(payload?.source_record_id);
@@ -126,6 +147,36 @@ export function sourceTextForItem(item: ReviewQueueItem) {
     return `${source} - ${formatDate(date)}`;
   }
   return source;
+}
+
+export function newsContextForItem(item: ReviewQueueItem): NewsContext | null {
+  const context = asRecord(item.payload?.news_context);
+  if (!context) {
+    return null;
+  }
+  const structuralDisagreement = asRecord(context.structural_disagreement);
+  const articleId = asString(context.article_id);
+  const extractionId = asString(context.extraction_id);
+  const url = asString(context.url);
+  const articleTitle = asString(context.article_title);
+  if (!articleId && !extractionId && !url && !articleTitle) {
+    return null;
+  }
+  return {
+    articleId,
+    extractionId,
+    referenceId: asString(context.reference_id),
+    referenceIndex: asNumber(context.reference_index),
+    extractionConfidence: asString(context.extraction_confidence),
+    structuralDisagreement,
+    extractionVersion: asNumber(context.extraction_version),
+    promptId: asString(context.prompt_id),
+    promptVersion: asString(context.prompt_version),
+    evidenceId: asString(context.evidence_id),
+    articleTitle,
+    publishedAt: asString(context.published_at),
+    url
+  };
 }
 
 export function supportingEvidenceForItem(item: ReviewQueueItem) {
@@ -266,4 +317,8 @@ export function asString(value: unknown): string | null {
 
 export function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
+}
+
+export function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

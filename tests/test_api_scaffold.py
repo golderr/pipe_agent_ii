@@ -16,6 +16,7 @@ from tcg_pipeline.api.routers import coverage as coverage_router
 from tcg_pipeline.api.routers import review as review_router
 from tcg_pipeline.db.models import (
     CoStarUploadStatus,
+    Evidence,
     Priority,
     ReviewItemStatus,
     ReviewItemType,
@@ -461,6 +462,95 @@ def test_review_queue_serializes_committed_decision_for_reviewed_tab() -> None:
     assert serialized.active_decision.decision_type == "accept_new"
     assert serialized.active_decision.committed_by == USER_ID
     assert serialized.active_decision.committed_by_email == "allowed@example.com"
+
+
+def test_review_queue_serializes_news_context_and_news_evidence_summary() -> None:
+    evidence_id = uuid.UUID("88888888-8888-8888-8888-888888888888")
+    article_id = uuid.UUID("99999999-9999-9999-9999-999999999999")
+    evidence = Evidence(
+        id=evidence_id,
+        source_type="news_article",
+        source_tier=2,
+        source_record_id="reference-1",
+        ingest_method="news_paste_a_link",
+        collected_at=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        evidence_date=datetime(2026, 4, 29, tzinfo=UTC).date(),
+        raw_data={
+            "source_name": "Urbanize LA",
+            "published_at": "2026-04-29T12:00:00+00:00",
+            "author": "Ava Reporter",
+            "url": "https://example.com/urbanize",
+        },
+        extracted_fields={
+            "total_units": {
+                "value": 140,
+                "confidence": "high",
+                "highlights": [
+                    {
+                        "field": "total_units",
+                        "value": 140,
+                        "passage": "The project includes 140 apartments.",
+                    }
+                ],
+            }
+        },
+    )
+    review_item = SimpleNamespace(
+        id=ITEM_ID,
+        project_id=PROJECT_ID,
+        source_run_id=None,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.MEDIUM,
+        match_confidence=0.97,
+        field_name="total_units",
+        winning_evidence_id=evidence_id,
+        payload={
+            "field_name": "total_units",
+            "changes": [
+                {
+                    "field_name": "total_units",
+                    "old_value": 100,
+                    "new_value": 140,
+                    "evidence_id": str(evidence_id),
+                }
+            ],
+            "evidence_ids": [str(evidence_id)],
+            "news_context": {
+                "article_id": str(article_id),
+                "extraction_id": "extract-1",
+                "reference_id": "reference-1",
+                "reference_index": 0,
+                "extraction_confidence": "high",
+                "structural_disagreement": {"extractor": "unit_count"},
+                "prompt_id": "extract_v1",
+                "prompt_version": "v1",
+                "evidence_id": str(evidence_id),
+                "article_title": "Urbanize reports a project",
+                "published_at": "2026-04-29T12:00:00+00:00",
+                "url": "https://example.com/urbanize",
+            },
+        },
+        assigned_to=None,
+        created_at=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        resolved_at=None,
+        resolved_by=None,
+        decisions=[],
+    )
+
+    serialized = review_router._serialize_review_item(
+        review_item,
+        evidence_by_id={evidence_id: evidence},
+    )
+
+    assert serialized.payload["news_context"]["extraction_confidence"] == "high"
+    assert len(serialized.evidence_summaries) == 1
+    summary = serialized.evidence_summaries[0]
+    assert summary.is_winning is True
+    assert summary.source_type == "news_article"
+    assert summary.summary == "total_units: 140"
+    assert summary.extracted_value == 140
 
 
 def test_phase_c_stubs_do_not_run_without_auth() -> None:

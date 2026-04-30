@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   ChevronDown,
@@ -11,6 +12,7 @@ import {
   Clock,
   ExternalLink,
   GitCompareArrows,
+  Newspaper,
   RotateCcw,
   Save,
   Star
@@ -37,9 +39,11 @@ import {
   humanize,
   isStagedByMe,
   isStagedByOther,
+  newsContextForItem,
   proposedValueForItem,
   sourceTextForItem,
   supportingEvidenceForItem,
+  type NewsContext,
   warningForItem
 } from "@/lib/review/payload";
 import { compactStatus, statusStyle } from "@/lib/status";
@@ -85,6 +89,7 @@ export function ReviewItemDetailClient({
   const sourceLabel = sourceRun
     ? `${sourceRun.sourceName} - ${formatDate(sourceRun.finishedAt ?? sourceRun.runTimestamp)}`
     : sourceTextForItem(item);
+  const newsContext = newsContextForItem(item);
   const supportingEvidence = supportingEvidenceForItem(item);
   const dissentingEvidence = dissentingEvidenceForItem(item);
   const payloadRows = useMemo(() => flattenPayload(item.payload), [item.payload]);
@@ -376,10 +381,68 @@ export function ReviewItemDetailClient({
                 <p>Record {asString(item.payload?.source_record_id)}</p>
               ) : null}
             </div>
+            <NewsContextPanel context={newsContext} />
           </section>
         </aside>
       </div>
     </main>
+  );
+}
+
+function NewsContextPanel({ context }: { context: NewsContext | null }) {
+  if (!context) {
+    return null;
+  }
+  return (
+    <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+      <div className="flex items-start gap-2">
+        <Newspaper className="mt-0.5 size-4 shrink-0 text-slate-500" aria-hidden="true" />
+        <div className="min-w-0">
+          <p className="break-words text-sm font-medium text-slate-950">
+            {context.articleTitle ?? "News article"}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            {context.publishedAt ? formatDate(context.publishedAt) : "Publication date unknown"}
+            {context.referenceIndex !== null ? ` - ref ${context.referenceIndex + 1}` : ""}
+          </p>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-xs">
+        {context.extractionConfidence ? (
+          <span className="rounded border border-sky-200 bg-sky-50 px-2 py-1 text-sky-800">
+            {humanize(context.extractionConfidence)} confidence
+          </span>
+        ) : null}
+        {context.structuralDisagreement ? (
+          <span className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+            <AlertTriangle className="size-3.5" aria-hidden="true" />
+            Structural disagreement
+          </span>
+        ) : null}
+        {context.promptId ? (
+          <span className="rounded border border-slate-200 bg-white px-2 py-1 text-slate-600">
+            {context.promptId}
+            {context.promptVersion ? ` ${context.promptVersion}` : ""}
+          </span>
+        ) : null}
+      </div>
+      {context.structuralDisagreement ? (
+        <p className="mt-2 break-words text-xs text-slate-600">
+          {formatValue(context.structuralDisagreement)}
+        </p>
+      ) : null}
+      {context.url ? (
+        <a
+          className="mt-3 inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
+          href={context.url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <ExternalLink className="size-3.5" aria-hidden="true" />
+          Article
+        </a>
+      ) : null}
+    </div>
   );
 }
 

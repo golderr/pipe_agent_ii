@@ -4,17 +4,19 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
   Check,
   ChevronDown,
   ExternalLink,
   GitCompareArrows,
   ListChecks,
+  Newspaper,
   RotateCcw,
   Save,
   Star
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useState, useTransition, type MouseEvent } from "react";
 import {
   commitReviewDecisionsAction,
   stageReviewDecisionAction,
@@ -37,9 +39,11 @@ import {
   humanize,
   isStagedByMe,
   isStagedByOther,
+  newsContextForItem,
   proposedValueForItem,
   sourceTextForItem,
   supportingEvidenceForItem,
+  type NewsContext,
   warningForItem
 } from "@/lib/review/payload";
 import {
@@ -883,6 +887,7 @@ function ReviewItemRow({
   const warningText = warningForItem(item);
   const supportingEvidence = supportingEvidenceForItem(item);
   const dissentingEvidence = dissentingEvidenceForItem(item);
+  const newsContext = newsContextForItem(item);
 
   return (
     <article
@@ -930,6 +935,7 @@ function ReviewItemRow({
                 match {Math.round(item.matchConfidence * 100)}%
               </span>
             ) : null}
+            <NewsContextChips context={newsContext} stopPropagation />
           </div>
 
           {warningText ? (
@@ -1045,6 +1051,54 @@ function ReviewItemRow({
         </div>
       </div>
     </article>
+  );
+}
+
+function NewsContextChips({
+  context,
+  stopPropagation = false
+}: {
+  context: NewsContext | null;
+  stopPropagation?: boolean;
+}) {
+  if (!context) {
+    return null;
+  }
+  const onClick = stopPropagation
+    ? (event: MouseEvent) => event.stopPropagation()
+    : undefined;
+  return (
+    <>
+      {context.extractionConfidence ? (
+        <span className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-1 text-xs text-sky-800">
+          <Newspaper className="size-3.5" aria-hidden="true" />
+          {humanize(context.extractionConfidence)} confidence
+        </span>
+      ) : null}
+      {context.referenceIndex !== null ? (
+        <span className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-600">
+          ref {context.referenceIndex + 1}
+        </span>
+      ) : null}
+      {context.structuralDisagreement ? (
+        <span className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+          <AlertTriangle className="size-3.5" aria-hidden="true" />
+          Structural disagreement
+        </span>
+      ) : null}
+      {context.url ? (
+        <a
+          className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:border-teal-300 hover:text-teal-800"
+          href={context.url}
+          target="_blank"
+          rel="noreferrer"
+          onClick={onClick}
+        >
+          <ExternalLink className="size-3.5" aria-hidden="true" />
+          Article
+        </a>
+      ) : null}
+    </>
   );
 }
 

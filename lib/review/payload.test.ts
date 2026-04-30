@@ -11,6 +11,7 @@ import {
   formatDate,
   isStagedByMe,
   newProjectDataForItem,
+  newsContextForItem,
   proposedValueForItem,
   sourceTextForItem,
   supportingEvidenceForItem,
@@ -159,6 +160,53 @@ describe("review payload helpers", () => {
 
     expect(sourceTextForItem(item)).toBe("ladbs_permit - Apr 26, 2026");
     expect(warningForItem(item)).toBe("This item conflicts with a manual override.");
+  });
+
+  it("extracts news context and uses article source text", () => {
+    const item = reviewItem({
+      payload: {
+        news_context: {
+          article_id: "article-1",
+          extraction_id: "extraction-1",
+          reference_id: "reference-1",
+          reference_index: 2,
+          extraction_confidence: "medium",
+          structural_disagreement: {
+            extractor: "unit_count",
+            raw_match: "120 units",
+            canonical: 120
+          },
+          extraction_version: 3,
+          prompt_id: "extract_v1",
+          prompt_version: "v1",
+          evidence_id: "evidence-1",
+          article_title: "Urbanize reports new tower",
+          published_at: "2026-04-29T12:00:00Z",
+          url: "https://example.com/news"
+        }
+      }
+    });
+
+    expect(newsContextForItem(item)).toEqual({
+      articleId: "article-1",
+      extractionId: "extraction-1",
+      referenceId: "reference-1",
+      referenceIndex: 2,
+      extractionConfidence: "medium",
+      structuralDisagreement: {
+        extractor: "unit_count",
+        raw_match: "120 units",
+        canonical: 120
+      },
+      extractionVersion: 3,
+      promptId: "extract_v1",
+      promptVersion: "v1",
+      evidenceId: "evidence-1",
+      articleTitle: "Urbanize reports new tower",
+      publishedAt: "2026-04-29T12:00:00Z",
+      url: "https://example.com/news"
+    });
+    expect(sourceTextForItem(item)).toBe("Urbanize reports new tower - Apr 29, 2026");
   });
 
   it("flattens top-level and one-level nested payload fields without truncation", () => {
