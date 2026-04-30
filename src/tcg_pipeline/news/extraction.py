@@ -75,6 +75,12 @@ PASS3A_REFERENCE_FIELD_MAP = {
     "candidate_address": "candidate_address",
 }
 MAX_PASS3A_CONTEXT_ITEMS = 20
+ADDRESS_CITY_BY_SCOPE_SLUG = {
+    "los_angeles": "Los Angeles",
+    "city_of_los_angeles": "Los Angeles",
+    "santa_monica": "Santa Monica",
+    "city_of_santa_monica": "Santa Monica",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +123,13 @@ class NewsExtractionRunResult:
 class Pass3aDecision:
     triggered_by: str
     context: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class AddressConflictContext:
+    city: str | None
+    state: str | None
+    market_slug: str | None
 
 
 class ExtractionLLMClient(Protocol):
@@ -608,6 +621,9 @@ def persist_extraction_response(
             )
             session.add(reference)
             reference_count += 1
+        # D.4 matcher consumes the article's current extraction pointer. Failed
+        # re-extractions must remain historical rows so the last clean extraction
+        # stays active.
         article.current_extraction_id = extraction.id
         article.current_extraction_version = (article.current_extraction_version or 0) + 1
         session.flush()
@@ -732,7 +748,7 @@ def _pass3a_structural_conflicts(
     if not signals:
         return []
     conflicts: list[dict[str, Any]] = []
-    market_slug = article.source.market.slug if article.source and article.source.market else None
+    address_context = _address_conflict_context(article)
     for reference_index, reference in enumerate(references):
         if not isinstance(reference, dict):
             continue
@@ -746,7 +762,7 @@ def _pass3a_structural_conflicts(
                 signal,
                 reference=reference,
                 reference_index=reference_index,
-                market_slug=market_slug,
+                address_context=address_context,
             )
             if conflict is not None:
                 conflicts.append(conflict)
@@ -832,7 +848,7 @@ def _structural_signal_conflict(
     *,
     reference: dict[str, Any],
     reference_index: int,
-    market_slug: str | None,
+    address_context: AddressConflictContext,
 ) -> dict[str, Any] | None:
     extractor = signal.get("extractor")
     if extractor == "unit_count":
@@ -868,9 +884,9 @@ def _structural_signal_conflict(
             return None
         normalized = normalize_address(
             extracted_address,
-            city="Los Angeles" if market_slug == "los_angeles" else None,
-            state="CA",
-            market=market_slug,
+            city=address_context.city,
+            state=address_context.state,
+            market=address_context.market_slug,
         )
         return _value_conflict(
             "candidate_address",
@@ -914,7 +930,38 @@ def _structural_signal_conflict(
             str(registry_developer_id),
             reference_index=reference_index,
         )
+    if extractor == "project_dict":
+        registry_project_id = reference.get("registry_project_id")
+        if registry_project_id is None:
+            return None
+        return _value_conflict(
+            "registry_project_id",
+            signal,
+            str(registry_project_id),
+            reference_index=reference_index,
+        )
     return None
+
+
+def _address_conflict_context(article: NewsArticle) -> AddressConflictContext:
+    source = article.source
+    market_slug = source.market.slug if source is not None and source.market is not None else None
+    jurisdiction_slug = (
+        source.jurisdiction.slug
+        if source is not None and source.jurisdiction is not None
+        else None
+    )
+    # Phase H should move city defaults into market config. Until then, keep the
+    # known-city fallback explicit so Santa Monica does not silently use LA.
+    city = ADDRESS_CITY_BY_SCOPE_SLUG.get(jurisdiction_slug or "")
+    if city is None:
+        city = ADDRESS_CITY_BY_SCOPE_SLUG.get(market_slug or "")
+    state = None
+    if source is not None and source.jurisdiction is not None:
+        state = source.jurisdiction.state
+    elif source is not None and source.market is not None:
+        state = source.market.state
+    return AddressConflictContext(city=city, state=state, market_slug=market_slug)
 
 
 def _value_conflict(

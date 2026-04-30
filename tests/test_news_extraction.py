@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.db.models import (
     NewsArticle,
+    NewsCostCap,
     NewsExtraction,
     NewsExtractionCost,
     NewsExtractionParseStatus,
@@ -173,6 +174,55 @@ def test_decide_pass3a_reextraction_detects_structural_conflict(
     assert decision.context["conflicts"][0]["field"] == "total_units"
     assert decision.context["conflicts"][0]["structural_value"] == 310
     assert decision.context["conflicts"][0]["extracted_value"] == 250
+
+
+def test_decide_pass3a_reextraction_detects_project_dict_conflict(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    structural_project_id = uuid.uuid4()
+    llm_project_id = uuid.uuid4()
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "project_dict",
+                "raw_match": "Helio",
+                "offset_start": 35,
+                "offset_end": 40,
+                "canonical": str(structural_project_id),
+                "confidence": 0.82,
+                "metadata": {"display_name": "Helio"},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(registry_project_id=str(llm_project_id)),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add(extraction)
+    postgres_session.flush()
+
+    decision = decide_pass3a_reextraction(article, extraction)
+
+    assert decision is not None
+    assert decision.triggered_by == "pass1_pass2_conflict"
+    conflict = decision.context["conflicts"][0]
+    assert conflict["field"] == "registry_project_id"
+    assert conflict["structural_value"] == str(structural_project_id)
+    assert conflict["extracted_value"] == str(llm_project_id)
 
 
 def test_extraction_reservation_estimate_covers_opus_cache_miss_headroom() -> None:
@@ -460,6 +510,222 @@ def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
     assert reextraction_cost.call_count == 1
 
 
+def test_run_news_extraction_for_article_does_not_reextract_without_trigger(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, _prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return _llm_response(_payload())
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.calls == 1
+    assert result.extraction_id is not None
+    assert result.reextraction_id is None
+    assert postgres_session.execute(
+        select(NewsExtractionCost).where(
+            NewsExtractionCost.cost_date == date(2026, 4, 29),
+            NewsExtractionCost.pass_name == NewsExtractionPass.REEXTRACTION.value,
+            NewsExtractionCost.model == "claude-opus-4-7",
+        )
+    ).scalar_one_or_none() is None
+
+
+def test_run_news_extraction_for_article_skips_pass3a_when_cost_cap_blocks(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    _set_cost_cap(
+        postgres_session,
+        effective_date=date(2026, 4, 29),
+        warn_usd=Decimal("0.01"),
+        hard_usd=Decimal("0.80"),
+    )
+    source = _news_source(postgres_session)
+    article = _article(source)
+    _set_unit_conflict_signal(article)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, _prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return _llm_response(
+                _payload(candidate_unit_total=250),
+                usage=LLMUsage(
+                    input_tokens_uncached=2000,
+                    input_tokens_cache_creation=0,
+                    input_tokens_cached=0,
+                    output_tokens=1000,
+                ),
+            )
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.calls == 1
+    assert result.reextraction_id is None
+    assert result.reextraction_skipped_reason == "cost_cap"
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_article is not None
+    assert refreshed_article.current_extraction_id == result.extraction_id
+    assert refreshed_article.current_extraction_version == 1
+    assert postgres_session.execute(
+        select(NewsExtraction).where(
+            NewsExtraction.article_id == article.id,
+            NewsExtraction.pass_name == NewsExtractionPass.REEXTRACTION.value,
+        )
+    ).scalar_one_or_none() is None
+
+
+def test_run_news_extraction_for_article_persists_pass3a_api_error_without_advancing(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    _set_unit_conflict_signal(article)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, _prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                return _llm_response(_payload(candidate_unit_total=250))
+            raise RuntimeError("pass3 outage")
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=FakeExtractionClient(),
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.extraction_id is not None
+    assert result.reextraction_id is not None
+    assert result.reextraction_skipped_reason == "error"
+    assert result.reextraction_error_text == "pass3 outage"
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    reextraction = postgres_session.get(NewsExtraction, result.reextraction_id)
+    assert refreshed_article is not None
+    assert reextraction is not None
+    assert refreshed_article.current_extraction_id == result.extraction_id
+    assert refreshed_article.current_extraction_version == 1
+    assert reextraction.pass_name == NewsExtractionPass.REEXTRACTION.value
+    assert reextraction.parse_status == NewsExtractionParseStatus.PARSE_ERROR.value
+    assert reextraction.supersedes_extraction_id == result.extraction_id
+    assert reextraction.diagnostic["stage"] == "api_error"
+
+
+def test_run_news_extraction_for_article_records_failed_pass3a_parse_without_advancing(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    _set_unit_conflict_signal(article)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, _prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                return _llm_response(_payload(candidate_unit_total=250))
+            return _llm_response(
+                _payload(candidate_unit_total=310),
+                stop_reason="max_tokens",
+            )
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=FakeExtractionClient(),
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.extraction_id is not None
+    assert result.reextraction_id is not None
+    assert result.reextraction_parse_status == NewsExtractionParseStatus.TRUNCATED.value
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    reextraction = postgres_session.get(NewsExtraction, result.reextraction_id)
+    assert refreshed_article is not None
+    assert reextraction is not None
+    assert refreshed_article.current_extraction_id == result.extraction_id
+    assert refreshed_article.current_extraction_version == 1
+    assert reextraction.pass_name == NewsExtractionPass.REEXTRACTION.value
+    assert reextraction.parse_status == NewsExtractionParseStatus.TRUNCATED.value
+    assert reextraction.supersedes_extraction_id == result.extraction_id
+
+
 def test_run_news_extraction_for_article_skips_and_alerts_without_api_key(
     postgres_session: Session,
 ) -> None:
@@ -493,11 +759,77 @@ def test_run_news_extraction_for_article_skips_and_alerts_without_api_key(
     assert alert.severity == "warning"
 
 
+def _llm_response(
+    payload: dict,
+    *,
+    usage: LLMUsage | None = None,
+    stop_reason: str = "tool_use",
+) -> ExtractionLLMResponse:
+    return ExtractionLLMResponse(
+        payload=payload,
+        text="{}",
+        model="claude-opus-4-7",
+        usage=usage
+        or LLMUsage(
+            input_tokens_uncached=100,
+            input_tokens_cache_creation=0,
+            input_tokens_cached=10,
+            output_tokens=20,
+        ),
+        latency_ms=100,
+        stop_reason=stop_reason,
+    )
+
+
+def _set_unit_conflict_signal(article: NewsArticle) -> None:
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "unit_count",
+                "raw_match": "310-unit",
+                "offset_start": 36,
+                "offset_end": 44,
+                "canonical": 310,
+                "confidence": 0.95,
+                "metadata": {"label": "unit"},
+            }
+        ],
+    }
+
+
+def _set_cost_cap(
+    postgres_session: Session,
+    *,
+    effective_date: date,
+    warn_usd: Decimal,
+    hard_usd: Decimal,
+) -> None:
+    cap = postgres_session.execute(
+        select(NewsCostCap).where(NewsCostCap.effective_date == effective_date)
+    ).scalar_one_or_none()
+    if cap is None:
+        cap = NewsCostCap(
+            effective_date=effective_date,
+            daily_warn_usd=warn_usd,
+            daily_hard_usd=hard_usd,
+        )
+        postgres_session.add(cap)
+    else:
+        cap.daily_warn_usd = warn_usd
+        cap.daily_hard_usd = hard_usd
+        cap.override_hard_usd = None
+        cap.override_until = None
+    postgres_session.flush()
+
+
 def _payload(
     *,
     candidate_signal_flags: dict[str, bool] | None = None,
     candidate_unit_total: int = 140,
     candidate_confidence: str = "high",
+    registry_project_id: str | None = None,
 ) -> dict:
     return {
         "relevance": "confirmed",
@@ -536,7 +868,7 @@ def _payload(
                     }
                 ],
                 "registry_developer_id": None,
-                "registry_project_id": None,
+                "registry_project_id": registry_project_id,
             }
         ],
         "diagnostic": {
