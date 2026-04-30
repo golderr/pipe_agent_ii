@@ -722,4 +722,3 @@ Append-only. Decisions made during 2026-04-25 discussion that, while not yet in 
 - **Triage** — agent work on existing review items (reading them and drafting recommendations), as distinct from sweep work (finding new items)
 - **Verification status** — orthogonal-to-tier dimension on evidence rows: `unverified | agent_assessed | human_confirmed | human_rejected`
 - **Forward-query** — agent calling `trigger_collector` to fetch fresh data from a specific source for a specific project, rather than waiting for the scheduled run
-
