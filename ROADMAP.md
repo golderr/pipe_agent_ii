@@ -27,6 +27,7 @@ This is a living document. It should be updated continuously as work progresses.
 3. Dependencies between steps should be explicit.
 4. If a step has been `in_progress` for more than a week without progress, it needs to be broken down or re-evaluated.
 5. The Decision Log is append-only. Don't edit old entries — add new ones that supersede them.
+6. New sources, matchers, extractors, resolvers, and UI workflows should be market-agnostic by default. If market-specific behavior is unavoidable, put it in market/jurisdiction/source config and make it easy to extend during new-market onboarding; avoid growing hardcoded `if market_slug == ...` maps in application logic.
 
 ---
 
@@ -351,7 +352,8 @@ Source → Collector → RawRecord → match_raw_record()
 
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
-| H.1 | Write SM market config | `not_started` | |
+| H.0 | Market-agnostic hardening audit + address context foundation | `not_started` | Before adding SM-specific collection logic, audit procedures built before the market-agnostic principle was explicit: collectors, source routing, matchers, address normalization, news structural extraction, Pass 3 re-extraction conflict checks, resolvers, CLIs, API writes, and UI filters. Replace hardcoded LA/SM branches with market/jurisdiction/source config where practical; where not practical, document the extension point. Add a market/jurisdiction address context layer (default state/city/county where applicable, city aliases, jurisdiction aliases, boundary/coverage notes) and update current address-conflict/structural-extraction code to consume it instead of maintaining code fallback maps. Produce the first living new-market onboarding checklist from this audit. |
+| H.1 | Write SM market config | `not_started` | Use the H.0 onboarding checklist and address context layer. Santa Monica should prove that a second market can be added primarily through config/source docs, not new hardcoded app conditionals. |
 | H.2 | Configure SM Dev Tracking PDF collector | `not_started` | Reuses PDF parser. Predictable monthly URL pattern. |
 | H.3 | Configure SM Ministerial PDF collector | `not_started` | Cross-ref with Dev Tracking on address + permit number. |
 | H.4 | Configure SM Active Permits (Socrata kpzy-s8rg) | `not_started` | Reuses Socrata collector. |
@@ -365,8 +367,8 @@ Source → Collector → RawRecord → match_raw_record()
 
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
-| I.1 | Document market onboarding process | `not_started` | What sources does a new market need? How to configure? |
-| I.2 | Build market config template + validation | `not_started` | |
+| I.1 | Formalize new-market onboarding process | `not_started` | Graduate the H.0 checklist into a repeatable process: required market/jurisdiction config, address context, source docs, source registrations/news sources, resolver/source-tier mapping, boundary assumptions, geocoder behavior, seed/backfill plan, review/coverage expectations, and operational runbook. |
+| I.2 | Build market config template + validation | `not_started` | Validate required address context and source registration metadata so missing market-specific assumptions fail during onboarding rather than surfacing as hidden LA defaults at runtime. |
 | I.3 | Formalize source registry + adapter contract | `not_started` | |
 | I.4 | Plan `ProjectMarketMembership` migration for overlapping markets | `not_started` | Required before any city + county overlap goes live. |
 | I.5 | Select and stand up third market (different metro) | `not_started` | True generalization test. |
@@ -530,6 +532,7 @@ See ARCHITECTURE.md Section 10 for the full stack listing.
 | 2026-04-29 | Urbanize backfill horizon set to 12 months | D.B becomes a 12-month Urbanize LA backfill instead of an 8-week BizJournals backfill. It must dry-run URL count, estimated relevance, projected LLM cost, and runtime before enqueueing work, then respect robots/rate-limit/source-pause constraints. |
 | 2026-04-29 | Source strategy docs are mandatory for news source onboarding | Every `news_sources` row requires `docs/sources/news/<slug>.md` plus an index entry in `docs/sources/README.md`. PRs that add or change source behavior must update the strategy doc with access, discovery, fetch path, quality, operational history, open issues, and code references. |
 | 2026-04-29 | Phase D pivot details tightened after senior review | D.2a now specifies host-routing cache TTL, source failure semantics, and transient 5xx retry behavior. D.6 owns scheduled-scrape jitter. D.B reports backfill cost/runtimes as ranges and asks Nate for approval at run time. D.M owns the concrete human-approved advanced-fetch request flow. D.2-docs makes the design-doc revision an explicit task. |
+| 2026-04-30 | Market-agnostic behavior becomes an explicit engineering principle | New source, matcher, extractor, resolver, and UI work should be market-agnostic by default. Market-specific behavior belongs in market/jurisdiction/source config with clear extension points. Phase H now starts with a hardening audit to find older LA-specific assumptions and convert them before Santa Monica becomes the second-market proof point; Phase I formalizes the resulting new-market onboarding checklist and validation. |
 | 2026-04-16 | LADBS permit issuance = Approved evidence, not UC proof | TCG status definitions put first permit issuance inside Approved; UC requires visible vertical construction. Resolution engine flags permit-alone as requires_review. |
 | 2026-04-16 | Only final CofO with real `cofo_issue_date` emits Complete evidence | Corrected/reactivated/superseded CofO rows remain source detail until explicitly modeled. |
 | 2026-04-16 | Only recent, substantive inspections on active permits emit UC evidence | Adapter persists all inspection context but only emits `building_inspection_recorded` when recent + substantively positive + permit in active status. |
