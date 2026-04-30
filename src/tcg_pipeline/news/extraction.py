@@ -52,6 +52,7 @@ EXTRACTION_TRIGGERED_BY = "initial"
 PASS3A_TRIGGER_PASS1_PASS2_CONFLICT = "pass1_pass2_conflict"
 PASS3A_TRIGGER_LOW_CONFIDENCE = "pass2_low_confidence"
 PASS3A_TRIGGER_PARSE_ERROR = "pass2_parse_error"
+PASS3B_TRIGGER_NEW_CANDIDATE = "pass2_new_candidate"
 EXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
 REEXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
 EXTRACTION_TEMPERATURE = 0
@@ -414,6 +415,131 @@ def build_anthropic_extraction_client(settings: Settings) -> AnthropicExtraction
         model=settings.news_extract_model,
         max_tokens=settings.news_extract_max_tokens,
     )
+
+
+def run_news_reextraction_for_article(
+    article_id: uuid.UUID,
+    *,
+    triggered_by: str,
+    trigger_context: dict[str, Any],
+    prior_extraction_id: uuid.UUID | None = None,
+    settings: Settings | None = None,
+    client: ExtractionLLMClient | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+    now: datetime | None = None,
+) -> NewsExtractionRunResult:
+    resolved_settings = settings or get_settings()
+    resolved_session_factory = session_factory or get_session_factory()
+    current = now or datetime.now(UTC)
+    with resolved_session_factory() as session:
+        article = session.get(NewsArticle, article_id)
+        if article is None:
+            raise RuntimeError("News re-extraction references a missing article.")
+        effective_prior_extraction_id = prior_extraction_id or article.current_extraction_id
+        if effective_prior_extraction_id is None:
+            return NewsExtractionRunResult(
+                article_id=article_id,
+                extraction_id=None,
+                relevance=None,
+                reference_count=0,
+                parse_status=None,
+                skipped_reason="no_current_extraction",
+                triggered_by=triggered_by,
+            )
+        prior_extraction = session.get(NewsExtraction, effective_prior_extraction_id)
+        if prior_extraction is None:
+            raise RuntimeError("News re-extraction references a missing extraction.")
+        rendered_prompt = render_reextraction_prompt(
+            session,
+            article,
+            prior_extraction=prior_extraction,
+            trigger_context=trigger_context,
+        )
+
+    if client is None and not resolved_settings.anthropic_api_key:
+        with resolved_session_factory() as session:
+            _raise_missing_api_key_alert(session, now=current)
+            session.commit()
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=None,
+            relevance=None,
+            reference_count=0,
+            parse_status=None,
+            skipped_reason="no_api_key",
+            triggered_by=triggered_by,
+        )
+
+    extraction_client = client or build_anthropic_extraction_client(resolved_settings)
+    pricing_for_model(extraction_client.model)
+    with resolved_session_factory() as session:
+        reservation = reserve_llm_cost(
+            session,
+            pass_name=NewsExtractionPass.REEXTRACTION.value,
+            model=extraction_client.model,
+            estimated_cost_usd=REEXTRACTION_ESTIMATED_COST_USD,
+            now=current,
+        )
+        session.commit()
+    if reservation is None:
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=None,
+            relevance=None,
+            reference_count=0,
+            parse_status=None,
+            skipped_reason="cost_cap",
+            triggered_by=triggered_by,
+        )
+
+    try:
+        llm_response = extraction_client.extract(rendered_prompt)
+    except Exception as exc:
+        with resolved_session_factory() as session:
+            release_llm_cost_reservation(
+                session,
+                reserved_cost_usd=REEXTRACTION_ESTIMATED_COST_USD,
+                now=current,
+            )
+            error_result = _persist_extraction_api_error(
+                session,
+                article_id=article_id,
+                rendered_prompt=rendered_prompt,
+                model=extraction_client.model,
+                error=exc,
+                now=current,
+                pass_name=NewsExtractionPass.REEXTRACTION.value,
+                triggered_by=triggered_by,
+                supersedes_extraction_id=effective_prior_extraction_id,
+                extra_diagnostic={"pass3b_context": trigger_context},
+            )
+            session.commit()
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=error_result.extraction_id,
+            relevance=None,
+            reference_count=0,
+            parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
+            skipped_reason="error",
+            error_text=str(exc),
+            triggered_by=triggered_by,
+        )
+
+    with resolved_session_factory() as session:
+        result = persist_extraction_response(
+            session,
+            article_id=article_id,
+            rendered_prompt=rendered_prompt,
+            llm_response=llm_response,
+            reserved_cost_usd=REEXTRACTION_ESTIMATED_COST_USD,
+            now=current,
+            pass_name=NewsExtractionPass.REEXTRACTION.value,
+            triggered_by=triggered_by,
+            supersedes_extraction_id=effective_prior_extraction_id,
+            extra_diagnostic={"pass3b_context": trigger_context},
+        )
+        session.commit()
+    return result
 
 
 def _maybe_run_pass3a_reextraction(

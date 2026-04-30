@@ -1,0 +1,844 @@
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+from sqlalchemy import inspect, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from tcg_pipeline.db.models import (
+    Evidence,
+    IdentifierType,
+    NewsArticle,
+    NewsExtraction,
+    NewsExtractionParseStatus,
+    NewsExtractionPass,
+    NewsFetchStatus,
+    NewsMatchStatus,
+    NewsProjectReference,
+    NewsSource,
+    NewsTriageStatus,
+    PipelineStatus,
+    Project,
+    ProjectIdentifier,
+    ReviewItem,
+    ReviewItemType,
+    SourceRun,
+)
+from tcg_pipeline.db.review_workflow import accept_review_item
+from tcg_pipeline.matching.news_matcher import match_news_reference
+from tcg_pipeline.matching.normalizer import normalize_address
+from tcg_pipeline.news.extraction import NewsExtractionRunResult
+from tcg_pipeline.news.integration import run_news_integration_for_article
+
+
+def test_news_matcher_confirms_identifier_and_ignores_invalid_registry_hint(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    project = _project(
+        source,
+        canonical_address="100 MATCHER WAY LOS ANGELES CA 90012",
+        project_name="Matcher Tower",
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        ProjectIdentifier(
+            project_id=project.id,
+            identifier_type=IdentifierType.CASE_NUMBER,
+            value="CPC-2026-101",
+        )
+    )
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Other Name",
+                candidate_identifiers={"case_number": ["CPC-2026-101"]},
+                registry_project_id=str(uuid.uuid4()),
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    postgres_session.flush()
+
+    match = match_news_reference(postgres_session, article=article, reference=reference)
+
+    assert match.status == NewsMatchStatus.CONFIRMED
+    assert match.project_id == project.id
+    assert match.confidence == 0.97
+    assert "ignored_registry_project_id" in match.diagnostics
+
+
+def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("1234 Sunset Boulevard, Los Angeles, CA 90026")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Helio",
+        developer="Atlas Development",
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Helio",
+                candidate_address="1234 Sunset Boulevard, Los Angeles, CA 90026",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=140,
+                passage_excerpts=[
+                    {
+                        "field": "candidate_unit_total",
+                        "value": 140,
+                        "passage": "Atlas broke ground on the 140-unit Helio project.",
+                        "offset_start": 27,
+                        "offset_end": 35,
+                    }
+                ],
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.status_change_review_items >= 1
+    postgres_session.expire_all()
+    refreshed_project = postgres_session.get(Project, project.id)
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_project is not None
+    assert refreshed_reference is not None
+    assert refreshed_project.total_units == 140
+    assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.project_id == project.id
+    assert evidence.source_type == "news_article"
+    assert evidence.extracted_fields["canonical_address"]["value"] == canonical_address
+    assert evidence.extracted_fields["total_units"]["value"] == 140
+    assert evidence.extracted_fields["total_units"]["confidence"] == "high"
+    assert evidence.extracted_fields["total_units"]["highlights"][0]["passage"].startswith(
+        "Atlas broke ground"
+    )
+    total_units_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+            ReviewItem.field_name == "total_units",
+        )
+    ).scalar_one()
+    assert total_units_item.source_run_id == source_run.id
+    assert total_units_item.winning_evidence_id == evidence.id
+    assert total_units_item.payload["changes"] == [
+        {
+            "field": "total_units",
+            "field_name": "total_units",
+            "old_value": 100,
+            "new_value": 140,
+            "priority": "medium",
+            "source": "news_article",
+            "evidence_id": str(evidence.id),
+        }
+    ]
+    all_status_items = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+        )
+    ).scalars()
+    assert all(len(item.payload.get("changes") or []) <= 1 for item in all_status_items)
+
+
+def test_news_integration_runs_pass3b_and_integrates_latest_extraction(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    project = _project(
+        source,
+        canonical_address=_canonical("777 Recheck Avenue, Los Angeles, CA 90012"),
+        project_name="Recheck Tower",
+        developer="Atlas Development",
+        total_units=80,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    initial_extraction, initial_reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Unmatched New Tower",
+                candidate_developer="New Sponsor",
+                candidate_unit_total=60,
+            )
+        ],
+    )
+    article.current_extraction_id = initial_extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    reextraction_ids: list[uuid.UUID] = []
+
+    def fake_reextract(article_id: uuid.UUID, **kwargs) -> NewsExtractionRunResult:
+        with task_session_factory() as session:
+            reloaded_article = session.get(NewsArticle, article_id)
+            assert reloaded_article is not None
+            extraction, _reference = _add_extraction(
+                session,
+                article=reloaded_article,
+                pass_name=NewsExtractionPass.REEXTRACTION.value,
+                triggered_by=str(kwargs["triggered_by"]),
+                supersedes_extraction_id=kwargs["prior_extraction_id"],
+                references=[
+                    _reference_payload(
+                        candidate_name="Recheck Tower",
+                        candidate_address="777 Recheck Avenue, Los Angeles, CA 90012",
+                        candidate_developer="Atlas Development",
+                        candidate_unit_total=120,
+                    )
+                ],
+            )
+            reloaded_article.current_extraction_id = extraction.id
+            reloaded_article.current_extraction_version += 1
+            session.commit()
+            reextraction_ids.append(extraction.id)
+            return NewsExtractionRunResult(
+                article_id=article_id,
+                extraction_id=extraction.id,
+                relevance="confirmed",
+                reference_count=1,
+                parse_status=NewsExtractionParseStatus.OK.value,
+                triggered_by=str(kwargs["triggered_by"]),
+            )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=task_session_factory,
+        reextraction_runner=fake_reextract,
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.pass3b_triggered is True
+    assert result.confirmed == 1
+    assert result.new_candidate == 0
+    assert result.extraction_id == reextraction_ids[0]
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    refreshed_initial = postgres_session.get(NewsProjectReference, initial_reference.id)
+    assert refreshed_article is not None
+    assert refreshed_initial is not None
+    assert refreshed_article.current_extraction_id == reextraction_ids[0]
+    assert (
+        refreshed_initial.match_status
+        == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
+    )
+    new_candidate_items = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == source_run.id,
+            ReviewItem.item_type == ReviewItemType.NEW_CANDIDATE,
+        )
+    ).scalars().all()
+    assert new_candidate_items == []
+    evidence = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.project_id == project.id,
+            Evidence.source_type == "news_article",
+        )
+    ).scalar_one()
+    assert evidence.project_id == project.id
+
+
+def test_news_integration_supersedes_stale_article_evidence_after_reextraction(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    first_project = _project(
+        source,
+        canonical_address=_canonical("1100 First Street, Los Angeles, CA 90012"),
+        project_name="First News Tower",
+        developer="Atlas Development",
+        total_units=50,
+    )
+    second_project = _project(
+        source,
+        canonical_address=_canonical("1200 Second Street, Los Angeles, CA 90012"),
+        project_name="Second News Tower",
+        developer="Atlas Development",
+        total_units=60,
+    )
+    article = _article(source)
+    postgres_session.add_all([first_project, second_project, article])
+    postgres_session.flush()
+    initial_extraction, _first_reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="First News Tower",
+                candidate_address="1100 First Street, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=50,
+            ),
+            _reference_payload(
+                candidate_name="Second News Tower",
+                candidate_address="1200 Second Street, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=60,
+            ),
+        ],
+    )
+    article.current_extraction_id = initial_extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    task_session_factory = _task_session_factory(postgres_session)
+
+    initial_result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert initial_result.confirmed == 2
+    initial_evidence = _article_evidence_rows(postgres_session, article.id)
+    assert len(initial_evidence) == 2
+    assert all(row.superseded_at is None for row in initial_evidence)
+
+    reextraction, _reference = _add_extraction(
+        postgres_session,
+        article=article,
+        pass_name=NewsExtractionPass.REEXTRACTION.value,
+        triggered_by="manual_recheck",
+        supersedes_extraction_id=initial_extraction.id,
+        references=[
+            _reference_payload(
+                candidate_name="First News Tower",
+                candidate_address="1100 First Street, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=55,
+            )
+        ],
+    )
+    article.current_extraction_id = reextraction.id
+    article.current_extraction_version = 2
+    postgres_session.flush()
+
+    second_result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 30, 13, 0, tzinfo=UTC),
+    )
+
+    assert second_result.confirmed == 1
+    postgres_session.expire_all()
+    all_evidence = _article_evidence_rows(postgres_session, article.id)
+    active_evidence = [row for row in all_evidence if row.superseded_at is None]
+    stale_evidence = [row for row in all_evidence if row.superseded_at is not None]
+    assert len(active_evidence) == 1
+    assert len(stale_evidence) == 2
+    assert active_evidence[0].raw_data["extraction_id"] == str(reextraction.id)
+    stale_references = (
+        postgres_session.execute(
+            select(NewsProjectReference).where(
+                NewsProjectReference.extraction_id == initial_extraction.id
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {
+        reference.match_status for reference in stale_references
+    } == {NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value}
+
+
+def test_force_project_id_is_honored_for_single_reference_and_reported_for_multi(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    project = _project(
+        source,
+        canonical_address=_canonical("1888 Forced Avenue, Los Angeles, CA 90012"),
+        project_name="Forced Match Tower",
+        developer="Atlas Development",
+        total_units=44,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Loose Article Mention",
+                candidate_developer="Different Sponsor",
+                candidate_unit_total=22,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    task_session_factory = _task_session_factory(postgres_session)
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.force_project_id_dropped_reason is None
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.matched_project_id == project.id
+
+    multi_article = _article(source)
+    postgres_session.add(multi_article)
+    postgres_session.flush()
+    multi_extraction, _multi_reference = _add_extraction(
+        postgres_session,
+        article=multi_article,
+        references=[
+            _reference_payload(candidate_name="Mention Only One"),
+            _reference_payload(candidate_name="Mention Only Two"),
+        ],
+    )
+    multi_article.current_extraction_id = multi_extraction.id
+    multi_article.current_extraction_version = 1
+    postgres_session.flush()
+
+    multi_result = run_news_integration_for_article(
+        multi_article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 30, 12, 5, tzinfo=UTC),
+    )
+
+    assert multi_result.force_project_id_dropped_reason == "multi_reference"
+    assert multi_result.progress_payload["force_project_id_dropped_reason"] == (
+        "multi_reference"
+    )
+
+
+def test_news_integration_creates_possible_match_review_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2200 Possible Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Possible Match Tower",
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Possible Match Tower",
+                candidate_address="2200 Possible Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.possible == 1
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.POSSIBLE.value
+    review_item = postgres_session.get(ReviewItem, refreshed_reference.review_item_id)
+    assert review_item is not None
+    assert review_item.item_type == ReviewItemType.POSSIBLE_MATCH
+    assert review_item.payload["candidate_project_ids"] == [str(project.id)]
+
+
+def test_news_new_candidate_accept_links_orphan_evidence(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Standalone News Project",
+                candidate_address="998 Standalone Avenue, Los Angeles, CA 90012",
+                candidate_developer="Standalone Homes",
+                candidate_unit_total=88,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    task_session_factory = _task_session_factory(postgres_session)
+
+    def skipped_reextract(article_id: uuid.UUID, **_kwargs) -> NewsExtractionRunResult:
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=None,
+            relevance=None,
+            reference_count=0,
+            parse_status=None,
+            skipped_reason="test_skip",
+        )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=task_session_factory,
+        reextraction_runner=skipped_reextract,
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.pass3b_triggered is True
+    assert result.new_candidate == 1
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.NEW_CANDIDATE.value
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.project_id is None
+    review_item = postgres_session.get(ReviewItem, refreshed_reference.review_item_id)
+    assert review_item is not None
+    assert review_item.source_run_id == source_run.id
+    assert review_item.item_type == ReviewItemType.NEW_CANDIDATE
+    assert review_item.payload["source_record_id"] == str(reference.id)
+    assert (
+        review_item.payload["mapped_fields"]["canonical_address"]
+        == review_item.payload["canonical_address"]
+    )
+
+    accept_result = accept_review_item(
+        postgres_session,
+        review_item_id=review_item.id,
+        actor="reviewer@example.com",
+        create_new=True,
+    )
+    postgres_session.flush()
+    postgres_session.refresh(evidence)
+    postgres_session.refresh(review_item)
+
+    assert accept_result.linked_evidence_count == 1
+    assert accept_result.project_id is not None
+    assert evidence.project_id == accept_result.project_id
+    assert review_item.project_id == accept_result.project_id
+
+
+def _ensure_news_integration_tables(postgres_session: Session) -> None:
+    inspector = inspect(postgres_session.bind)
+    required_tables = {
+        "evidence",
+        "news_articles",
+        "news_extractions",
+        "news_project_references",
+        "news_sources",
+        "projects",
+        "review_items",
+        "source_runs",
+    }
+    missing = [
+        table_name for table_name in required_tables if not inspector.has_table(table_name)
+    ]
+    if missing:
+        pytest.skip(f"Apply Phase D migrations before running integration tests: {missing}")
+    if "matched_evidence_id" not in {
+        column["name"] for column in inspector.get_columns("news_project_references")
+    }:
+        pytest.skip("Apply latest Phase D news reference migrations before running tests.")
+
+
+def _news_source(postgres_session: Session, slug: str) -> NewsSource:
+    source = postgres_session.execute(
+        select(NewsSource).where(NewsSource.slug == slug)
+    ).scalar_one_or_none()
+    if source is None:
+        pytest.skip(f"Apply Phase D source seed migration before running tests: {slug}.")
+    return source
+
+
+def _canonical(raw_address: str) -> str:
+    canonical = normalize_address(
+        raw_address,
+        city="Los Angeles",
+        state="CA",
+        market="los_angeles",
+    ).canonical_address
+    assert canonical is not None
+    return canonical
+
+
+def _project(
+    source: NewsSource,
+    *,
+    canonical_address: str,
+    project_name: str,
+    developer: str | None = None,
+    total_units: int | None = None,
+) -> Project:
+    market_slug = source.market.slug if source.market is not None else "los_angeles"
+    market_id = source.market_id
+    return Project(
+        canonical_address=canonical_address,
+        raw_addresses=[canonical_address],
+        market=market_slug if market_slug != "unscoped" else "los_angeles",
+        market_id=market_id if market_slug != "unscoped" else None,
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name=project_name,
+        developer=developer,
+        total_units=total_units,
+        pipeline_status=PipelineStatus.PROPOSED,
+    )
+
+
+def _article(source: NewsSource) -> NewsArticle:
+    return NewsArticle(
+        news_source_id=source.id,
+        url_canonical=f"https://example.com/news-d4-{uuid.uuid4().hex}",
+        url_original="https://example.com/news-d4",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        triage_status=NewsTriageStatus.RELEVANT.value,
+        body_text=(
+            "Atlas Development announced a residential project in Los Angeles with "
+            "updated unit counts and delivery timing."
+        ),
+        body_text_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        title="Atlas announces project",
+        byline_author="Ava Reporter",
+        published_at=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+        fetched_at=datetime(2026, 4, 29, 12, 1, tzinfo=UTC),
+        ingest_method="news_paste_a_link",
+    )
+
+
+def _source_run(source: NewsSource) -> SourceRun:
+    return SourceRun(
+        market=source.market.slug if source.market is not None else "unscoped",
+        jurisdiction_id=source.jurisdiction_id,
+        source_name=source.slug,
+        collection_mode="single",
+        trigger_type="user_initiated",
+        records_pulled=1,
+        rows_updated=1,
+    )
+
+
+def _task_session_factory(postgres_session: Session) -> sessionmaker[Session]:
+    return sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+
+def _article_evidence_rows(session: Session, article_id: uuid.UUID) -> list[Evidence]:
+    rows = (
+        session.execute(select(Evidence).where(Evidence.source_type == "news_article"))
+        .scalars()
+        .all()
+    )
+    return [
+        row
+        for row in rows
+        if isinstance(row.raw_data, dict) and row.raw_data.get("article_id") == str(article_id)
+    ]
+
+
+def _add_extraction(
+    session: Session,
+    *,
+    article: NewsArticle,
+    references: list[dict],
+    pass_name: str = NewsExtractionPass.EXTRACTION.value,
+    triggered_by: str = "initial",
+    supersedes_extraction_id: uuid.UUID | None = None,
+) -> tuple[NewsExtraction, NewsProjectReference]:
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=pass_name,
+        triggered_by=triggered_by,
+        supersedes_extraction_id=supersedes_extraction_id,
+        prompt_id=(
+            "extract_v1"
+            if pass_name == NewsExtractionPass.EXTRACTION.value
+            else "reextract_v1"
+        ),
+        prompt_version="v1",
+        prompt_hash=uuid.uuid4().hex,
+        model="claude-opus-4-7",
+        output_json={
+            "relevance": "confirmed",
+            "rejected_reason": None,
+            "project_references": references,
+            "diagnostic": {},
+        },
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    session.add(extraction)
+    session.flush()
+    rows = [
+        _reference_from_payload(
+            article=article,
+            extraction=extraction,
+            index=index,
+            payload=payload,
+        )
+        for index, payload in enumerate(references)
+    ]
+    session.add_all(rows)
+    session.flush()
+    return extraction, rows[0]
+
+
+def _reference_from_payload(
+    *,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    index: int,
+    payload: dict,
+) -> NewsProjectReference:
+    return NewsProjectReference(
+        article_id=article.id,
+        extraction_id=extraction.id,
+        reference_index=index,
+        candidate_name=payload.get("candidate_name"),
+        candidate_address=payload.get("candidate_address"),
+        candidate_developer=payload.get("candidate_developer"),
+        candidate_unit_total=payload.get("candidate_unit_total"),
+        candidate_unit_affordable=payload.get("candidate_unit_affordable"),
+        candidate_unit_market_rate=payload.get("candidate_unit_market_rate"),
+        candidate_product_type=payload.get("candidate_product_type"),
+        candidate_age_restriction=payload.get("candidate_age_restriction"),
+        candidate_status_signal=payload.get("candidate_status_signal"),
+        candidate_delivery_year_normalized=payload.get("candidate_delivery_year_normalized"),
+        candidate_signal_flags=payload.get("candidate_signal_flags") or {},
+        candidate_identifiers=payload.get("candidate_identifiers")
+        or {"case_number": [], "permit_number": [], "apn": []},
+        candidate_neighborhood=payload.get("candidate_neighborhood"),
+        candidate_lat=payload.get("candidate_lat"),
+        candidate_lng=payload.get("candidate_lng"),
+        candidate_confidence=payload.get("candidate_confidence") or "high",
+        passage_excerpts=payload.get("passage_excerpts") or [],
+        match_status=NewsMatchStatus.PENDING.value,
+    )
+
+
+def _reference_payload(
+    *,
+    candidate_name: str | None = "Helio",
+    candidate_address: str | None = None,
+    candidate_developer: str | None = None,
+    candidate_unit_total: int | None = None,
+    candidate_identifiers: dict[str, list[str]] | None = None,
+    candidate_product_type: str | None = None,
+    candidate_age_restriction: str | None = None,
+    passage_excerpts: list[dict] | None = None,
+    registry_project_id: str | None = None,
+) -> dict:
+    return {
+        "candidate_name": candidate_name,
+        "candidate_address": candidate_address,
+        "candidate_developer": candidate_developer,
+        "candidate_unit_total": candidate_unit_total,
+        "candidate_unit_affordable": None,
+        "candidate_unit_market_rate": None,
+        "candidate_product_type": candidate_product_type,
+        "candidate_age_restriction": candidate_age_restriction,
+        "candidate_status_signal": None,
+        "candidate_delivery_year_text": None,
+        "candidate_delivery_year_normalized": None,
+        "candidate_signal_flags": {},
+        "candidate_identifiers": candidate_identifiers
+        or {"case_number": [], "permit_number": [], "apn": []},
+        "candidate_neighborhood": None,
+        "candidate_lat": None,
+        "candidate_lng": None,
+        "candidate_confidence": "high",
+        "passage_excerpts": passage_excerpts or [],
+        "registry_developer_id": None,
+        "registry_project_id": registry_project_id,
+    }

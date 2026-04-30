@@ -31,6 +31,10 @@ from tcg_pipeline.news.extraction import (
     run_news_extraction_for_article,
 )
 from tcg_pipeline.news.ingest import ArticleFetchResult, fetch_article_pass0
+from tcg_pipeline.news.integration import (
+    NewsIntegrationResult,
+    run_news_integration_for_article,
+)
 from tcg_pipeline.news.structural import apply_structural_signals
 from tcg_pipeline.news.triage import NewsTriageRunResult, run_news_triage_for_article
 from tcg_pipeline.settings import Settings, get_settings
@@ -61,6 +65,7 @@ class NewsPasteLinkPlan:
     jurisdiction_id: uuid.UUID | None
     initiated_by_user_id: uuid.UUID | None
     initiated_by_email: str | None
+    force_project_id: uuid.UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +219,9 @@ def run_news_paste_a_link_job(
     extraction_runner: Callable[[uuid.UUID], NewsExtractionRunResult] | None = (
         run_news_extraction_for_article
     ),
+    integration_runner: Callable[..., NewsIntegrationResult] | None = (
+        run_news_integration_for_article
+    ),
 ) -> None:
     session_factory = get_session_factory()
     try:
@@ -266,6 +274,25 @@ def run_news_paste_a_link_job(
                 skipped_reason="error",
                 error_text=str(exc),
             )
+    integration_result: NewsIntegrationResult | None = None
+    if (
+        extraction_result is not None
+        and (
+            extraction_result.parse_status == "ok"
+            or extraction_result.reextraction_parse_status == "ok"
+        )
+        and integration_runner is not None
+    ):
+        try:
+            integration_result = integration_runner(
+                ingest_result.article_id,
+                source_run_id=ingest_result.source_run_id,
+                force_project_id=plan.force_project_id,
+                session_factory=session_factory,
+            )
+        except Exception as exc:  # noqa: BLE001 - integration failures must persist job failure.
+            _record_news_job_failure(job_id, exc)
+            raise
     with session_factory() as session:
         try:
             finish_news_paste_a_link_job(
@@ -273,6 +300,7 @@ def run_news_paste_a_link_job(
                 ingest_result=ingest_result,
                 triage_result=triage_result,
                 extraction_result=extraction_result,
+                integration_result=integration_result,
             )
             session.commit()
         except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
@@ -295,6 +323,7 @@ def start_news_paste_a_link_job(
         return None
     payload = job.target_payload or {}
     article_id = _payload_uuid(payload, "article_id")
+    assert article_id is not None
     article = session.get(NewsArticle, article_id)
     if article is None:
         raise RuntimeError("News paste-a-link job references a missing article.")
@@ -319,6 +348,7 @@ def start_news_paste_a_link_job(
         jurisdiction_id=job.jurisdiction_id or source.jurisdiction_id,
         initiated_by_user_id=job.initiated_by_user_id,
         initiated_by_email=job.initiated_by_email,
+        force_project_id=_payload_uuid(payload, "force_project_id", required=False),
     )
 
 
@@ -402,6 +432,7 @@ def finish_news_paste_a_link_job(
     ingest_result: NewsPasteLinkIngestResult,
     triage_result: NewsTriageRunResult | None,
     extraction_result: NewsExtractionRunResult | None,
+    integration_result: NewsIntegrationResult | None = None,
 ) -> ScrapeJob:
     job = session.get(ScrapeJob, ingest_result.job_id)
     if job is None:
@@ -454,7 +485,9 @@ def finish_news_paste_a_link_job(
             extraction_result.reextraction_skipped_reason
         )
         job.progress["reextraction_error_text"] = extraction_result.reextraction_error_text
-    elif ingest_result.fetched:
+    if integration_result is not None:
+        job.progress.update(integration_result.progress_payload)
+    if extraction_result is None and ingest_result.fetched:
         if triage_result is None:
             job.progress["triage_status"] = "skipped"
             job.progress["triage_skipped_reason"] = "disabled"
@@ -505,9 +538,11 @@ def _load_news_job(
     return job
 
 
-def _payload_uuid(payload: dict, key: str) -> uuid.UUID:
+def _payload_uuid(payload: dict, key: str, *, required: bool = True) -> uuid.UUID | None:
     value = payload.get(key)
     if not isinstance(value, str):
+        if not required and value is None:
+            return None
         raise RuntimeError(f"News scrape job payload is missing '{key}'.")
     try:
         return uuid.UUID(value)

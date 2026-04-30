@@ -209,6 +209,7 @@ class NewsMatchStatus(enum.StrEnum):
     NEW_CANDIDATE = "new_candidate"
     DISCARDED = "discarded"
     MANUAL_RELINK = "manual_relink"
+    SUPERSEDED_BY_REEXTRACTION = "superseded_by_reextraction"
 
 
 class NewsReferenceConfidence(enum.StrEnum):
@@ -782,6 +783,13 @@ class Evidence(Base):
             unique=True,
             postgresql_where=text(
                 "source_record_id IS NOT NULL AND raw_data_hash IS NOT NULL"
+            ),
+        ),
+        Index(
+            "ix_evidence_news_article_id_active",
+            text("(raw_data ->> 'article_id')"),
+            postgresql_where=text(
+                "source_type = 'news_article' AND superseded_at IS NULL"
             ),
         ),
     )
