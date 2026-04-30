@@ -741,13 +741,12 @@ A third follow-on migration adds the trigger or worker-side aggregation that upd
 
 - **`developer.py:18`** — `DEVELOPER_SOURCE_PRIORITY` puts `news_article` at priority 1, just below `pipedream` (priority 0). Used as a tiebreak when evidence dates collide; "most recent wins" is still the primary ordering. So a fresh news article does NOT automatically outrank older Pipedream evidence — recency is checked first.
 - **`units.py:15-19`** — `SPLIT_SOURCE_ALLOWLIST` includes `news_article`; news evidence may write affordable/market_rate splits.
-- **`delivery_year.py:174`** — `_provenance_for_source_type('news_article')` returns `'explicit_news'`. The provenance label is set, but **the §21f rule ("article within 6 months outranks CoStar for delivery dates") is NOT yet implemented in the resolver**. `_select_explicit_delivery_observation` picks the first observation by the standard sort order (evidence_date → collected_at → source_tier); there's no source-type override. Phase D implements §21f in build step D.4-resolver (§23.1) — see §25.7.
+- **`delivery_year.py`** — `_provenance_for_source_type('news_article')` returns `'explicit_news'`. D.4-resolver implements the §21f rule: when CoStar would otherwise win delivery-date resolution, recent `news_article` evidence within 180 days can outrank it while preserving higher-priority TCG/government winners. See §25.7.
 - **`contradictions.py:30, 341-357`** — `NEWS_SOURCE_TYPES = {'news_article', 'news', 'article', 'bizjournals'}`. The contradiction service relaxes the delivery-date contradiction threshold for news evidence within the last 180 days (`_candidate_is_recent_article`). Phase D standardizes on `'news_article'` as the canonical source_type; the other strings remain in the set for compat.
 - **`snippets.py:145, 240`** — `'news_article': render_news_article_snippet`. The renderer reads `evidence.raw_data.{publication, published_at, author}` for the detail line and `extracted_fields[field].highlights` (or top-level `extracted_fields.highlights`) for passage offsets. Phase D writes highlights into `extracted_fields[field].highlights`.
 
-**What is NOT implemented** (Phase D must add or explicitly defer):
+**What is intentionally unchanged or not implemented** (Phase D must keep these constraints unless explicitly scoped):
 
-- **§21f recent-article delivery-date priority.** The rule is documented in `EVIDENCE_LAYER_DECISIONS.md` §21f as forward-looking for Phase D. No resolver code today applies it. Phase D should ship the implementation (a small change to `_select_explicit_delivery_observation` to prefer `news_article` evidence within 180 days over CoStar) OR list this as a Phase E follow-up. Recommendation: ship it during D.5 since news ingest is the only source where the rule materially fires.
 - **Status promotion from news alone.** The status resolver is conservative — single Tier 2 evidence will not promote a project to `Under Construction` without Tier 1 corroboration (per existing decisions in `ARCHITECTURE.md` §8). This is a feature, not a bug: an article alone is not construction-start proof. Phase D should not weaken this. News evidence may suggest status changes that show up as `STATUS_CHANGE` review items but do not auto-promote.
 - **Field-level review item types other than `STATUS_CHANGE`.** The `ReviewItemType` enum has no `field_change`. All field-level diffs from collectors today get packed into `STATUS_CHANGE` items by the differ. Phase D follows that convention; splitting `STATUS_CHANGE` into per-field types is out of scope.
 
@@ -2679,8 +2678,8 @@ Phase D explicitly punts the following to other phases. Each carries an explicit
 ### 25.7 §21f recent-article delivery-date priority
 
 - Routed to D.4-resolver in §23.1.
-- Implements the rule from `EVIDENCE_LAYER_DECISIONS.md` §21f ("article within 6 months outranks CoStar for delivery dates"), which is documented as forward-looking but not yet present in `delivery_year.py`. Phase D ships it concurrently with the matcher because it's only meaningful once article evidence flows.
-- Implementation hint: `_select_explicit_delivery_observation` should sort observations with a tie-break that prefers `evidence.source_type == 'news_article' AND evidence.evidence_date >= today - 180d` over CoStar regardless of raw recency. Tests against backfilled article evidence validate behavior.
+- Implemented on 2026-04-30 in D.4-resolver.
+- `_select_explicit_delivery_observation` now lets recent `news_article` evidence within 180 days outrank CoStar when CoStar would otherwise win by raw recency. Higher-priority TCG/government winners remain untouched. Focused resolver tests cover recent news, stale news, and TCG precedence.
 
 ### 25.8 Decision Log entries to be added to ROADMAP.md
 

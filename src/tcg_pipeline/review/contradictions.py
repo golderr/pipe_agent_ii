@@ -439,6 +439,7 @@ def _supporting_evidence_ids(
     rows = session.execute(
         select(Evidence).where(
             Evidence.project_id == project.id,
+            Evidence.superseded_at.is_(None),
             Evidence.extracted_fields.isnot(None),
             Evidence.extracted_fields.op("?")(field_name),
         )

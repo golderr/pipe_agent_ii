@@ -269,7 +269,10 @@ def _load_project_evidence(session: Session, project_id) -> list[Evidence]:
     return (
         session.execute(
             select(Evidence)
-            .where(Evidence.project_id == project_id)
+            .where(
+                Evidence.project_id == project_id,
+                Evidence.superseded_at.is_(None),
+            )
             .order_by(
                 Evidence.evidence_date.desc().nullslast(),
                 Evidence.collected_at.desc(),

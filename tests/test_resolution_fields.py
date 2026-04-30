@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from tcg_pipeline.db.models import (
     AgeRestriction,
@@ -115,6 +115,91 @@ def test_resolve_delivery_year_estimates_midyear_when_explicit_date_missing() ->
     assert resolution.metadata["provenance"] == "estimated_calc"
     assert resolution.metadata["delivery_date_type"] == "estimated_calc"
     assert "Estimated delivery date" in resolution.metadata["description"]
+
+
+def test_resolve_delivery_year_prefers_recent_news_over_costar() -> None:
+    project = _build_project()
+    today = date.today()
+    costar_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=today,
+        extracted_fields={"date_delivery": {"value": "2030-01-01", "confidence": None}},
+    )
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=today - timedelta(days=30),
+        extracted_fields={"date_delivery": {"value": "2028-07-01", "confidence": None}},
+    )
+
+    resolution = resolve_delivery_year(
+        [costar_evidence, news_evidence],
+        project,
+        resolved_status=PipelineStatus.APPROVED,
+        resolved_total_units=400,
+    )
+
+    assert resolution.value == date(2028, 7, 1)
+    assert resolution.metadata["provenance"] == "explicit_news"
+    assert resolution.evidence_ids == [news_evidence.id]
+
+
+def test_resolve_delivery_year_does_not_prefer_stale_news_over_costar() -> None:
+    project = _build_project()
+    today = date.today()
+    costar_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=today,
+        extracted_fields={"date_delivery": {"value": "2030-01-01", "confidence": None}},
+    )
+    stale_news = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=today - timedelta(days=365),
+        extracted_fields={"date_delivery": {"value": "2028-07-01", "confidence": None}},
+    )
+
+    resolution = resolve_delivery_year(
+        [costar_evidence, stale_news],
+        project,
+        resolved_status=PipelineStatus.APPROVED,
+        resolved_total_units=400,
+    )
+
+    assert resolution.value == date(2030, 1, 1)
+    assert resolution.metadata["provenance"] == "explicit_costar"
+    assert resolution.evidence_ids == [costar_evidence.id]
+
+
+def test_resolve_delivery_year_keeps_tcg_evidence_over_recent_news() -> None:
+    project = _build_project()
+    today = date.today()
+    pipedream_evidence = _build_evidence(
+        source_type="pipedream",
+        source_tier=1,
+        evidence_date=today,
+        extracted_fields={"date_delivery": {"value": "2029-01-01", "confidence": None}},
+    )
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=today,
+        collected_at=datetime.combine(today, datetime.min.time(), tzinfo=UTC),
+        extracted_fields={"date_delivery": {"value": "2028-07-01", "confidence": None}},
+    )
+
+    resolution = resolve_delivery_year(
+        [news_evidence, pipedream_evidence],
+        project,
+        resolved_status=PipelineStatus.APPROVED,
+        resolved_total_units=400,
+    )
+
+    assert resolution.value == date(2029, 1, 1)
+    assert resolution.metadata["provenance"] == "explicit_tcg"
+    assert resolution.evidence_ids == [pipedream_evidence.id]
 
 
 def test_resolve_developer_prefers_pipedream_when_dates_tie() -> None:

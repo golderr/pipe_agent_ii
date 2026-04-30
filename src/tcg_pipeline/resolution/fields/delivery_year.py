@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from tcg_pipeline.db.models import Evidence, PipelineStatus, Project, StatusConfidence
@@ -21,6 +21,7 @@ BASE_YEARS = {
     PipelineStatus.PROPOSED: 5.5,
     PipelineStatus.CONCEPTUAL: 7.0,
 }
+RECENT_NEWS_DELIVERY_DAYS = 180
 
 
 def resolve_delivery_year(
@@ -180,17 +181,41 @@ def _select_explicit_delivery_observation(
     *,
     resolved_status: PipelineStatus,
 ):
+    if not observations:
+        return None
     if resolved_status != PipelineStatus.COMPLETE:
-        return observations[0] if observations else None
+        return _prefer_recent_news_over_costar(observations)
 
     today = date.today()
+    eligible_observations = []
     for observation in observations:
         resolved_date = parse_date_value(observation.value)
         if resolved_date is None:
             continue
         if resolved_date <= today:
-            return observation
-    return None
+            eligible_observations.append(observation)
+    if not eligible_observations:
+        return None
+    return _prefer_recent_news_over_costar(eligible_observations)
+
+
+def _prefer_recent_news_over_costar(observations):
+    winner = observations[0]
+    if winner.evidence.source_type != "costar":
+        return winner
+    recent_news = [
+        observation for observation in observations if _is_recent_news_article(observation)
+    ]
+    return recent_news[0] if recent_news else winner
+
+
+def _is_recent_news_article(observation) -> bool:
+    if observation.evidence.source_type != "news_article":
+        return False
+    evidence_date = observation.evidence.evidence_date
+    if evidence_date is None:
+        return False
+    return evidence_date >= date.today() - timedelta(days=RECENT_NEWS_DELIVERY_DAYS)
 
 
 def _current_explicit_project_delivery(project: Project) -> date | None:

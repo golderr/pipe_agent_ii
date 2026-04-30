@@ -171,3 +171,54 @@ def test_resolve_project_keeps_existing_values_when_partial_evidence_arrives(
     )
     assert resolution.field_resolutions["developer"].value == "Jamison Services"
     assert resolution.field_resolutions["date_delivery"].value == date(2024, 9, 15)
+
+
+def test_resolve_project_ignores_superseded_evidence(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("evidence"):
+        pytest.skip("Apply the evidence layer migration before running resolution tests.")
+
+    project = Project(
+        canonical_address="900 SUPERSEDED WAY LOS ANGELES CA 90012",
+        raw_addresses=["900 Superseded Way"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        total_units=100,
+        pipeline_status=PipelineStatus.PROPOSED,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    active = Evidence(
+        project_id=project.id,
+        source_type="news_article",
+        source_tier=2,
+        ingest_method="news_paste_a_link",
+        collected_at=datetime(2026, 4, 29, tzinfo=UTC),
+        evidence_date=date(2026, 4, 29),
+        extracted_fields={"total_units": {"value": 120, "confidence": "high"}},
+    )
+    superseded = Evidence(
+        project_id=project.id,
+        source_type="news_article",
+        source_tier=2,
+        ingest_method="news_reextraction",
+        collected_at=datetime(2026, 4, 30, tzinfo=UTC),
+        evidence_date=date(2026, 4, 30),
+        extracted_fields={"total_units": {"value": 240, "confidence": "high"}},
+        superseded_at=datetime(2026, 4, 30, 1, tzinfo=UTC),
+    )
+    postgres_session.add_all([active, superseded])
+    postgres_session.flush()
+
+    resolution = resolve_project(
+        project.id,
+        postgres_session,
+        apply=False,
+        write_resolution_log=False,
+    )
+
+    assert resolution.field_resolutions["total_units"].value == 120
+    assert resolution.field_resolutions["last_evidence_date"].value == date(2026, 4, 29)
