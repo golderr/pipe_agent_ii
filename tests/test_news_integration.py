@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import inspect, select
@@ -25,12 +26,19 @@ from tcg_pipeline.db.models import (
     ReviewItem,
     ReviewItemType,
     SourceRun,
+    StatusConfidence,
 )
 from tcg_pipeline.db.review_workflow import accept_review_item
 from tcg_pipeline.matching.news_matcher import match_news_reference
 from tcg_pipeline.matching.normalizer import normalize_address
 from tcg_pipeline.news.extraction import NewsExtractionRunResult
-from tcg_pipeline.news.integration import run_news_integration_for_article
+from tcg_pipeline.news.integration import (
+    _ConfirmedReference,
+    _field_reference_context,
+    _ProjectIntegrationContext,
+    run_news_integration_for_article,
+)
+from tcg_pipeline.resolution.fields import FieldResolution
 
 
 def test_news_matcher_confirms_identifier_and_ignores_invalid_registry_hint(
@@ -181,6 +189,49 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
         )
     ).scalars()
     assert all(len(item.payload.get("changes") or []) <= 1 for item in all_status_items)
+
+
+def test_news_field_context_omits_news_winner_when_non_news_evidence_wins() -> None:
+    news_evidence = Evidence(
+        id=uuid.uuid4(),
+        source_type="news_article",
+        source_tier=2,
+        ingest_method="news_paste_a_link",
+        collected_at=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        evidence_date=datetime(2026, 4, 29, tzinfo=UTC).date(),
+        extracted_fields={"total_units": {"value": 140, "confidence": "high"}},
+    )
+    costar_evidence_id = uuid.uuid4()
+    context = _ProjectIntegrationContext(
+        references=[
+            _ConfirmedReference(
+                reference=NewsProjectReference(id=uuid.uuid4()),
+                match=None,
+                evidence=news_evidence,
+            )
+        ]
+    )
+    resolution_result = SimpleNamespace(
+        field_resolutions={
+            "total_units": FieldResolution(
+                field_name="total_units",
+                value=160,
+                confidence=StatusConfidence.MEDIUM,
+                evidence_ids=[costar_evidence_id],
+                rule_applied="most_recent_wins",
+            )
+        }
+    )
+
+    field_context = _field_reference_context(
+        field_name="total_units",
+        context=context,
+        resolution_result=resolution_result,
+    )
+
+    assert field_context["reference"] is None
+    assert field_context["winning_evidence_id"] is None
+    assert field_context["resolution_winning_evidence_id"] == costar_evidence_id
 
 
 def test_news_integration_runs_pass3b_and_integrates_latest_extraction(

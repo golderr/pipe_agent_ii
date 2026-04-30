@@ -21,7 +21,11 @@ BASE_YEARS = {
     PipelineStatus.PROPOSED: 5.5,
     PipelineStatus.CONCEPTUAL: 7.0,
 }
+# EVIDENCE_LAYER_DECISIONS.md §21f defines this as "within the last 6 months".
 RECENT_NEWS_DELIVERY_DAYS = 180
+NEWS_ARTICLE_SOURCE_TYPE = "news_article"
+COSTAR_SOURCE_TYPES = {"costar"}
+TCG_SOURCE_TYPES = {"pipedream"}
 
 
 def resolve_delivery_year(
@@ -167,11 +171,11 @@ def _estimate_delivery_date(
 
 
 def _provenance_for_source_type(source_type: str) -> str:
-    if source_type == "pipedream":
+    if source_type in TCG_SOURCE_TYPES:
         return "explicit_tcg"
-    if source_type == "costar":
+    if source_type in COSTAR_SOURCE_TYPES:
         return "explicit_costar"
-    if source_type == "news_article":
+    if source_type == NEWS_ARTICLE_SOURCE_TYPE:
         return "explicit_news"
     return "explicit_government"
 
@@ -201,7 +205,7 @@ def _select_explicit_delivery_observation(
 
 def _prefer_recent_news_over_costar(observations):
     winner = observations[0]
-    if winner.evidence.source_type != "costar":
+    if winner.evidence.source_type not in COSTAR_SOURCE_TYPES:
         return winner
     recent_news = [
         observation for observation in observations if _is_recent_news_article(observation)
@@ -210,7 +214,7 @@ def _prefer_recent_news_over_costar(observations):
 
 
 def _is_recent_news_article(observation) -> bool:
-    if observation.evidence.source_type != "news_article":
+    if observation.evidence.source_type != NEWS_ARTICLE_SOURCE_TYPE:
         return False
     evidence_date = observation.evidence.evidence_date
     if evidence_date is None:

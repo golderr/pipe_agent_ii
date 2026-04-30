@@ -89,7 +89,10 @@ def load_project_review_context(
         write_resolution_log=False,
     )
     evidence_rows = session.execute(
-        select(Evidence).where(Evidence.project_id == project_id)
+        select(Evidence).where(
+            Evidence.project_id == project_id,
+            Evidence.superseded_at.is_(None),
+        )
     ).scalars().all()
     evidence_by_id = {str(evidence.id): evidence for evidence in evidence_rows}
     context = ProjectReviewContext(
@@ -254,7 +257,9 @@ def base_review_row(
         "resolved_value": resolved_value,
         "rule_applied": rule_applied,
         "resolution_confidence": (
-            resolution_confidence.value if hasattr(resolution_confidence, "value") else resolution_confidence
+            resolution_confidence.value
+            if hasattr(resolution_confidence, "value")
+            else resolution_confidence
         ),
         "project_confidence": (
             context.project.confidence.value
@@ -268,7 +273,11 @@ def base_review_row(
         "evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
         "winning_source_type": frontier.get("source_type") if isinstance(frontier, dict) else None,
         "winning_source_tier": frontier.get("source_tier") if isinstance(frontier, dict) else None,
-        "winning_evidence_date": frontier.get("evidence_date") if isinstance(frontier, dict) else None,
-        "winning_collected_at": frontier.get("collected_at") if isinstance(frontier, dict) else None,
+        "winning_evidence_date": (
+            frontier.get("evidence_date") if isinstance(frontier, dict) else None
+        ),
+        "winning_collected_at": (
+            frontier.get("collected_at") if isinstance(frontier, dict) else None
+        ),
         "winning_source_record_id": winning_evidence.source_record_id if winning_evidence else None,
     }

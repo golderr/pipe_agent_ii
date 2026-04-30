@@ -202,6 +202,44 @@ def test_resolve_delivery_year_keeps_tcg_evidence_over_recent_news() -> None:
     assert resolution.evidence_ids == [pipedream_evidence.id]
 
 
+def test_resolve_delivery_year_for_complete_prefers_past_recent_news_over_costar() -> None:
+    project = _build_project()
+    today = date.today()
+    costar_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=today,
+        extracted_fields={
+            "date_delivery": {
+                "value": (today - timedelta(days=120)).isoformat(),
+                "confidence": None,
+            }
+        },
+    )
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=today - timedelta(days=30),
+        extracted_fields={
+            "date_delivery": {
+                "value": (today - timedelta(days=90)).isoformat(),
+                "confidence": None,
+            }
+        },
+    )
+
+    resolution = resolve_delivery_year(
+        [costar_evidence, news_evidence],
+        project,
+        resolved_status=PipelineStatus.COMPLETE,
+        resolved_total_units=400,
+    )
+
+    assert resolution.value == today - timedelta(days=90)
+    assert resolution.metadata["provenance"] == "explicit_news"
+    assert resolution.evidence_ids == [news_evidence.id]
+
+
 def test_resolve_developer_prefers_pipedream_when_dates_tie() -> None:
     project = _build_project()
     same_day = date(2026, 4, 1)
