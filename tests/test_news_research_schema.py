@@ -63,9 +63,11 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
     cost_cap = postgres_session.execute(
         text(
             """
-            SELECT daily_warn_usd, daily_hard_usd
+            SELECT effective_date, daily_warn_usd, daily_hard_usd
             FROM news_cost_caps
-            WHERE effective_date = CURRENT_DATE
+            WHERE effective_date <= CURRENT_DATE
+            ORDER BY effective_date DESC
+            LIMIT 1
             """
         )
     ).mappings().one_or_none()

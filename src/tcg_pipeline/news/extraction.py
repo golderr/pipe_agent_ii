@@ -28,6 +28,7 @@ from tcg_pipeline.db.models import (
     NewsTriageStatus,
     SystemAlert,
 )
+from tcg_pipeline.matching.normalizer import normalize_address
 from tcg_pipeline.news.costs import (
     record_llm_cost,
     release_llm_cost_reservation,
@@ -40,14 +41,40 @@ from tcg_pipeline.news.llm import (
     calculate_llm_cost_usd,
     pricing_for_model,
 )
-from tcg_pipeline.news.prompts import RenderedPrompt, render_extraction_prompt
+from tcg_pipeline.news.prompts import (
+    RenderedPrompt,
+    render_extraction_prompt,
+    render_reextraction_prompt,
+)
 from tcg_pipeline.settings import Settings, get_settings
 
 EXTRACTION_TRIGGERED_BY = "initial"
+PASS3A_TRIGGER_PASS1_PASS2_CONFLICT = "pass1_pass2_conflict"
+PASS3A_TRIGGER_LOW_CONFIDENCE = "pass2_low_confidence"
+PASS3A_TRIGGER_PARSE_ERROR = "pass2_parse_error"
 EXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
+REEXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
 EXTRACTION_TEMPERATURE = 0
 EXTRACTION_MAX_TOKENS = 2500
 EXTRACTION_TOOL_NAME = "emit_project_extraction"
+PASS3A_PARSE_TRIGGER_STATUSES = frozenset(
+    {
+        NewsExtractionParseStatus.PARSE_ERROR.value,
+        NewsExtractionParseStatus.SCHEMA_INVALID.value,
+        NewsExtractionParseStatus.REFUSED.value,
+        NewsExtractionParseStatus.TRUNCATED.value,
+    }
+)
+PASS3A_REFERENCE_FIELD_MAP = {
+    "pipeline_status": "candidate_status_signal",
+    "total_units": "candidate_unit_total",
+    "affordable_units": "candidate_unit_affordable",
+    "market_rate_units": "candidate_unit_market_rate",
+    "developer": "candidate_developer",
+    "date_delivery": "candidate_delivery_year_normalized",
+    "candidate_address": "candidate_address",
+}
+MAX_PASS3A_CONTEXT_ITEMS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +104,19 @@ class NewsExtractionRunResult:
     parse_status: str | None
     skipped_reason: str | None = None
     error_text: str | None = None
+    triggered_by: str | None = None
+    reextraction_id: uuid.UUID | None = None
+    reextraction_triggered_by: str | None = None
+    reextraction_reference_count: int | None = None
+    reextraction_parse_status: str | None = None
+    reextraction_skipped_reason: str | None = None
+    reextraction_error_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Pass3aDecision:
+    triggered_by: str
+    context: dict[str, Any]
 
 
 class ExtractionLLMClient(Protocol):
@@ -341,7 +381,16 @@ def run_news_extraction_for_article(
             now=current,
         )
         session.commit()
-    return result
+    pass3a_result = _maybe_run_pass3a_reextraction(
+        article_id=article_id,
+        prior_result=result,
+        client=extraction_client,
+        session_factory=resolved_session_factory,
+        now=current,
+    )
+    if pass3a_result is None:
+        return result
+    return _merge_pass3a_result(result, pass3a_result)
 
 
 def build_anthropic_extraction_client(settings: Settings) -> AnthropicExtractionClient:
@@ -354,6 +403,123 @@ def build_anthropic_extraction_client(settings: Settings) -> AnthropicExtraction
     )
 
 
+def _maybe_run_pass3a_reextraction(
+    *,
+    article_id: uuid.UUID,
+    prior_result: NewsExtractionRunResult,
+    client: ExtractionLLMClient,
+    session_factory: sessionmaker[Session],
+    now: datetime,
+) -> NewsExtractionRunResult | None:
+    if prior_result.extraction_id is None:
+        return None
+    with session_factory() as session:
+        article = session.get(NewsArticle, article_id)
+        prior_extraction = session.get(NewsExtraction, prior_result.extraction_id)
+        if article is None or prior_extraction is None:
+            raise RuntimeError("Pass 3a re-extraction references missing rows.")
+        decision = decide_pass3a_reextraction(article, prior_extraction)
+        if decision is None:
+            return None
+        rendered_prompt = render_reextraction_prompt(
+            session,
+            article,
+            prior_extraction=prior_extraction,
+            trigger_context=decision.context,
+        )
+
+    with session_factory() as session:
+        reservation = reserve_llm_cost(
+            session,
+            pass_name=NewsExtractionPass.REEXTRACTION.value,
+            model=client.model,
+            estimated_cost_usd=REEXTRACTION_ESTIMATED_COST_USD,
+            now=now,
+        )
+        session.commit()
+    if reservation is None:
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=None,
+            relevance=None,
+            reference_count=0,
+            parse_status=None,
+            skipped_reason="cost_cap",
+            triggered_by=decision.triggered_by,
+        )
+
+    try:
+        llm_response = client.extract(rendered_prompt)
+    except Exception as exc:
+        with session_factory() as session:
+            release_llm_cost_reservation(
+                session,
+                reserved_cost_usd=REEXTRACTION_ESTIMATED_COST_USD,
+                now=now,
+            )
+            error_result = _persist_extraction_api_error(
+                session,
+                article_id=article_id,
+                rendered_prompt=rendered_prompt,
+                model=client.model,
+                error=exc,
+                now=now,
+                pass_name=NewsExtractionPass.REEXTRACTION.value,
+                triggered_by=decision.triggered_by,
+                supersedes_extraction_id=prior_result.extraction_id,
+                extra_diagnostic={"pass3a_context": decision.context},
+            )
+            session.commit()
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=error_result.extraction_id,
+            relevance=None,
+            reference_count=0,
+            parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
+            skipped_reason="error",
+            error_text=str(exc),
+            triggered_by=decision.triggered_by,
+        )
+
+    with session_factory() as session:
+        result = persist_extraction_response(
+            session,
+            article_id=article_id,
+            rendered_prompt=rendered_prompt,
+            llm_response=llm_response,
+            reserved_cost_usd=REEXTRACTION_ESTIMATED_COST_USD,
+            now=now,
+            pass_name=NewsExtractionPass.REEXTRACTION.value,
+            triggered_by=decision.triggered_by,
+            supersedes_extraction_id=prior_result.extraction_id,
+            extra_diagnostic={"pass3a_context": decision.context},
+        )
+        session.commit()
+    return result
+
+
+def _merge_pass3a_result(
+    prior_result: NewsExtractionRunResult,
+    pass3a_result: NewsExtractionRunResult,
+) -> NewsExtractionRunResult:
+    return NewsExtractionRunResult(
+        article_id=prior_result.article_id,
+        extraction_id=prior_result.extraction_id,
+        relevance=prior_result.relevance,
+        reference_count=prior_result.reference_count,
+        parse_status=prior_result.parse_status,
+        skipped_reason=prior_result.skipped_reason,
+        error_text=prior_result.error_text,
+        triggered_by=prior_result.triggered_by,
+        reextraction_id=pass3a_result.extraction_id,
+        reextraction_triggered_by=pass3a_result.triggered_by,
+        reextraction_reference_count=pass3a_result.reference_count,
+        reextraction_parse_status=pass3a_result.parse_status,
+        reextraction_skipped_reason=pass3a_result.skipped_reason,
+        reextraction_error_text=pass3a_result.error_text,
+    )
+
+
 def persist_extraction_response(
     session: Session,
     *,
@@ -362,6 +528,10 @@ def persist_extraction_response(
     llm_response: ExtractionLLMResponse,
     reserved_cost_usd: Decimal = Decimal("0"),
     now: datetime | None = None,
+    pass_name: str = NewsExtractionPass.EXTRACTION.value,
+    triggered_by: str = EXTRACTION_TRIGGERED_BY,
+    supersedes_extraction_id: uuid.UUID | None = None,
+    extra_diagnostic: dict[str, Any] | None = None,
 ) -> NewsExtractionRunResult:
     current = now or datetime.now(UTC)
     active_signal_flags = _active_signal_flag_keys(session)
@@ -380,7 +550,7 @@ def persist_extraction_response(
     )
     record_llm_cost(
         session,
-        pass_name=NewsExtractionPass.EXTRACTION.value,
+        pass_name=pass_name,
         model=llm_response.model,
         input_tokens_uncached=llm_response.usage.input_tokens_uncached,
         input_tokens_cache_creation=llm_response.usage.input_tokens_cache_creation,
@@ -396,12 +566,15 @@ def persist_extraction_response(
     if article is None:
         raise RuntimeError("News extraction references a missing article.")
     diagnostic = {"stop_reason": llm_response.stop_reason}
+    if extra_diagnostic:
+        diagnostic.update(extra_diagnostic)
     if parsed.unknown_signal_flags:
         diagnostic["unknown_signal_flags"] = list(parsed.unknown_signal_flags)
     extraction = NewsExtraction(
         article_id=article_id,
-        pass_name=NewsExtractionPass.EXTRACTION.value,
-        triggered_by=EXTRACTION_TRIGGERED_BY,
+        pass_name=pass_name,
+        triggered_by=triggered_by,
+        supersedes_extraction_id=supersedes_extraction_id,
         prompt_id=rendered_prompt.prompt_id,
         prompt_version=rendered_prompt.prompt_version,
         prompt_hash=rendered_prompt.prompt_hash,
@@ -444,6 +617,7 @@ def persist_extraction_response(
         relevance=relevance,
         reference_count=reference_count,
         parse_status=parsed.parse_status,
+        triggered_by=triggered_by,
     )
 
 
@@ -503,6 +677,300 @@ def parse_extraction_response(
     )
 
 
+def decide_pass3a_reextraction(
+    article: NewsArticle,
+    extraction: NewsExtraction,
+) -> Pass3aDecision | None:
+    context: dict[str, Any] = {
+        "previous_extraction_id": str(extraction.id),
+        "previous_parse_status": extraction.parse_status,
+        "triggers": [],
+        "conflicts": [],
+        "low_confidence": [],
+    }
+    if extraction.parse_status in PASS3A_PARSE_TRIGGER_STATUSES:
+        context["triggers"].append(PASS3A_TRIGGER_PARSE_ERROR)
+        context["parse_error_text"] = extraction.parse_error_text
+        return Pass3aDecision(
+            triggered_by=PASS3A_TRIGGER_PARSE_ERROR,
+            context=_trim_pass3a_context(context),
+        )
+
+    payload = extraction.output_json
+    if not isinstance(payload, dict):
+        return None
+    references = payload.get("project_references")
+    if not isinstance(references, list):
+        return None
+
+    conflicts = _pass3a_structural_conflicts(article, references)
+    low_confidence = _pass3a_low_confidence_references(references)
+    if conflicts:
+        context["triggers"].append(PASS3A_TRIGGER_PASS1_PASS2_CONFLICT)
+        context["conflicts"] = conflicts
+    if low_confidence:
+        context["triggers"].append(PASS3A_TRIGGER_LOW_CONFIDENCE)
+        context["low_confidence"] = low_confidence
+    if conflicts:
+        return Pass3aDecision(
+            triggered_by=PASS3A_TRIGGER_PASS1_PASS2_CONFLICT,
+            context=_trim_pass3a_context(context),
+        )
+    if low_confidence:
+        return Pass3aDecision(
+            triggered_by=PASS3A_TRIGGER_LOW_CONFIDENCE,
+            context=_trim_pass3a_context(context),
+        )
+    return None
+
+
+def _pass3a_structural_conflicts(
+    article: NewsArticle,
+    references: list[Any],
+) -> list[dict[str, Any]]:
+    signals = _structural_signals(article)
+    if not signals:
+        return []
+    conflicts: list[dict[str, Any]] = []
+    market_slug = article.source.market.slug if article.source and article.source.market else None
+    for reference_index, reference in enumerate(references):
+        if not isinstance(reference, dict):
+            continue
+        reference_signals = _signals_for_reference(
+            signals,
+            reference=reference,
+            reference_count=len(references),
+        )
+        for signal in reference_signals:
+            conflict = _structural_signal_conflict(
+                signal,
+                reference=reference,
+                reference_index=reference_index,
+                market_slug=market_slug,
+            )
+            if conflict is not None:
+                conflicts.append(conflict)
+            if len(conflicts) >= MAX_PASS3A_CONTEXT_ITEMS:
+                return conflicts
+    return conflicts
+
+
+def _pass3a_low_confidence_references(references: list[Any]) -> list[dict[str, Any]]:
+    low_confidence: list[dict[str, Any]] = []
+    for reference_index, reference in enumerate(references):
+        if not isinstance(reference, dict):
+            continue
+        if reference.get("candidate_confidence") != "low":
+            continue
+        populated_fields = [
+            field_name
+            for field_name, payload_key in PASS3A_REFERENCE_FIELD_MAP.items()
+            if reference.get(payload_key) is not None
+        ]
+        if not populated_fields:
+            continue
+        low_confidence.append(
+            {
+                "reference_index": reference_index,
+                "candidate_name": reference.get("candidate_name"),
+                "fields": populated_fields,
+            }
+        )
+        if len(low_confidence) >= MAX_PASS3A_CONTEXT_ITEMS:
+            break
+    return low_confidence
+
+
+def _structural_signals(article: NewsArticle) -> list[dict[str, Any]]:
+    payload = article.structural_signals or {}
+    signals = payload.get("signals") if isinstance(payload, dict) else None
+    if not isinstance(signals, list):
+        return []
+    return [signal for signal in signals if isinstance(signal, dict)]
+
+
+def _signals_for_reference(
+    signals: list[dict[str, Any]],
+    *,
+    reference: dict[str, Any],
+    reference_count: int,
+) -> list[dict[str, Any]]:
+    if reference_count == 1:
+        return signals
+    windows = _reference_offset_windows(reference)
+    if not windows:
+        return []
+    selected: list[dict[str, Any]] = []
+    for signal in signals:
+        start = _int_or_none(signal.get("offset_start"))
+        end = _int_or_none(signal.get("offset_end"))
+        if start is None or end is None:
+            continue
+        if any(start <= window_end and end >= window_start for window_start, window_end in windows):
+            selected.append(signal)
+    return selected
+
+
+def _reference_offset_windows(reference: dict[str, Any]) -> list[tuple[int, int]]:
+    excerpts = reference.get("passage_excerpts") or []
+    windows: list[tuple[int, int]] = []
+    if not isinstance(excerpts, list):
+        return windows
+    for excerpt in excerpts:
+        if not isinstance(excerpt, dict):
+            continue
+        start = _int_or_none(excerpt.get("offset_start"))
+        end = _int_or_none(excerpt.get("offset_end"))
+        if start is None or end is None:
+            continue
+        windows.append((max(start - 200, 0), end + 200))
+    return windows
+
+
+def _structural_signal_conflict(
+    signal: dict[str, Any],
+    *,
+    reference: dict[str, Any],
+    reference_index: int,
+    market_slug: str | None,
+) -> dict[str, Any] | None:
+    extractor = signal.get("extractor")
+    if extractor == "unit_count":
+        return _value_conflict(
+            "total_units",
+            signal,
+            reference.get("candidate_unit_total"),
+            reference_index=reference_index,
+        )
+    if extractor == "status_phrase":
+        metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
+        if metadata.get("signal_kind") != "pipeline_status":
+            return None
+        return _value_conflict(
+            "pipeline_status",
+            signal,
+            reference.get("candidate_status_signal"),
+            reference_index=reference_index,
+        )
+    if extractor == "delivery_phrase":
+        return _value_conflict(
+            "date_delivery",
+            signal,
+            reference.get("candidate_delivery_year_normalized"),
+            reference_index=reference_index,
+        )
+    if extractor == "address":
+        structural = signal.get("canonical")
+        if not isinstance(structural, dict):
+            return None
+        extracted_address = reference.get("candidate_address")
+        if not isinstance(extracted_address, str) or not extracted_address.strip():
+            return None
+        normalized = normalize_address(
+            extracted_address,
+            city="Los Angeles" if market_slug == "los_angeles" else None,
+            state="CA",
+            market=market_slug,
+        )
+        return _value_conflict(
+            "candidate_address",
+            signal,
+            normalized.canonical_address,
+            structural_value=structural.get("canonical_address"),
+            extracted_value=extracted_address,
+            reference_index=reference_index,
+        )
+    if extractor == "affordable_split_phrase":
+        structural = signal.get("canonical")
+        if not isinstance(structural, dict):
+            return None
+        kind = str(structural.get("kind") or "")
+        count = structural.get("count")
+        if count is None:
+            return None
+        if kind in {"affordable", "low_income", "workforce", "moderate_income"}:
+            return _value_conflict(
+                "affordable_units",
+                signal,
+                reference.get("candidate_unit_affordable"),
+                structural_value=count,
+                reference_index=reference_index,
+            )
+        if kind == "market_rate":
+            return _value_conflict(
+                "market_rate_units",
+                signal,
+                reference.get("candidate_unit_market_rate"),
+                structural_value=count,
+                reference_index=reference_index,
+            )
+    if extractor == "developer_dict":
+        registry_developer_id = reference.get("registry_developer_id")
+        if registry_developer_id is None:
+            return None
+        return _value_conflict(
+            "developer",
+            signal,
+            str(registry_developer_id),
+            reference_index=reference_index,
+        )
+    return None
+
+
+def _value_conflict(
+    field_name: str,
+    signal: dict[str, Any],
+    extracted_candidate: Any,
+    *,
+    structural_value: Any | None = None,
+    extracted_value: Any | None = None,
+    reference_index: int,
+) -> dict[str, Any] | None:
+    if extracted_candidate is None:
+        return None
+    resolved_structural = signal.get("canonical") if structural_value is None else structural_value
+    resolved_extracted = extracted_candidate if extracted_value is None else extracted_value
+    if resolved_structural is None or resolved_extracted is None:
+        return None
+    if _normalized_compare_value(resolved_structural) == _normalized_compare_value(
+        extracted_candidate
+    ):
+        return None
+    return {
+        "reference_index": reference_index,
+        "field": field_name,
+        "structural_value": resolved_structural,
+        "extracted_value": resolved_extracted,
+        "extractor": signal.get("extractor"),
+        "raw_match": signal.get("raw_match"),
+        "offset_start": signal.get("offset_start"),
+        "offset_end": signal.get("offset_end"),
+    }
+
+
+def _normalized_compare_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip().casefold()
+    return str(value)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _trim_pass3a_context(context: dict[str, Any]) -> dict[str, Any]:
+    trimmed = dict(context)
+    trimmed["conflicts"] = list(trimmed.get("conflicts") or [])[:MAX_PASS3A_CONTEXT_ITEMS]
+    trimmed["low_confidence"] = list(trimmed.get("low_confidence") or [])[
+        :MAX_PASS3A_CONTEXT_ITEMS
+    ]
+    return trimmed
+
+
 def _persist_extraction_api_error(
     session: Session,
     *,
@@ -511,11 +979,19 @@ def _persist_extraction_api_error(
     model: str,
     error: Exception,
     now: datetime,
+    pass_name: str = NewsExtractionPass.EXTRACTION.value,
+    triggered_by: str = EXTRACTION_TRIGGERED_BY,
+    supersedes_extraction_id: uuid.UUID | None = None,
+    extra_diagnostic: dict[str, Any] | None = None,
 ) -> NewsExtractionRunResult:
+    diagnostic = {"stage": "api_error"}
+    if extra_diagnostic:
+        diagnostic.update(extra_diagnostic)
     extraction = NewsExtraction(
         article_id=article_id,
-        pass_name=NewsExtractionPass.EXTRACTION.value,
-        triggered_by=EXTRACTION_TRIGGERED_BY,
+        pass_name=pass_name,
+        triggered_by=triggered_by,
+        supersedes_extraction_id=supersedes_extraction_id,
         prompt_id=rendered_prompt.prompt_id,
         prompt_version=rendered_prompt.prompt_version,
         prompt_hash=rendered_prompt.prompt_hash,
@@ -530,7 +1006,7 @@ def _persist_extraction_api_error(
         raw_response_text=None,
         parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
         parse_error_text=str(error),
-        diagnostic={"stage": "api_error"},
+        diagnostic=diagnostic,
         created_at=now,
     )
     session.add(extraction)
@@ -541,6 +1017,7 @@ def _persist_extraction_api_error(
         relevance=None,
         reference_count=0,
         parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
+        triggered_by=triggered_by,
     )
 
 

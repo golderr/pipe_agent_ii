@@ -436,6 +436,24 @@ def finish_news_paste_a_link_job(
         job.progress["extraction_reference_count"] = extraction_result.reference_count
         job.progress["extraction_skipped_reason"] = extraction_result.skipped_reason
         job.progress["extraction_error_text"] = extraction_result.error_text
+        job.progress["reextraction_id"] = (
+            str(extraction_result.reextraction_id)
+            if extraction_result.reextraction_id
+            else None
+        )
+        job.progress["reextraction_triggered_by"] = (
+            extraction_result.reextraction_triggered_by
+        )
+        job.progress["reextraction_parse_status"] = (
+            extraction_result.reextraction_parse_status
+        )
+        job.progress["reextraction_reference_count"] = (
+            extraction_result.reextraction_reference_count
+        )
+        job.progress["reextraction_skipped_reason"] = (
+            extraction_result.reextraction_skipped_reason
+        )
+        job.progress["reextraction_error_text"] = extraction_result.reextraction_error_text
     elif ingest_result.fetched:
         if triage_result is None:
             job.progress["triage_status"] = "skipped"

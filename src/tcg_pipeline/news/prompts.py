@@ -114,6 +114,51 @@ def render_triage_prompt(article: NewsArticle) -> RenderedPrompt:
 
 def render_extraction_prompt(session: Session, article: NewsArticle) -> RenderedPrompt:
     template = load_active_prompt("extract")
+    return _render_project_extraction_prompt(session, article, template=template)
+
+
+def render_reextraction_prompt(
+    session: Session,
+    article: NewsArticle,
+    *,
+    prior_extraction: Any,
+    trigger_context: dict[str, Any],
+) -> RenderedPrompt:
+    template = load_active_prompt("reextract")
+    previous_output_json = json.dumps(
+        prior_extraction.output_json,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    )
+    trigger_context_json = json.dumps(
+        trigger_context,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    )
+    previous_parse_status = prior_extraction.parse_status or ""
+    previous_parse_error_text = prior_extraction.parse_error_text or ""
+    return _render_project_extraction_prompt(
+        session,
+        article,
+        template=template,
+        extra_user_values={
+            "previous_output_json": previous_output_json,
+            "previous_parse_status": previous_parse_status,
+            "previous_parse_error_text": previous_parse_error_text,
+            "trigger_context_json": trigger_context_json,
+        },
+    )
+
+
+def _render_project_extraction_prompt(
+    session: Session,
+    article: NewsArticle,
+    *,
+    template: PromptTemplate,
+    extra_user_values: dict[str, Any] | None = None,
+) -> RenderedPrompt:
     system_blocks = (
         template.system_template,
         "Glossary:\n" + render_news_glossary(session, article),
@@ -141,10 +186,15 @@ def render_extraction_prompt(session: Session, article: NewsArticle) -> Rendered
         sort_keys=True,
         indent=2,
     )
+    user_values: dict[str, Any] = {
+        "article_metadata_json": metadata_json,
+        "structural_signals_json": structural_signals_json,
+        "body_text_with_offsets": _body_text_with_offsets(article.body_text or ""),
+    }
+    if extra_user_values:
+        user_values.update(extra_user_values)
     user_text = template.user_template.format(
-        article_metadata_json=metadata_json,
-        structural_signals_json=structural_signals_json,
-        body_text_with_offsets=_body_text_with_offsets(article.body_text or ""),
+        **user_values,
     )
     prompt_hash = hashlib.sha256(
         (

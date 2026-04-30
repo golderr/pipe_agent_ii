@@ -27,6 +27,7 @@ from tcg_pipeline.news.extraction import (
     EXTRACTION_ESTIMATED_COST_USD,
     ExtractionLLMResponse,
     NewsExtractionRunResult,
+    decide_pass3a_reextraction,
     parse_extraction_response,
     persist_extraction_response,
     run_news_extraction_for_article,
@@ -81,6 +82,97 @@ def test_parse_extraction_response_does_not_trust_truncated_or_refused_json() ->
     assert truncated.parse_status == NewsExtractionParseStatus.TRUNCATED.value
     assert refused.payload is None
     assert refused.parse_status == NewsExtractionParseStatus.REFUSED.value
+
+
+def test_decide_pass3a_reextraction_detects_parse_failure_and_low_confidence(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    parse_failure = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=None,
+        parse_status=NewsExtractionParseStatus.SCHEMA_INVALID.value,
+        parse_error_text="missing field",
+    )
+    low_confidence = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(candidate_confidence="low"),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add_all([parse_failure, low_confidence])
+    postgres_session.flush()
+
+    parse_decision = decide_pass3a_reextraction(article, parse_failure)
+    low_confidence_decision = decide_pass3a_reextraction(article, low_confidence)
+
+    assert parse_decision is not None
+    assert parse_decision.triggered_by == "pass2_parse_error"
+    assert parse_decision.context["parse_error_text"] == "missing field"
+    assert low_confidence_decision is not None
+    assert low_confidence_decision.triggered_by == "pass2_low_confidence"
+    assert low_confidence_decision.context["low_confidence"][0]["fields"]
+
+
+def test_decide_pass3a_reextraction_detects_structural_conflict(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "unit_count",
+                "raw_match": "310-unit",
+                "offset_start": 36,
+                "offset_end": 44,
+                "canonical": 310,
+                "confidence": 0.95,
+                "metadata": {"label": "unit"},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(candidate_unit_total=250),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add(extraction)
+    postgres_session.flush()
+
+    decision = decide_pass3a_reextraction(article, extraction)
+
+    assert decision is not None
+    assert decision.triggered_by == "pass1_pass2_conflict"
+    assert decision.context["conflicts"][0]["field"] == "total_units"
+    assert decision.context["conflicts"][0]["structural_value"] == 310
+    assert decision.context["conflicts"][0]["extracted_value"] == 250
 
 
 def test_extraction_reservation_estimate_covers_opus_cache_miss_headroom() -> None:
@@ -262,6 +354,112 @@ def test_run_news_extraction_for_article_reserves_calls_client_and_true_ups(
     assert Decimal(reservation.cost_usd) == Decimal("0.000000")
 
 
+def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "unit_count",
+                "raw_match": "310-unit",
+                "offset_start": 36,
+                "offset_end": 44,
+                "canonical": 310,
+                "confidence": 0.95,
+                "metadata": {"label": "unit"},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                assert prompt.prompt_id == "extract_v1"
+                payload = _payload(candidate_unit_total=250)
+            else:
+                assert prompt.prompt_id == "reextract_v1"
+                assert "Re-extraction trigger context" in prompt.user_text
+                assert "pass1_pass2_conflict" in prompt.user_text
+                payload = _payload(candidate_unit_total=310)
+            return ExtractionLLMResponse(
+                payload=payload,
+                text="{}",
+                model=self.model,
+                usage=LLMUsage(
+                    input_tokens_uncached=100,
+                    input_tokens_cache_creation=0,
+                    input_tokens_cached=10,
+                    output_tokens=20,
+                ),
+                latency_ms=100,
+                stop_reason="tool_use",
+            )
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.calls == 2
+    assert result.extraction_id is not None
+    assert result.reextraction_id is not None
+    assert result.reextraction_triggered_by == "pass1_pass2_conflict"
+    assert result.reextraction_parse_status == NewsExtractionParseStatus.OK.value
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_article is not None
+    assert refreshed_article.current_extraction_id == result.reextraction_id
+    assert refreshed_article.current_extraction_version == 2
+    initial = postgres_session.get(NewsExtraction, result.extraction_id)
+    reextraction = postgres_session.get(NewsExtraction, result.reextraction_id)
+    assert initial is not None
+    assert reextraction is not None
+    assert initial.pass_name == NewsExtractionPass.EXTRACTION.value
+    assert reextraction.pass_name == NewsExtractionPass.REEXTRACTION.value
+    assert reextraction.supersedes_extraction_id == initial.id
+    assert reextraction.triggered_by == "pass1_pass2_conflict"
+    assert reextraction.diagnostic["pass3a_context"]["conflicts"][0]["field"] == (
+        "total_units"
+    )
+    reference = postgres_session.execute(
+        select(NewsProjectReference).where(
+            NewsProjectReference.extraction_id == reextraction.id
+        )
+    ).scalar_one()
+    assert reference.candidate_unit_total == 310
+    reextraction_cost = postgres_session.execute(
+        select(NewsExtractionCost).where(
+            NewsExtractionCost.cost_date == date(2026, 4, 29),
+            NewsExtractionCost.pass_name == NewsExtractionPass.REEXTRACTION.value,
+            NewsExtractionCost.model == "claude-opus-4-7",
+        )
+    ).scalar_one()
+    assert reextraction_cost.call_count == 1
+
+
 def test_run_news_extraction_for_article_skips_and_alerts_without_api_key(
     postgres_session: Session,
 ) -> None:
@@ -298,6 +496,8 @@ def test_run_news_extraction_for_article_skips_and_alerts_without_api_key(
 def _payload(
     *,
     candidate_signal_flags: dict[str, bool] | None = None,
+    candidate_unit_total: int = 140,
+    candidate_confidence: str = "high",
 ) -> dict:
     return {
         "relevance": "confirmed",
@@ -307,7 +507,7 @@ def _payload(
                 "candidate_name": "Helio",
                 "candidate_address": "1234 Sunset Boulevard",
                 "candidate_developer": "Atlas Development",
-                "candidate_unit_total": 140,
+                "candidate_unit_total": candidate_unit_total,
                 "candidate_unit_affordable": 14,
                 "candidate_unit_market_rate": 126,
                 "candidate_product_type": "apartment",
@@ -325,7 +525,7 @@ def _payload(
                 "candidate_neighborhood": "Echo Park",
                 "candidate_lat": None,
                 "candidate_lng": None,
-                "candidate_confidence": "high",
+                "candidate_confidence": candidate_confidence,
                 "passage_excerpts": [
                     {
                         "field": "candidate_unit_total",
