@@ -42,6 +42,7 @@ import {
   newsContextForItem,
   proposedValueForItem,
   sourceTextForItem,
+  structuralDisagreementText,
   supportingEvidenceForItem,
   type NewsContext,
   warningForItem
@@ -935,7 +936,11 @@ function ReviewItemRow({
                 match {Math.round(item.matchConfidence * 100)}%
               </span>
             ) : null}
-            <NewsContextChips context={newsContext} stopPropagation />
+            <NewsContextChips
+              context={newsContext}
+              emittedValue={proposedValueForItem(item)}
+              stopPropagation
+            />
           </div>
 
           {warningText ? (
@@ -1056,14 +1061,17 @@ function ReviewItemRow({
 
 function NewsContextChips({
   context,
+  emittedValue,
   stopPropagation = false
 }: {
   context: NewsContext | null;
+  emittedValue?: unknown;
   stopPropagation?: boolean;
 }) {
   if (!context) {
     return null;
   }
+  const disagreementText = structuralDisagreementText(context, emittedValue);
   const onClick = stopPropagation
     ? (event: MouseEvent) => event.stopPropagation()
     : undefined;
@@ -1072,7 +1080,7 @@ function NewsContextChips({
       {context.extractionConfidence ? (
         <span className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-1 text-xs text-sky-800">
           <Newspaper className="size-3.5" aria-hidden="true" />
-          {humanize(context.extractionConfidence)} confidence
+          extraction: {humanize(context.extractionConfidence)}
         </span>
       ) : null}
       {context.referenceIndex !== null ? (
@@ -1081,7 +1089,10 @@ function NewsContextChips({
         </span>
       ) : null}
       {context.structuralDisagreement ? (
-        <span className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+        <span
+          className="inline-flex items-center gap-1 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-800"
+          title={disagreementText ?? undefined}
+        >
           <AlertTriangle className="size-3.5" aria-hidden="true" />
           Structural disagreement
         </span>
@@ -1091,7 +1102,7 @@ function NewsContextChips({
           className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:border-teal-300 hover:text-teal-800"
           href={context.url}
           target="_blank"
-          rel="noreferrer"
+          rel="noopener noreferrer"
           onClick={onClick}
         >
           <ExternalLink className="size-3.5" aria-hidden="true" />
@@ -1161,6 +1172,11 @@ function EvidenceSummaryRow({ row }: { row: ReviewEvidenceSummary }) {
         )}
         <div className="min-w-0">
           <p className="break-words font-medium text-slate-800">{row.summary}</p>
+          {row.highlights[0]?.passage ? (
+            <p className="mt-1 break-words text-slate-600">
+              {formatValue(row.highlights[0].passage)}
+            </p>
+          ) : null}
           <p className="mt-0.5 text-slate-500">
             {humanize(row.sourceType)}
             {row.evidenceDate ? ` - ${formatDate(row.evidenceDate)}` : ""}

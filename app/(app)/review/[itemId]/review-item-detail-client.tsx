@@ -42,6 +42,7 @@ import {
   newsContextForItem,
   proposedValueForItem,
   sourceTextForItem,
+  structuralDisagreementText,
   supportingEvidenceForItem,
   type NewsContext,
   warningForItem
@@ -381,7 +382,7 @@ export function ReviewItemDetailClient({
                 <p>Record {asString(item.payload?.source_record_id)}</p>
               ) : null}
             </div>
-            <NewsContextPanel context={newsContext} />
+            <NewsContextPanel context={newsContext} emittedValue={proposedValueForItem(item)} />
           </section>
         </aside>
       </div>
@@ -389,10 +390,17 @@ export function ReviewItemDetailClient({
   );
 }
 
-function NewsContextPanel({ context }: { context: NewsContext | null }) {
+function NewsContextPanel({
+  context,
+  emittedValue
+}: {
+  context: NewsContext | null;
+  emittedValue?: unknown;
+}) {
   if (!context) {
     return null;
   }
+  const disagreementText = structuralDisagreementText(context, emittedValue);
   return (
     <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
       <div className="flex items-start gap-2">
@@ -410,11 +418,11 @@ function NewsContextPanel({ context }: { context: NewsContext | null }) {
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         {context.extractionConfidence ? (
           <span className="rounded border border-sky-200 bg-sky-50 px-2 py-1 text-sky-800">
-            {humanize(context.extractionConfidence)} confidence
+            extraction: {humanize(context.extractionConfidence)}
           </span>
         ) : null}
         {context.structuralDisagreement ? (
-          <span className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+          <span className="inline-flex items-center gap-1 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-rose-800">
             <AlertTriangle className="size-3.5" aria-hidden="true" />
             Structural disagreement
           </span>
@@ -428,7 +436,7 @@ function NewsContextPanel({ context }: { context: NewsContext | null }) {
       </div>
       {context.structuralDisagreement ? (
         <p className="mt-2 break-words text-xs text-slate-600">
-          {formatValue(context.structuralDisagreement)}
+          {disagreementText ?? formatValue(context.structuralDisagreement)}
         </p>
       ) : null}
       {context.url ? (
@@ -436,7 +444,7 @@ function NewsContextPanel({ context }: { context: NewsContext | null }) {
           className="mt-3 inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
           href={context.url}
           target="_blank"
-          rel="noreferrer"
+          rel="noopener noreferrer"
         >
           <ExternalLink className="size-3.5" aria-hidden="true" />
           Article
@@ -495,6 +503,19 @@ function EvidenceDetailRow({ row }: { row: ReviewEvidenceSummary }) {
         )}
         <div className="min-w-0">
           <p className="break-words font-medium text-slate-950">{row.summary}</p>
+          {row.detail ? <p className="mt-1 break-words text-xs text-slate-500">{row.detail}</p> : null}
+          {row.highlights.length ? (
+            <div className="mt-2 space-y-1">
+              {row.highlights.slice(0, 2).map((highlight, index) => (
+                <p
+                  key={`${row.evidenceId}-highlight-${index}`}
+                  className="break-words rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
+                >
+                  {formatValue(highlight.passage)}
+                </p>
+              ))}
+            </div>
+          ) : null}
           <p className="mt-1 text-xs text-slate-500">
             {humanize(row.sourceType)}
             {row.evidenceDate ? ` - ${formatDate(row.evidenceDate)}` : ""}
@@ -505,6 +526,17 @@ function EvidenceDetailRow({ row }: { row: ReviewEvidenceSummary }) {
             <p className="mt-2 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
               {formatValue(row.extractedValue)}
             </p>
+          ) : null}
+          {row.externalLink ? (
+            <a
+              className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-teal-700 hover:text-teal-900"
+              href={row.externalLink}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <ExternalLink className="size-3.5" aria-hidden="true" />
+              Source
+            </a>
           ) : null}
         </div>
       </div>

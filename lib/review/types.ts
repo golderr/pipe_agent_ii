@@ -43,6 +43,9 @@ export type ReviewEvidenceSummary = {
   evidenceDate: string | null;
   collectedAt: string;
   summary: string;
+  detail: string;
+  externalLink: string | null;
+  highlights: Array<Record<string, unknown>>;
   extractedValue: unknown;
 };
 

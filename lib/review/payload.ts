@@ -179,6 +179,29 @@ export function newsContextForItem(item: ReviewQueueItem): NewsContext | null {
   };
 }
 
+export function structuralDisagreementText(
+  context: NewsContext | null,
+  emittedValue?: unknown
+) {
+  const disagreement = context?.structuralDisagreement;
+  if (!disagreement) {
+    return null;
+  }
+  const extractor = asString(disagreement.extractor) ?? "extractor";
+  const rawMatch = asString(disagreement.raw_match);
+  const hasCanonical = Object.prototype.hasOwnProperty.call(disagreement, "canonical");
+  const canonical = hasCanonical ? disagreement.canonical : null;
+  let text = `Pass 1 ${extractor}`;
+  text += rawMatch ? ` matched "${rawMatch}"` : " flagged a structural signal";
+  if (canonical !== null && canonical !== undefined && canonical !== "") {
+    text += ` (canonical: ${formatValue(canonical)})`;
+  }
+  if (emittedValue !== null && emittedValue !== undefined && emittedValue !== "") {
+    text += ` - Pass 2 emitted ${formatValue(emittedValue)}`;
+  }
+  return text;
+}
+
 export function supportingEvidenceForItem(item: ReviewQueueItem) {
   return item.evidenceSummaries.filter((evidence) => evidence.stance === "supporting");
 }

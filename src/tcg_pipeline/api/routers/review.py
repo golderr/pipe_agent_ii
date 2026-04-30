@@ -332,6 +332,9 @@ def _serialize_evidence_summaries(
                 ),
                 collected_at=evidence.collected_at.isoformat(),
                 summary=snippet.summary,
+                detail=snippet.detail,
+                external_link=snippet.external_link,
+                highlights=snippet.highlights,
                 extracted_value=snippet.fields.extracted_value,
             )
         )

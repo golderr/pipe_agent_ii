@@ -182,6 +182,9 @@ class ReviewEvidenceSummary(BaseModel):
     evidence_date: str | None
     collected_at: str
     summary: str
+    detail: str
+    external_link: str | None
+    highlights: list[dict[str, Any]]
     extracted_value: Any | None
 
 

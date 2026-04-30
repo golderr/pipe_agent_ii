@@ -14,6 +14,7 @@ import {
   newsContextForItem,
   proposedValueForItem,
   sourceTextForItem,
+  structuralDisagreementText,
   supportingEvidenceForItem,
   warningForItem,
   winningEvidenceForItem
@@ -207,6 +208,9 @@ describe("review payload helpers", () => {
       url: "https://example.com/news"
     });
     expect(sourceTextForItem(item)).toBe("Urbanize reports new tower - Apr 29, 2026");
+    expect(structuralDisagreementText(newsContextForItem(item), 140)).toBe(
+      'Pass 1 unit_count matched "120 units" (canonical: 120) - Pass 2 emitted 140'
+    );
   });
 
   it("flattens top-level and one-level nested payload fields without truncation", () => {
@@ -266,6 +270,9 @@ describe("review payload helpers", () => {
           evidenceDate: "2026-04-01",
           collectedAt: "2026-04-02T00:00:00Z",
           summary: "Permit evidence",
+          detail: "Permit detail",
+          externalLink: null,
+          highlights: [],
           extractedValue: "Approved"
         },
         {
@@ -278,6 +285,9 @@ describe("review payload helpers", () => {
           evidenceDate: "2026-03-01",
           collectedAt: "2026-03-02T00:00:00Z",
           summary: "CoStar evidence",
+          detail: "CoStar detail",
+          externalLink: null,
+          highlights: [],
           extractedValue: "Pending"
         }
       ]

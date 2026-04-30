@@ -550,6 +550,7 @@ def test_review_queue_serializes_news_context_and_news_evidence_summary() -> Non
     assert summary.is_winning is True
     assert summary.source_type == "news_article"
     assert summary.summary == "total_units: 140"
+    assert summary.highlights[0]["passage"] == "The project includes 140 apartments."
     assert summary.extracted_value == 140
 
 

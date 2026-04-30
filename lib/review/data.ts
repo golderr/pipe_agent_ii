@@ -69,6 +69,9 @@ type ReviewEvidenceSummaryApi = {
   evidence_date: string | null;
   collected_at: string;
   summary: string;
+  detail: string;
+  external_link: string | null;
+  highlights: Array<Record<string, unknown>>;
   extracted_value: unknown;
 };
 
@@ -424,6 +427,9 @@ function mapReviewItem(item: ReviewQueueItemApi): ReviewQueueItem {
       evidenceDate: evidence.evidence_date,
       collectedAt: evidence.collected_at,
       summary: evidence.summary,
+      detail: evidence.detail,
+      externalLink: evidence.external_link,
+      highlights: evidence.highlights ?? [],
       extractedValue: evidence.extracted_value
     }))
   };
