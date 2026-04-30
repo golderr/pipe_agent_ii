@@ -3,7 +3,7 @@
 > **This is the active build plan.** It supersedes the build plan (Section 7) in `ARCHITECTURE.md`.
 > For detailed source specifications, field inventories, matching strategy, and data model definitions, refer to `ARCHITECTURE.md`. That file remains the reference for *what the system is*; this file is the reference for *what to build next and what has been built*.
 
-**Last updated:** 2026-04-28
+**Last updated:** 2026-04-29
 **Maintained by:** Nate Goldstein + Claude Code / Codex agents
 
 ---
@@ -45,14 +45,14 @@ The system uses an **append-only evidence store** where all incoming data is cap
 
 ## 2. Current System State
 
-**As of 2026-04-22.** Update this section when major milestones are reached.
+**As of 2026-04-29.** Update this section when major milestones are reached. Phase tables below are authoritative for detailed status.
 
 ### What's Built and Working
 
 | Component | Status | Key Code |
 |-----------|--------|----------|
-| **Database schema** | Complete (16 tables) | `db/models.py` — Project, Evidence, StatusHistory, ProjectIdentifier, ProjectRelationship, ProjectSourceRecord, SourceRun, ReviewItem, ReviewDecision, ChangeLog, DismissedRecord, DeveloperRegistry, DeveloperAlias, ResolutionLog + enums |
-| **Alembic migrations** | 4 migrations applied | `alembic/versions/` — initial schema, seed fixes, LADBS rewire, evidence layer Phase 1 |
+| **Database schema** | Complete + active Phase D extensions | `db/models.py` - core project/evidence/review schema plus markets/jurisdictions, source registrations, review staging/decision cards, worker jobs/heartbeats, and news research tables |
+| **Alembic migrations** | Current through `202604290022` | `alembic/versions/` - core schema, evidence layer, RLS/read views, review workflow, worker jobs, Phase D news schema, and cache-creation token accounting |
 | **Pipedream ingester** | Complete | `ingesters/pipedream.py` — parses .xlsm DataStorage tab, 81 fields |
 | **CoStar ingester** | Complete | `ingesters/costar.py` — parses .xlsx exports, header-based mapping |
 | **Seed persistence** | Complete | `db/seed.py` — Pipedream + CoStar merge with dedup, relationship resolution |
@@ -71,16 +71,18 @@ The system uses an **append-only evidence store** where all incoming data is cap
 | **Source tier config** | Complete | `source_tiers.py` + `config/source_tiers.yaml` — logical source types, 4-tier hierarchy |
 | **Developer canonicalization** | Complete | `developer/registry.py` — rapidfuzz matching, alias management, registry merging |
 | **Review workflow** | Complete | `db/review_workflow.py` — accept/reject/defer with evidence relinking, resolution re-run |
+| **Frontend app** | Complete for Phase B/C workflows | `app/`, `components/`, `lib/` - project list/detail, map, Coverage, Review Queue, project create/edit/relation workflows |
+| **FastAPI write boundary** | Complete for Phase C writes | `src/tcg_pipeline/api/` - JWT/allowlist guarded writes for review decisions, project edits, notes, relationships, manual create, and Phase D paste-a-link/admin reads |
+| **Worker runway** | Complete for Phase D queueing | `src/tcg_pipeline/workers/` - Redis/RQ scrape worker, worker heartbeat, scheduler leader loop, health endpoints, and registered news job kinds |
+| **News research runway** | Partial (D.1-D.3c done) | `src/tcg_pipeline/news/` - paste-a-link Pass 0, structural extraction, Haiku triage, Opus extraction, cost tracking, prompts, and summary-view RLS posture. Scheduled collection/matching/integration still pending. |
 | **Backfill scripts** | Complete (not yet run on prod) | `scripts/backfill_evidence.py`, `scripts/backfill_developers.py` |
 | **CLI** | Complete | `cli.py` — doctor, preview/seed pipedream/costar, preview/collect source, resolve-all, canonicalize-developers |
 | **Market config** | Complete (LA + SM stub) | `config/markets/los_angeles.yaml`, `config/markets/santa_monica.yaml` |
-| **Tests** | Solid | 21 test files covering all major components |
+| **Tests** | Solid | Broad pytest coverage across collectors, evidence/resolution, review workflow, API, workers, and Phase D news modules |
 
 ### What's NOT Built
 
-- No frontend / UI of any kind
-- No API layer (no REST endpoints, no Supabase Edge Functions)
-- No news article scraping or deep research integration (design committed in `docs/specs/news_research_design.md` 2026-04-28; implementation Phase D)
+- No scheduled news collection, source backfill, news matcher/integrator, or review-queue news context yet. Paste-a-link, Pass 0 fetch, Pass 1 structural extraction, Pass 2a triage, and Pass 2b extraction runway exist in Phase D.
 - No LAHD affordable housing collector (defined in config, no code)
 - No PDF parser collector (la_case_reports — defined in config, no code)
 - No ZIMAS/PDIS scraper (defined in config, no code)
@@ -109,7 +111,7 @@ All incoming data — from collectors, seed imports, news articles, researcher i
 |------|---------|------|
 | **Tier 0** | Researcher overrides | Highest authority, but review-protected rather than permanently sticky. New contradicting evidence creates a review item; it never silently replaces or silently yields to the override. See EVIDENCE_LAYER_DECISIONS.md §22. |
 | **Tier 1** | Government sources (LADBS, LAHD, ZIMAS, SM permits) + Pipedream | Authoritative public record + human-verified TCG research |
-| **Tier 2** | News articles (BizJournals, etc.) | Timely intelligence, moderate confidence |
+| **Tier 2** | News articles (Urbanize LA pilot; LA YIMBY, The Real Deal LA, and BizJournals LA deferred) | Timely intelligence, moderate confidence |
 | **Tier 3** | CoStar, developer websites | Broad coverage, sometimes stale or inaccurate |
 | **Tier 4** | Social media, forums | Weak signal, requires corroboration |
 
@@ -260,11 +262,11 @@ Source → Collector → RawRecord → match_raw_record()
 | C.tail.10 | Repository line-ending policy | `not_started` | Lowest priority repository hygiene. Add `.gitattributes` line-ending rules to remove recurring CRLF warning noise from future diffs. |
 
 ### Phase D: News Scraping & Deep Research
-> **Goal:** Automated collection of news articles about development projects. First source: BizJournals LA. Enriches the evidence layer with Tier 2 signals.
+> **Goal:** Automated collection of news articles about development projects. First scheduled pilot source: Urbanize LA. Enriches the evidence layer with Tier 2 signals.
 > **Priority:** High — fills critical intelligence gaps that government sources and CoStar miss (developer announcements, project milestones, community opposition, timeline updates).
 > **Depends on:** Phase A (evidence layer must be validated), C.tail.1 (RQ/Redis worker), C.tail.11/12 (decision-card consolidation — Phase D runway).
 > **Required reading:** `docs/specs/news_research_design.md` is the implementation contract for this phase. Also: `config/source_tiers.yaml` (Tier 2 = news_article), `ARCHITECTURE.md` Section 5 (collection workflow), Section 6 (matching strategy).
-> **Sequencing:** Reordered from the original D.1→D.8 sequence to ship paste-a-link first as a vertical-slice and to put BizJournals (the riskiest single component) deliberately late. Rationale: `docs/specs/news_research_design.md` §23.
+> **Sequencing:** Paste-a-link and extraction runway shipped first. The scheduled-source path now pilots on Urbanize LA through a generic polite collector. LA YIMBY, The Real Deal LA, BizJournals LA, and full advanced fetch implementation are explicit Phase D-late items after the Urbanize end-to-end path is proven.
 
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
@@ -279,14 +281,22 @@ Source → Collector → RawRecord → match_raw_record()
 | D.4-resolver | §21f recent-article delivery-date priority + supersession filter | `not_started` | Implement `EVIDENCE_LAYER_DECISIONS.md` §21f in `delivery_year.py` `_select_explicit_delivery_observation`: prefer `news_article` evidence within 180 days over CoStar regardless of raw recency. Add `WHERE evidence.superseded_at IS NULL` to all resolver evidence-loading queries so re-extraction supersession works. Depends on D.4. |
 | D.5 | Review-queue news context rendering | `not_started` | `news_context` payload extension (article_id, extraction_id, reference_id, extraction_confidence, structural_disagreement, prompt_id) per §11.2. Confidence chip on rows. Structural-disagreement chip. Verify `render_news_article_snippet` works against the data Phase D writes. **Blocked on C.tail.11/12** — articles fold into existing decision cards as supporting or against evidence under the consolidated card shape. Depends on D.4. |
 | D.7b | Paste-a-link UI + article admin view | `not_started` | Next.js paste-a-link form. Article admin view (admin-only via `/research/articles/{id}`). Add retry/refetch UX for D.7a terminal fetch failures so users can recover from transient 429/5xx/paywall states without DB intervention. Depends on D.5. |
-| D.2 | BizJournals fetcher + cookie-injection auth | `not_started` | `BizJournalsCollector.discover_urls` + `fetch_article` per §6.1. CLI `tcg-pipeline news auth-bizjournals` per §16.1 — opens visible Chromium for manual login, dumps storageState to encrypted `service_credentials` row. Session-validity detection during fetch (GET-based per §16.2) must use source-specific login/paywall markers from `news_sources.config`; the D.7a regex is only a generic fallback. Depends on D.7b — BizJournals comes after the rest of the pipeline is trusted. |
-| D.6 | Scheduled scrapes via in-process scheduler | `not_started` | `news_sources.schedule_cron` evaluated by the scheduler tick (one worker instance flagged `NEWS_SCHEDULER_LEADER=true`). Before enabling the scheduler, reconcile the BizJournals seed with the 06:00 PT cadence now that cron is evaluated in `America/Los_Angeles`. `last_scrape_started_at` derived from `source_runs` per §12.5 — no schema column. Depends on D.2. |
-| D.M | Monitoring, alerting, cost-cap admin UI | `not_started` | SMTP email dispatcher to `ng@theconcordgroup.com`. `system_alerts` reader for the Coverage banner. News ops admin tile in Coverage. Cost-cap warn ($25) + hard ($35) + manual bump UI per §13.3. Worker monitoring should document stable production `WORKER_NAME` values, clean up stale heartbeat rows, fail stale RUNNING jobs whose worker heartbeat has expired, sweep stale `_reservation_` cost rows left by worker crashes, measure extraction body-length/offset accuracy before any truncation policy, and add graceful shutdown signaling if long-lived scheduler/heartbeat threads need draining. Depends on D.6. |
+| D.2v | Urbanize/source validation pass | `not_started` | Before collector work, validate `urbanize.la/robots.txt`, RSS feed, sitemap/archive/backfill path, and 5 representative Urbanize article URLs through existing `POST /research/articles`; inspect `body_text` and `structural_signals` in DB. Also do light reconnaissance of LA YIMBY and The Real Deal LA robots/feed behavior to shape D.late.E1/E2. Record findings in `docs/sources/news/urbanize_la.md` and the design doc. |
+| D.2a | Generic polite NewsCollector + Urbanize LA pilot | `not_started` | Replace the BizJournals-first collector plan with a config-driven polite collector used by Urbanize LA in Phase D. Add a migration to disable/unschedule `bizjournals_la`, seed `urbanize_la`, map `urbanize_la -> news_article`, and store URL host/source routing config. Collector contract: RSS incremental discovery, sitemap/archive backfill discovery, robots.txt compliance with 24h host cache, crawl-delay, per-host rate limit, `Retry-After`, conditional GET, identifying User-Agent, block-like failure tracking, source strategy doc, and no source pause on ordinary 404s. Pause only on repeated block-like `401/403/429/503` signals plus system alert. URL-to-source mapping should come from `news_sources.config`/source YAML with an in-process API cache. Start with an in-process per-host limiter; move it to Redis before enabling multiple concurrent news workers against the same host. Include a fixture-backed second WordPress-like source using LA YIMBY sample HTML/feed fixtures to keep the abstraction honest without enabling LA YIMBY as a live Phase D source. Depends on D.2v. |
+| D.2b | Advanced fetch routing interface, implementation deferred | `not_started` | Add the interface now, not the full stack: `fetch_path = polite | advanced`, selected fetch path recorded on scrape/job diagnostics, source-doc justification required, and a hard failure/system alert if a source opts into `advanced` before D.late.ADV implements it. No cloudscraper/FlareSolverr/TLS impersonation/browser automation/residential proxy in D.2a. Human approval is required before changing a source from polite to advanced. Depends on D.2a. |
+| D.2 | (Superseded) BizJournals-first fetcher + cookie-injection auth | `superseded` | Replaced by D.2a Urbanize-first generic polite collector and D.late.C paid-source capability. Keep `bizjournals_la` mapped to `news_article`, but make it inactive and unscheduled until D.late.C. |
+| D.6 | Scheduled Urbanize scrapes + minimal source health | `not_started` | `news_sources.schedule_cron` evaluated by the scheduler tick (one worker instance flagged `NEWS_SCHEDULER_LEADER=true`). Phase D enables only active Urbanize LA. Add minimal source health at this step: source active/paused state, configured fetch path, last run, discovered count, fetched count, failure count, and last alert. `last_scrape_started_at` derived from `source_runs` per §12.5 - no schema column. Depends on D.2a/D.2b and D.7b. |
+| D.M | Monitoring, alerting, cost-cap admin UI | `not_started` | SMTP email dispatcher to `ng@theconcordgroup.com`. `system_alerts` reader for the Coverage banner. Rich news ops dashboard in Coverage: discovery/fetch/extraction health, fetch-path distribution, robots status, articles per dollar, review acceptance by source, recent runs timeline, last alert, manual cost-cap bump UI, and human-approved "request/switch to advanced fetch" action. Worker monitoring should document stable production `WORKER_NAME` values, clean up stale heartbeat rows, fail stale RUNNING jobs whose worker heartbeat has expired, sweep stale `_reservation_` cost rows left by worker crashes, measure extraction body-length/offset accuracy before any truncation policy, and add graceful shutdown signaling if long-lived scheduler/heartbeat threads need draining. Depends on D.6. |
 | D.sec | Phase D summary-view ownership audit | `deferred` | Audit `news_*_summary` owner/grant behavior in environments where the Alembic role can alter view ownership. Current migrations use `security_invoker=false` and authenticated grants, but owner normalization to `news_summary_reader` needs a dedicated privilege-aware migration/test rather than a one-off downgrade patch. |
 | D.G | Discarded-articles graveyard | `not_started` | `/research/graveyard` browseable list per §14. Manual relink endpoint `POST /research/articles/{id}/references/{ref}/relink` writes evidence + audit (`news_admin_actions`). Depends on D.5. |
-| D.B | 8-week BizJournals backfill | `not_started` | `tcg-pipeline news backfill --source bizjournals_la --since <8wk>`. Observable via Coverage queue depth. Benchmark Pass 1 dictionary scans during backfill and decide whether to cache Aho-Corasick automatons per worker/batch. Re-estimate Opus cost with cache-hit behavior and decide whether to replace the full market glossary with Pass 1 entity-linked candidate glossary slices. Depends on D.6, D.M. |
+| D.B | 12-month Urbanize LA backfill | `not_started` | `tcg-pipeline news backfill --source urbanize_la --since <12mo>` using the D.2a sitemap/archive discovery path. Run a dry-run first that reports URL count, estimated relevant article count, projected LLM cost, cache-hit assumptions, and runtime; expand cost cap or spread across days if needed. Respect robots.txt, crawl-delay, per-host rate limits, `Retry-After`, and source pause state. Observable via Coverage queue depth/minimal source health. Benchmark Pass 1 dictionary scans during backfill and decide whether to cache Aho-Corasick automatons per worker/batch. Re-estimate Opus cost after Urbanize validation and decide whether to replace the full market glossary with Pass 1 entity-linked candidate glossary slices. Cross-source article dedup is deferred until D.late.E1 introduces LA YIMBY. Depends on D.6, D.M. |
 | D.7 | (Renumbered) Paste-a-link covered by D.7a + D.7b above | `superseded` | The original D.7 paste-a-link is split across D.7a (worker-side vertical slice) and D.7b (Next.js UI). Marker preserved here so cross-references in the Decision Log resolve. |
-| D.8 | Additional news sources | `deferred` | The Architect, Urbanize LA, Curbed LA, LA Times real estate section. Add after BizJournals pipeline is proven. Adding a publisher = one row in `news_sources` + one entry in `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME` + a `BaseCollector` subclass. |
+| D.8 | (Superseded) Additional news sources | `superseded` | Replaced by explicit D.late.E1/D.late.E2/D.late.C source-expansion rows. Adding a publisher now requires a `news_sources` row/config, `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME` entry, source strategy doc, migration, and validation notes. |
+| D.late.E1 | LA YIMBY expansion | `deferred` | First real second-source pressure test for the polite collector after Urbanize. Expected to be config-only if D.2a holds; reserve 0.5-1 day for abstraction adjustment. Add source row/config/doc/migration, host mapping, source-tier mapping, feed/archive validation, fixture tests, and cost/quality notes. |
+| D.late.E2 | The Real Deal LA expansion | `deferred` | Likely first advanced-path candidate and section-filtering pressure test because of commercial leasing/noise. Validate robots/feed/Cloudflare behavior and complete a source strategy doc before enabling. Any advanced fetch use requires human approval and a compliance/TOS review. |
+| D.late.C | Paid-source capability + BizJournals LA | `deferred` | Cookie/session auth for authorized paid-source access. Prefer Playwright/browser-session storage state for BizJournals; integrate with `service_credentials`, add manual relogin CLI, source-specific login/paywall markers, and paid-source runbook. First concrete consumer: `bizjournals_la`, currently mapped but inactive/unscheduled. |
+| D.late.ADV | Advanced fetch implementation | `deferred` | Implement only when a real approved source needs it or polite access is disrupted and human review approves escalation. Candidate tools: Playwright/browser-session first for authorized paid-source access; FlareSolverr kept as a roadmap option but deprioritized and requires explicit approval. Residential proxy support is not a config flip and requires separate compliance/operational approval. |
+| D.late.S | Self-healing source diagnostics | `deferred` | Narrow scope only: auto-diagnose alerts into the alert record, auto-pause unhealthy sources on block-like signals, and later auto-PR for narrow config fixes (RSS URL drift, tracking-param additions, paywall-marker updates). No auto-merge. No automatic polite-to-advanced escalation; the health UI may expose a simple human-approved switch/request action. |
 | D.late.A | Auto-apply for high-confidence article matches | `deferred` | Per `news_research_design.md` §25.1. Activates after Phase D shows ≥80% reviewer acceptance over 3 months. `confirmed` matches with `candidate_confidence='high'` and clean Pass 1/2 agreement skip the Review Queue; daily auto-apply summary email to the researcher. |
 | D.late.B | Eval set bootstrap from real reviewer decisions | `deferred` | Per §21.2. After 4 weeks live, run `tcg-pipeline news bootstrap-eval --since <date> --limit 50` to produce draft labels from accepted/rejected items; researcher confirms in a 1-2hr pass. Then prompt-version bumps gated on `--eval-pass-rate >= 0.90`. |
 
@@ -405,7 +415,7 @@ This was a major architectural addition not in the original build plan. Document
 `fastapi`, `uvicorn`, `python-jose` (or `pyjwt`) for Supabase JWT verification. Thin HTTP layer over `src/tcg_pipeline/db/review_workflow.py`; deploys as an additional Render service. Frontend reads remain direct via Supabase PostgREST with RLS; only writes route through this API. See Phase C.a and the 2026-04-23 Decision Log entry.
 
 ### News / Research Dependencies (Phase D)
-`playwright` or `httpx` + `beautifulsoup4` (for BizJournals scraping), `anthropic` (Claude API for article extraction)
+`httpx` + `trafilatura` for polite news fetch/extraction, `anthropic` for triage/extraction, `croniter` for schedules, and `dateparser`/`pyahocorasick` for structural extraction. Browser/advanced-fetch dependencies are deferred to D.late.ADV / D.late.C.
 
 See ARCHITECTURE.md Section 10 for the full stack listing.
 
@@ -419,6 +429,8 @@ See ARCHITECTURE.md Section 10 for the full stack listing.
 | Evidence Layer Integration Guide | `docs/specs/EVIDENCE_LAYER_INTEGRATION_GUIDE.md` | Comprehensive guide to the evidence layer: schema, resolution rules, integration points. Written for Claude Code / Codex agents. |
 | Evidence Layer Decisions | `docs/specs/EVIDENCE_LAYER_DECISIONS.md` | Implementation decisions answering developer questions about edge cases, thresholds, and design tradeoffs. Includes review-protected override semantics (§22), superseded conditional override semantics (§21), STATUS_CHANGE rejection (§21a), observation ordering (§21b), and delivery-date override provenance (§21c). This is a living document — check for recent additions. |
 | Evidence Layer Retrofit Plan | `docs/specs/evidence_layer_retrofit_plan.md` | Initial retrofit assessment: repo audit, schema changes, migration strategy, effort estimates. |
+| News Research Design | `docs/specs/news_research_design.md` | Phase D implementation contract. Needs a D.2a revision for the Urbanize-first polite collector, deferred advanced fetch, 12-month Urbanize backfill, and source-doc discipline. |
+| News Source Strategy Docs | `docs/sources/news/<slug>.md`, `docs/sources/README.md` | Required runbook/context docs for every `news_sources` row: status, access, discovery, fetch path, robots/rate limits, quality observations, operational history, open issues, and code references. |
 | LADBS Source Audits | `docs/audits/` | Recall audits, coverage analysis, source rewire verification for LADBS Socrata datasets. |
 | Market Config (LA) | `config/markets/los_angeles.yaml` | Source definitions for the Los Angeles market. |
 | Source Tier Config | `config/source_tiers.yaml` | Source type → tier mapping for the evidence layer. |
@@ -510,6 +522,11 @@ See ARCHITECTURE.md Section 10 for the full stack listing.
 | 2026-04-28 | BizJournals authenticated subscription scraping is acceptable for this use case | The user confirmed paid-subscription credentials are owned and authorized for use in this internal tool. Articles are never redistributed or shared outside the tool. No TOS gating remains for Phase D. |
 | 2026-04-28 | LLM-assisted extraction is the chosen approach (Claude API direct, not via AI Gateway) | Cost is not the primary constraint per the user; quality is. Pass 2a triage uses Haiku 4.5 (broad-net, "always err toward inclusion"); Pass 2b extraction uses Opus 4.7. Direct `anthropic` SDK chosen over Vercel AI Gateway for prompt-cache control, transparent per-token cost tracking, and simpler cap enforcement. Re-evaluate if multi-provider A/B becomes a need. |
 | 2026-04-28 | News scrape cadence: daily at 06:00 PT for BizJournals, monitor and adjust | Articles are not 1-hour-grained time-critical. Daily covers expected publication cadence with headroom. Backfill uses an 8-week horizon at launch; subsequent runs are incremental. |
+| 2026-04-29 | Phase D scheduled-source pilot pivots from BizJournals LA to Urbanize LA | Researcher citation patterns favor Urbanize/LA YIMBY/The Real Deal over BizJournals, and Urbanize is the lowest-friction free source for an end-to-end demo. BizJournals stays mapped as `news_article` but becomes inactive/unscheduled until paid-source capability ships in D.late.C. |
+| 2026-04-29 | Phase D collector work builds a generic polite collector, not an Urbanize-only scraper | D.2a implements a config-driven polite NewsCollector with robots compliance, rate limits, feed/archive discovery, source routing, source docs, and Urbanize as the only live Phase D consumer. LA YIMBY fixtures keep the abstraction honest, while real LA YIMBY activation waits for D.late.E1. |
+| 2026-04-29 | Advanced fetch implementation deferred; routing interface retained | D.2b adds `fetch_path = polite | advanced`, audit fields, source-doc justification, and hard failure if `advanced` is selected before implementation. cloudscraper/FlareSolverr/TLS impersonation/browser automation/residential proxy work waits for a real approved source need in D.late.ADV/D.late.C. No automatic polite-to-advanced escalation without human approval. |
+| 2026-04-29 | Urbanize backfill horizon set to 12 months | D.B becomes a 12-month Urbanize LA backfill instead of an 8-week BizJournals backfill. It must dry-run URL count, estimated relevance, projected LLM cost, and runtime before enqueueing work, then respect robots/rate-limit/source-pause constraints. |
+| 2026-04-29 | Source strategy docs are mandatory for news source onboarding | Every `news_sources` row requires `docs/sources/news/<slug>.md` plus an index entry in `docs/sources/README.md`. PRs that add or change source behavior must update the strategy doc with access, discovery, fetch path, quality, operational history, open issues, and code references. |
 | 2026-04-16 | LADBS permit issuance = Approved evidence, not UC proof | TCG status definitions put first permit issuance inside Approved; UC requires visible vertical construction. Resolution engine flags permit-alone as requires_review. |
 | 2026-04-16 | Only final CofO with real `cofo_issue_date` emits Complete evidence | Corrected/reactivated/superseded CofO rows remain source detail until explicitly modeled. |
 | 2026-04-16 | Only recent, substantive inspections on active permits emit UC evidence | Adapter persists all inspection context but only emits `building_inspection_recorded` when recent + substantively positive + permit in active status. |
@@ -533,7 +550,11 @@ See ARCHITECTURE.md Section 10 for the full stack listing.
 - [ ] **Pipedream ongoing sync:** After initial seed, will researchers continue to update Pipedream files? If so, need a recurring import/sync process. Or does this system replace Pipedream entirely?
 - [ ] **Non-MF project handling:** CoStar provides 231 non-MF projects (offices, hotels, retail). How should they appear in the review interface? Separate section? Same queue with a property type filter?
 - [ ] **Unit count threshold for new project candidates:** Minimum unit count for the system to flag a new LADBS project? Pipedream's smallest are ~10-20 units. Phase D matcher uses ≥10 units for news-derived `new_candidate` per `docs/specs/news_research_design.md` §9.4; LADBS path may want to align.
-- [x] ~~**Update frequency** (news)~~ Resolved 2026-04-28 — daily at 06:00 PT for BizJournals; monitor volume and adjust. LADBS / Socrata cadences remain weekly per existing collectors.
+- [x] ~~**Update frequency** (news)~~ Superseded 2026-04-29 - BizJournals cadence deferred with D.late.C; Urbanize cadence is a D.2v/D.6 validation output. LADBS / Socrata cadences remain weekly per existing collectors.
+- [ ] **Urbanize scrape cadence:** Decide daily cron after validating Urbanize feed/archive publishing cadence and source-doc findings.
+- [ ] **Urbanize 12-month backfill cost:** Dry-run URL count, estimated relevant article count, projected LLM cost, cache-hit assumptions, and runtime before enqueueing D.B.
+- [ ] **Advanced fetch approval criteria:** Define the human approval bar for moving a source from polite to advanced, including compliance/TOS notes and source-health evidence.
+- [ ] **Next source after Urbanize:** Confirm whether LA YIMBY remains the D.late.E1 second-source pressure test after Urbanize validation, or whether researcher priorities change the ordering.
 - [ ] **Source disappearance policy:** When a Socrata row vanishes, how many absent reconciliations before changing project state?
 - [ ] **Stalled/inactive evaluator timing:** 12 months is the current spec. Is that the right threshold? Should it vary by status?
 - [ ] **CoStar city name normalization:** CoStar MF exports use "Los Angeles", "Los Angeles CBD", "Downtown Los Angeles", "Hollywood", etc. Need a mapping table for MF city normalization. Non-MF is clean. Affects Phase A backfill data quality. (From ARCHITECTURE.md q. 2048)
