@@ -31,6 +31,9 @@ from tcg_pipeline.news.collectors import (
     POLITE_FETCH_PATH,
     SUPPORTED_FETCH_PATHS,
     AdvancedFetchRequiredError,
+    DiscoveredArticleUrl,
+    PoliteFetchError,
+    PoliteNewsCollector,
 )
 from tcg_pipeline.news.extraction import (
     NewsExtractionRunResult,
@@ -43,10 +46,16 @@ from tcg_pipeline.news.integration import (
 )
 from tcg_pipeline.news.structural import apply_structural_signals
 from tcg_pipeline.news.triage import NewsTriageRunResult, run_news_triage_for_article
+from tcg_pipeline.news.urls import canonicalize_news_url
 from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.workers.heartbeat import write_worker_heartbeat
 
 LOGGER = logging.getLogger(__name__)
+BLOCK_LIKE_HTTP_STATUSES = frozenset({401, 403, 429, 503})
+TRANSIENT_HTTP_STATUSES = frozenset({500, 502, 504})
+DEFAULT_BLOCK_LIKE_AUTO_PAUSE_THRESHOLD = 3
+DEFAULT_TRANSIENT_RETRY_ATTEMPTS = 3
+DEFAULT_TRANSIENT_RETRY_BACKOFF_SECONDS = 1.0
 NEWS_JOB_TASK_BY_KIND = {
     ScrapeJobKind.NEWS_PASTE_A_LINK.value: (
         "tcg_pipeline.workers.news_jobs.run_news_paste_a_link_task"
@@ -86,6 +95,52 @@ class NewsPasteLinkIngestResult:
     http_status: int | None
     body_text_chars: int
     fetch_path: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NewsScrapePlan:
+    job_id: uuid.UUID
+    source_run_id: uuid.UUID
+    source_id: uuid.UUID
+    source_name: str
+    source_name_display: str
+    base_url: str
+    collector_class: str
+    source_config: dict
+    market_slug: str
+    market_id: uuid.UUID | None
+    jurisdiction_id: uuid.UUID | None
+    trigger_type: str
+    scheduled_for: datetime | None
+    incremental_since: datetime | None
+    fetch_path: str
+    source_strategy_doc: str | None
+
+
+@dataclass(slots=True)
+class NewsScrapeRunStats:
+    discovered_count: int = 0
+    new_article_count: int = 0
+    existing_article_count: int = 0
+    fetched_count: int = 0
+    failed_fetch_count: int = 0
+    block_like_failure_count: int = 0
+    transient_failure_count: int = 0
+    triage_relevant_count: int = 0
+    extraction_ok_count: int = 0
+    integration_review_item_count: int = 0
+    errors: list[str] | None = None
+
+    def add_error(self, message: str) -> None:
+        if self.errors is None:
+            self.errors = []
+        self.errors.append(message)
+
+    @property
+    def error_text(self) -> str | None:
+        if not self.errors:
+            return None
+        return "; ".join(self.errors)
 
 
 def enqueue_news_job_execution(
@@ -154,7 +209,7 @@ def run_news_paste_a_link_task(scrape_job_id: str) -> None:
 
 
 def run_news_scrape_task(scrape_job_id: str) -> None:
-    _run_unimplemented_news_job(uuid.UUID(scrape_job_id), ScrapeJobKind.NEWS_SCRAPE.value)
+    run_news_scrape_job(uuid.UUID(scrape_job_id))
 
 
 def run_news_reextract_task(scrape_job_id: str) -> None:
@@ -216,6 +271,147 @@ def scheduler_tick(
             enqueued_count += 1
         session.commit()
     return enqueued_count
+
+
+def run_news_scrape_job(
+    job_id: uuid.UUID,
+    *,
+    collector_factory: Callable[[NewsSource], PoliteNewsCollector] = PoliteNewsCollector,
+    triage_runner: Callable[[uuid.UUID], NewsTriageRunResult] | None = (
+        run_news_triage_for_article
+    ),
+    extraction_runner: Callable[[uuid.UUID], NewsExtractionRunResult] | None = (
+        run_news_extraction_for_article
+    ),
+    integration_runner: Callable[..., NewsIntegrationResult] | None = (
+        run_news_integration_for_article
+    ),
+) -> None:
+    session_factory = get_session_factory()
+    try:
+        with session_factory() as session:
+            plan = start_news_scrape_job(session, job_id=job_id)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+        _record_news_job_failure(job_id, exc)
+        raise
+
+    if plan is None:
+        return
+
+    if plan.fetch_path == ADVANCED_FETCH_PATH:
+        error = _advanced_fetch_required_error_for_source(plan)
+        stats = NewsScrapeRunStats()
+        stats.add_error(str(error))
+        _fail_news_scrape_job(session_factory, plan=plan, stats=stats, error=error)
+        raise error
+
+    stats = NewsScrapeRunStats()
+    collector = collector_factory(_source_snapshot_from_plan(plan))
+    try:
+        discovered_urls = _discover_incremental_urls_with_retries(
+            collector,
+            plan=plan,
+        )
+        stats.discovered_count = len(discovered_urls)
+        _update_news_scrape_progress(
+            job_id,
+            message="Discovered news article URLs.",
+            progress={
+                "discovered_count": stats.discovered_count,
+                "fetch_path": plan.fetch_path,
+            },
+        )
+        for discovered in discovered_urls:
+            article_id, created = _persist_discovered_news_article(
+                session_factory,
+                plan=plan,
+                discovered=discovered,
+            )
+            if created:
+                stats.new_article_count += 1
+            else:
+                stats.existing_article_count += 1
+                continue
+            fetch_result = _fetch_article_with_retries(
+                collector,
+                plan=plan,
+                url=discovered.url,
+            )
+            if fetch_result.http_status in BLOCK_LIKE_HTTP_STATUSES:
+                stats.block_like_failure_count += 1
+                stats.add_error(
+                    f"block_like_fetch_failure: article {discovered.url} returned "
+                    f"HTTP {fetch_result.http_status}"
+                )
+            if fetch_result.http_status in TRANSIENT_HTTP_STATUSES:
+                stats.transient_failure_count += 1
+                stats.add_error(
+                    f"transient_fetch_failure: article {discovered.url} returned "
+                    f"HTTP {fetch_result.http_status}"
+                )
+            ingest_result = _complete_scheduled_article_fetch(
+                session_factory,
+                plan=plan,
+                article_id=article_id,
+                result=fetch_result,
+            )
+            if ingest_result.fetched:
+                stats.fetched_count += 1
+            else:
+                stats.failed_fetch_count += 1
+                continue
+
+            triage_result: NewsTriageRunResult | None = None
+            if triage_runner is not None:
+                triage_result = triage_runner(article_id)
+                if triage_result.relevant:
+                    stats.triage_relevant_count += 1
+            extraction_result: NewsExtractionRunResult | None = None
+            if (
+                triage_result is not None
+                and triage_result.relevant is True
+                and extraction_runner is not None
+            ):
+                extraction_result = extraction_runner(article_id)
+                if (
+                    extraction_result.parse_status == "ok"
+                    or extraction_result.reextraction_parse_status == "ok"
+                ):
+                    stats.extraction_ok_count += 1
+            if (
+                extraction_result is not None
+                and (
+                    extraction_result.parse_status == "ok"
+                    or extraction_result.reextraction_parse_status == "ok"
+                )
+                and integration_runner is not None
+            ):
+                integration_result = integration_runner(
+                    article_id,
+                    source_run_id=plan.source_run_id,
+                    force_project_id=None,
+                    session_factory=session_factory,
+                )
+                stats.integration_review_item_count += (
+                    integration_result.review_items_created
+                    + integration_result.review_items_updated
+                )
+        _finish_news_scrape_job(session_factory, plan=plan, stats=stats)
+    except PoliteFetchError as exc:
+        stats.add_error(_polite_fetch_error_text(exc))
+        if exc.block_like:
+            stats.block_like_failure_count += 1
+        elif exc.status_code in TRANSIENT_HTTP_STATUSES:
+            stats.transient_failure_count += 1
+        _fail_news_scrape_job(session_factory, plan=plan, stats=stats, error=exc)
+        raise
+    except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+        stats.add_error(str(exc))
+        _fail_news_scrape_job(session_factory, plan=plan, stats=stats, error=exc)
+        raise
+    finally:
+        collector.close()
 
 
 def run_news_paste_a_link_job(
@@ -321,6 +517,76 @@ def run_news_paste_a_link_job(
             session.rollback()
             _record_news_job_failure(job_id, exc)
             raise
+
+
+def start_news_scrape_job(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+) -> NewsScrapePlan | None:
+    job = _load_news_job(
+        session,
+        job_id=job_id,
+        expected_kind=ScrapeJobKind.NEWS_SCRAPE.value,
+    )
+    if job is None:
+        return None
+    payload = job.target_payload or {}
+    source_id = _payload_uuid(payload, "news_source_id")
+    assert source_id is not None
+    source = session.get(NewsSource, source_id)
+    if source is None:
+        raise RuntimeError("Scheduled news scrape references a missing source.")
+    fetch_path = _source_fetch_path(source)
+    scheduled_for = _payload_datetime(payload, "scheduled_for", required=False)
+    incremental_since = _payload_datetime(payload, "since", required=False)
+    if incremental_since is None:
+        incremental_since = _latest_scheduled_source_run(session, source)
+    market_slug = source.market.slug if source.market else "unscoped"
+    now = datetime.now(UTC)
+    source_run = SourceRun(
+        market=market_slug,
+        jurisdiction_id=source.jurisdiction_id,
+        source_name=source.slug,
+        collection_mode="incremental",
+        trigger_type=job.trigger_type.value,
+        initiated_by_user_id=job.initiated_by_user_id,
+        incremental_since=incremental_since,
+    )
+    session.add(source_run)
+    session.flush()
+
+    job.status = ScrapeJobStatus.RUNNING
+    job.started_at = now
+    job.source_run_id = source_run.id
+    job.progress = {
+        "message": "Discovering scheduled news articles.",
+        "news_source_id": str(source.id),
+        "source_name": source.slug,
+        "fetch_path": fetch_path,
+        "source_strategy_doc": _source_strategy_doc(source),
+        "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
+        "incremental_since": incremental_since.isoformat() if incremental_since else None,
+    }
+    session.flush()
+    return NewsScrapePlan(
+        job_id=job.id,
+        source_run_id=source_run.id,
+        source_id=source.id,
+        source_name=source.slug,
+        source_name_display=source.name,
+        base_url=source.base_url,
+        collector_class=source.collector_class,
+        source_config=dict(source.config or {}),
+        market_slug=market_slug,
+        market_id=source.market_id,
+        jurisdiction_id=source.jurisdiction_id,
+        trigger_type=job.trigger_type.value,
+        scheduled_for=scheduled_for,
+        incremental_since=incremental_since,
+        fetch_path=fetch_path,
+        source_strategy_doc=_source_strategy_doc(source),
+    )
 
 
 def start_news_paste_a_link_job(
@@ -572,6 +838,21 @@ def _payload_uuid(payload: dict, key: str, *, required: bool = True) -> uuid.UUI
         raise RuntimeError(f"News scrape job payload has invalid '{key}'.") from exc
 
 
+def _payload_datetime(payload: dict, key: str, *, required: bool = True) -> datetime | None:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        if not required and value is None:
+            return None
+        raise RuntimeError(f"News scrape job payload is missing '{key}'.")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"News scrape job payload has invalid '{key}'.") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _apply_article_fetch_result(
     session: Session,
     *,
@@ -716,6 +997,20 @@ def _advanced_fetch_required_error(
     )
 
 
+def _advanced_fetch_required_error_for_source(
+    plan: NewsScrapePlan,
+) -> AdvancedFetchRequiredError:
+    if plan.source_strategy_doc is None:
+        return AdvancedFetchRequiredError(
+            f"Source '{plan.source_name}' requests fetch_path='advanced' without "
+            "config.source_strategy_doc; advanced fetching is deferred to D.late.ADV."
+        )
+    return AdvancedFetchRequiredError(
+        f"Source '{plan.source_name}' requests fetch_path='advanced', but advanced "
+        "fetching is deferred to D.late.ADV."
+    )
+
+
 def _source_fetch_path(source: NewsSource) -> str:
     config = source.config if isinstance(source.config, dict) else {}
     fetch_path = str(config.get("fetch_path") or POLITE_FETCH_PATH)
@@ -732,6 +1027,363 @@ def _source_strategy_doc(source: NewsSource) -> str | None:
     if isinstance(source_strategy_doc, str) and source_strategy_doc.strip():
         return source_strategy_doc
     return None
+
+
+def _source_snapshot_from_plan(plan: NewsScrapePlan) -> NewsSource:
+    return NewsSource(
+        id=plan.source_id,
+        slug=plan.source_name,
+        name=plan.source_name_display,
+        base_url=plan.base_url,
+        collector_class=plan.collector_class,
+        active=True,
+        config=plan.source_config,
+        market_id=plan.market_id,
+        jurisdiction_id=plan.jurisdiction_id,
+    )
+
+
+def _discover_incremental_urls_with_retries(
+    collector: PoliteNewsCollector,
+    *,
+    plan: NewsScrapePlan,
+) -> list[DiscoveredArticleUrl]:
+    max_attempts = _int_config(
+        plan.source_config,
+        "transient_retry_attempts",
+        DEFAULT_TRANSIENT_RETRY_ATTEMPTS,
+    )
+    backoff_seconds = _float_config(
+        plan.source_config,
+        "transient_retry_backoff_seconds",
+        DEFAULT_TRANSIENT_RETRY_BACKOFF_SECONDS,
+    )
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return collector.discover_incremental_urls(since=plan.incremental_since)
+        except PoliteFetchError as exc:
+            if exc.status_code not in TRANSIENT_HTTP_STATUSES or attempt >= max_attempts:
+                raise
+            time.sleep(backoff_seconds * attempt)
+    return []
+
+
+def _fetch_article_with_retries(
+    collector: PoliteNewsCollector,
+    *,
+    plan: NewsScrapePlan,
+    url: str,
+) -> ArticleFetchResult:
+    max_attempts = _int_config(
+        plan.source_config,
+        "transient_retry_attempts",
+        DEFAULT_TRANSIENT_RETRY_ATTEMPTS,
+    )
+    backoff_seconds = _float_config(
+        plan.source_config,
+        "transient_retry_backoff_seconds",
+        DEFAULT_TRANSIENT_RETRY_BACKOFF_SECONDS,
+    )
+    result: ArticleFetchResult | None = None
+    for attempt in range(1, max_attempts + 1):
+        result = collector.fetch_article(url)
+        if result.http_status not in TRANSIENT_HTTP_STATUSES or attempt >= max_attempts:
+            return result
+        time.sleep(backoff_seconds * attempt)
+    assert result is not None
+    return result
+
+
+def _persist_discovered_news_article(
+    session_factory: sessionmaker[Session],
+    *,
+    plan: NewsScrapePlan,
+    discovered: DiscoveredArticleUrl,
+) -> tuple[uuid.UUID, bool]:
+    canonical_url = canonicalize_news_url(discovered.url, source_slug=plan.source_name)
+    with session_factory() as session:
+        existing_article = session.execute(
+            select(NewsArticle).where(NewsArticle.url_hash == canonical_url.url_hash)
+        ).scalar_one_or_none()
+        if existing_article is not None:
+            return existing_article.id, False
+        article = NewsArticle(
+            news_source_id=plan.source_id,
+            url_canonical=canonical_url.canonical_url,
+            url_original=canonical_url.original_url,
+            url_hash=canonical_url.url_hash,
+            fetch_status=NewsFetchStatus.PENDING.value,
+            published_at=discovered.published_at or discovered.last_modified_at,
+            ingest_method=ScrapeJobKind.NEWS_SCRAPE.value,
+        )
+        try:
+            with session.begin_nested():
+                session.add(article)
+                session.flush()
+        except IntegrityError:
+            raced_article = session.execute(
+                select(NewsArticle).where(NewsArticle.url_hash == canonical_url.url_hash)
+            ).scalar_one()
+            session.commit()
+            return raced_article.id, False
+        session.commit()
+        return article.id, True
+
+
+def _complete_scheduled_article_fetch(
+    session_factory: sessionmaker[Session],
+    *,
+    plan: NewsScrapePlan,
+    article_id: uuid.UUID,
+    result: ArticleFetchResult,
+) -> NewsPasteLinkIngestResult:
+    with session_factory() as session:
+        article = session.execute(
+            select(NewsArticle)
+            .where(NewsArticle.id == article_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if article is None:
+            raise RuntimeError("Scheduled news article disappeared before fetch completion.")
+        article.fetch_attempts += 1
+        article.last_attempted_at = datetime.now(UTC)
+        _apply_article_fetch_result(session, article=article, result=result)
+        fetched = result.fetch_status == NewsFetchStatus.FETCHED.value
+        if fetched:
+            apply_structural_signals(
+                session,
+                article=article,
+                market_slug=plan.market_slug,
+                market_id=plan.market_id,
+                now=datetime.now(UTC),
+            )
+        session.commit()
+        return NewsPasteLinkIngestResult(
+            job_id=plan.job_id,
+            article_id=article.id,
+            source_run_id=plan.source_run_id,
+            fetched=fetched,
+            fetch_status=article.fetch_status,
+            http_status=article.http_status,
+            body_text_chars=len(article.body_text or ""),
+            fetch_path=plan.fetch_path,
+        )
+
+
+def _update_news_scrape_progress(
+    job_id: uuid.UUID,
+    *,
+    message: str,
+    progress: dict,
+) -> None:
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        job = session.get(ScrapeJob, job_id)
+        if job is not None and job.status == ScrapeJobStatus.RUNNING:
+            job.progress = {"message": message, **progress}
+            session.commit()
+
+
+def _finish_news_scrape_job(
+    session_factory: sessionmaker[Session],
+    *,
+    plan: NewsScrapePlan,
+    stats: NewsScrapeRunStats,
+) -> ScrapeJob:
+    with session_factory() as session:
+        job = session.get(ScrapeJob, plan.job_id)
+        source_run = session.get(SourceRun, plan.source_run_id)
+        if job is None or source_run is None:
+            raise RuntimeError("Scheduled news scrape audit rows disappeared before completion.")
+        now = datetime.now(UTC)
+        source_run.finished_at = now
+        source_run.records_pulled = stats.discovered_count
+        source_run.rows_inserted = stats.new_article_count
+        source_run.rows_updated = stats.fetched_count
+        source_run.rows_unchanged = stats.existing_article_count
+        source_run.new_matches = stats.integration_review_item_count
+        source_run.errors = stats.error_text
+        if job.started_at is not None:
+            source_run.duration_seconds = int((now - job.started_at).total_seconds())
+        job.status = ScrapeJobStatus.COMPLETED
+        job.completed_at = now
+        job.error_text = None
+        job.progress = _news_scrape_progress_payload(
+            "Scheduled news scrape completed.",
+            plan=plan,
+            stats=stats,
+        )
+        _apply_news_source_failure_policy(session, plan=plan, stats=stats)
+        session.commit()
+        return job
+
+
+def _fail_news_scrape_job(
+    session_factory: sessionmaker[Session],
+    *,
+    plan: NewsScrapePlan,
+    stats: NewsScrapeRunStats,
+    error: Exception,
+) -> None:
+    with session_factory() as session:
+        job = session.get(ScrapeJob, plan.job_id)
+        source_run = session.get(SourceRun, plan.source_run_id)
+        now = datetime.now(UTC)
+        if source_run is not None:
+            source_run.finished_at = now
+            source_run.records_pulled = stats.discovered_count
+            source_run.rows_inserted = stats.new_article_count
+            source_run.rows_updated = stats.fetched_count
+            source_run.rows_unchanged = stats.existing_article_count
+            source_run.errors = stats.error_text or str(error)
+            source_run.error_text = str(error)
+            if job is not None and job.started_at is not None:
+                source_run.duration_seconds = int((now - job.started_at).total_seconds())
+        if job is not None:
+            job.status = ScrapeJobStatus.FAILED
+            job.completed_at = now
+            job.error_text = str(error)
+            job.progress = _news_scrape_progress_payload(
+                "Scheduled news scrape failed.",
+                plan=plan,
+                stats=stats,
+                error=str(error),
+            )
+        if isinstance(error, AdvancedFetchRequiredError):
+            raise_system_alert(
+                session,
+                alert_key="news_advanced_fetch_deferred",
+                severity="warning",
+                message="News source requested advanced fetch before implementation.",
+                scope={"source_name": plan.source_name, "fetch_path": plan.fetch_path},
+                detail={
+                    "job_id": str(plan.job_id),
+                    "source_run_id": str(plan.source_run_id),
+                    "source_strategy_doc": plan.source_strategy_doc,
+                    "source_doc_required": plan.source_strategy_doc is None,
+                },
+            )
+        _apply_news_source_failure_policy(session, plan=plan, stats=stats, error=error)
+        session.commit()
+
+
+def _news_scrape_progress_payload(
+    message: str,
+    *,
+    plan: NewsScrapePlan,
+    stats: NewsScrapeRunStats,
+    error: str | None = None,
+) -> dict:
+    payload = {
+        "message": message,
+        "news_source_id": str(plan.source_id),
+        "source_name": plan.source_name,
+        "fetch_path": plan.fetch_path,
+        "source_strategy_doc": plan.source_strategy_doc,
+        "scheduled_for": plan.scheduled_for.isoformat() if plan.scheduled_for else None,
+        "incremental_since": plan.incremental_since.isoformat() if plan.incremental_since else None,
+        "discovered_count": stats.discovered_count,
+        "new_article_count": stats.new_article_count,
+        "existing_article_count": stats.existing_article_count,
+        "fetched_count": stats.fetched_count,
+        "failed_fetch_count": stats.failed_fetch_count,
+        "block_like_failure_count": stats.block_like_failure_count,
+        "transient_failure_count": stats.transient_failure_count,
+        "triage_relevant_count": stats.triage_relevant_count,
+        "extraction_ok_count": stats.extraction_ok_count,
+        "integration_review_item_count": stats.integration_review_item_count,
+    }
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
+def _apply_news_source_failure_policy(
+    session: Session,
+    *,
+    plan: NewsScrapePlan,
+    stats: NewsScrapeRunStats,
+    error: Exception | None = None,
+) -> None:
+    if stats.block_like_failure_count <= 0:
+        return
+    threshold = _int_config(
+        plan.source_config,
+        "auto_pause_block_failures",
+        DEFAULT_BLOCK_LIKE_AUTO_PAUSE_THRESHOLD,
+    )
+    consecutive = _consecutive_block_like_source_runs(session, plan.source_name)
+    detail = {
+        "source_name": plan.source_name,
+        "job_id": str(plan.job_id),
+        "source_run_id": str(plan.source_run_id),
+        "block_like_failure_count": stats.block_like_failure_count,
+        "consecutive_block_like_runs": consecutive,
+        "auto_pause_threshold": threshold,
+        "error": str(error) if error is not None else stats.error_text,
+    }
+    raise_system_alert(
+        session,
+        alert_key="news_source_block_like_failure",
+        severity="warning",
+        message="News source returned a block-like fetch response.",
+        scope={"source_name": plan.source_name},
+        detail=detail,
+    )
+    if consecutive < threshold:
+        return
+    source = session.get(NewsSource, plan.source_id)
+    if source is not None:
+        source.active = False
+    raise_system_alert(
+        session,
+        alert_key="news_source_auto_paused",
+        severity="high",
+        message="News source auto-paused after repeated block-like fetch responses.",
+        scope={"source_name": plan.source_name},
+        detail=detail,
+    )
+
+
+def _consecutive_block_like_source_runs(session: Session, source_name: str) -> int:
+    rows = (
+        session.execute(
+            select(SourceRun)
+            .where(SourceRun.source_name == source_name)
+            .order_by(SourceRun.run_timestamp.desc(), SourceRun.id.desc())
+            .limit(10)
+        )
+        .scalars()
+        .all()
+    )
+    count = 0
+    for row in rows:
+        if row.errors and "block_like_fetch_failure" in row.errors:
+            count += 1
+            continue
+        break
+    return count
+
+
+def _polite_fetch_error_text(error: PoliteFetchError) -> str:
+    prefix = "block_like_fetch_failure" if error.block_like else "fetch_failure"
+    if error.status_code in TRANSIENT_HTTP_STATUSES:
+        prefix = "transient_fetch_failure"
+    return f"{prefix}: {error}"
+
+
+def _int_config(config: dict, key: str, default: int) -> int:
+    value = config.get(key)
+    if isinstance(value, int) and value > 0:
+        return value
+    return default
+
+
+def _float_config(config: dict, key: str, default: float) -> float:
+    value = config.get(key)
+    if isinstance(value, int | float) and value >= 0:
+        return float(value)
+    return default
 
 
 def _latest_scheduled_source_run(session: Session, source: NewsSource) -> datetime | None:

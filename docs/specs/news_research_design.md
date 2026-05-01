@@ -4,7 +4,7 @@
 >
 > **Audience:** Engineers implementing Phase D. Researchers evaluating the system's behavior. A future contributor joining the team six months from now and asking "what is Phase D and why is it shaped this way?"
 >
-> **Last updated:** 2026-05-01 (D.2b advanced-fetch guardrail implementation — see Revision History)
+> **Last updated:** 2026-05-01 (D.6 scheduled scrape implementation — see Revision History)
 > **Owner:** Nate Goldstein (researcher), pipeline maintainers (engineering)
 >
 > **Read alongside:**

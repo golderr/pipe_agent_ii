@@ -18,12 +18,15 @@ from tcg_pipeline.db.models import (
     ScrapeJob,
     ScrapeJobKind,
     ScrapeJobStatus,
+    ScrapeTriggerType,
     SourceRun,
     SystemAlert,
     WorkerHeartbeat,
 )
+from tcg_pipeline.news.collectors import DiscoveredArticleUrl, PoliteFetchError
 from tcg_pipeline.news.extraction import NewsExtractionRunResult
 from tcg_pipeline.news.ingest import ArticleFetchResult
+from tcg_pipeline.news.integration import NewsIntegrationResult
 from tcg_pipeline.news.triage import NewsTriageRunResult
 from tcg_pipeline.settings import Settings
 from tcg_pipeline.workers import news_jobs, scrape_jobs
@@ -638,6 +641,227 @@ def test_paste_link_worker_does_not_count_paywall_as_useful_update(
     assert source_run.records_pulled == 0
     assert source_run.rows_updated == 0
     assert source_run.errors is None
+
+
+def test_scheduled_news_scrape_discovers_fetches_and_runs_pipeline(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    source.config = {
+        **(source.config or {}),
+        "rate_limit_seconds": 0,
+        "transient_retry_attempts": 1,
+        "transient_retry_backoff_seconds": 0,
+    }
+    postgres_session.flush()
+    job = ScrapeJob(
+        jurisdiction_id=source.jurisdiction_id,
+        kind=ScrapeJobKind.NEWS_SCRAPE.value,
+        source_name=source.slug,
+        trigger_type=ScrapeTriggerType.SCHEDULED,
+        status=ScrapeJobStatus.QUEUED,
+        target_payload={
+            "news_source_id": str(source.id),
+            "scheduled_for": "2026-05-01T14:30:00+00:00",
+        },
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+
+    class FakeCollector:
+        def __init__(self, loaded_source: NewsSource) -> None:
+            assert loaded_source.slug == "urbanize_la"
+
+        def discover_incremental_urls(self, *, since: datetime | None = None):
+            assert since is None
+            return [
+                DiscoveredArticleUrl(
+                    url="https://la.urbanize.city/post/scheduled-test",
+                    discovered_via="rss",
+                    published_at=datetime(2026, 5, 1, 13, 10, tzinfo=UTC),
+                )
+            ]
+
+        def fetch_article(self, url: str) -> ArticleFetchResult:
+            assert url == "https://la.urbanize.city/post/scheduled-test"
+            return ArticleFetchResult(
+                fetch_status=NewsFetchStatus.FETCHED.value,
+                final_url=url,
+                http_status=200,
+                raw_html="<html><body>Article</body></html>",
+                raw_html_hash="rawhash",
+                body_text="Developer announced a 140-unit project in Los Angeles.",
+                body_text_hash="bodyhash",
+                title="Scheduled Urbanize test",
+                published_at=datetime(2026, 5, 1, 13, 10, tzinfo=UTC),
+                paywall_state="open",
+            )
+
+        def close(self) -> None:
+            return None
+
+    def fake_triage_runner(article_id: uuid.UUID) -> NewsTriageRunResult:
+        with task_session_factory() as session:
+            article = session.get(NewsArticle, article_id)
+            assert article is not None
+            article.triage_status = NewsTriageStatus.RELEVANT.value
+            session.commit()
+        return NewsTriageRunResult(
+            article_id=article_id,
+            extraction_id=uuid.uuid4(),
+            triage_status=NewsTriageStatus.RELEVANT.value,
+            relevant=True,
+            reason="Relevant scheduled article.",
+            parse_status="ok",
+        )
+
+    def fake_extraction_runner(article_id: uuid.UUID) -> NewsExtractionRunResult:
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=uuid.uuid4(),
+            relevance="confirmed",
+            reference_count=1,
+            parse_status="ok",
+        )
+
+    def fake_integration_runner(article_id: uuid.UUID, **kwargs) -> NewsIntegrationResult:
+        return NewsIntegrationResult(
+            article_id=article_id,
+            source_run_id=kwargs["source_run_id"],
+            extraction_id=uuid.uuid4(),
+            references_processed=1,
+            confirmed=1,
+            review_items_created=1,
+        )
+
+    news_jobs.run_news_scrape_job(
+        job.id,
+        collector_factory=FakeCollector,
+        triage_runner=fake_triage_runner,
+        extraction_runner=fake_extraction_runner,
+        integration_runner=fake_integration_runner,
+    )
+
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    assert refreshed_job is not None
+    assert refreshed_job.status == ScrapeJobStatus.COMPLETED
+    assert refreshed_job.source_run_id is not None
+    assert refreshed_job.progress["discovered_count"] == 1
+    assert refreshed_job.progress["new_article_count"] == 1
+    assert refreshed_job.progress["fetched_count"] == 1
+    assert refreshed_job.progress["triage_relevant_count"] == 1
+    assert refreshed_job.progress["extraction_ok_count"] == 1
+    assert refreshed_job.progress["integration_review_item_count"] == 1
+    article = postgres_session.execute(
+        select(NewsArticle).where(NewsArticle.url_canonical == "https://la.urbanize.city/post/scheduled-test")
+    ).scalar_one()
+    assert article.news_source_id == source.id
+    assert article.fetch_status == NewsFetchStatus.FETCHED.value
+    assert article.ingest_method == ScrapeJobKind.NEWS_SCRAPE.value
+    assert article.fetch_attempts == 1
+    assert article.structural_signals is not None
+    source_run = postgres_session.get(SourceRun, refreshed_job.source_run_id)
+    assert source_run is not None
+    assert source_run.source_name == "urbanize_la"
+    assert source_run.collection_mode == "incremental"
+    assert source_run.trigger_type == ScrapeTriggerType.SCHEDULED.value
+    assert source_run.records_pulled == 1
+    assert source_run.rows_inserted == 1
+    assert source_run.rows_updated == 1
+    assert source_run.rows_unchanged == 0
+    assert source_run.new_matches == 1
+    assert source_run.errors is None
+
+
+def test_scheduled_news_scrape_auto_pauses_after_block_like_failure(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    source.active = True
+    source.config = {
+        **(source.config or {}),
+        "rate_limit_seconds": 0,
+        "auto_pause_block_failures": 1,
+        "transient_retry_attempts": 1,
+        "transient_retry_backoff_seconds": 0,
+    }
+    postgres_session.flush()
+    job = ScrapeJob(
+        jurisdiction_id=source.jurisdiction_id,
+        kind=ScrapeJobKind.NEWS_SCRAPE.value,
+        source_name=source.slug,
+        trigger_type=ScrapeTriggerType.SCHEDULED,
+        status=ScrapeJobStatus.QUEUED,
+        target_payload={
+            "news_source_id": str(source.id),
+            "scheduled_for": "2026-05-01T14:30:00+00:00",
+        },
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+
+    class BlockedCollector:
+        def __init__(self, _loaded_source: NewsSource) -> None:
+            return None
+
+        def discover_incremental_urls(self, *, since: datetime | None = None):
+            raise PoliteFetchError(
+                "Urbanize returned HTTP 429.",
+                status_code=429,
+                retry_after_seconds=120,
+                block_like=True,
+            )
+
+        def close(self) -> None:
+            return None
+
+    with pytest.raises(PoliteFetchError):
+        news_jobs.run_news_scrape_job(
+            job.id,
+            collector_factory=BlockedCollector,
+            triage_runner=None,
+            extraction_runner=None,
+            integration_runner=None,
+        )
+
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    refreshed_source = postgres_session.get(NewsSource, source.id)
+    assert refreshed_job is not None
+    assert refreshed_source is not None
+    assert refreshed_job.status == ScrapeJobStatus.FAILED
+    assert refreshed_job.progress["block_like_failure_count"] == 1
+    assert refreshed_source.active is False
+    source_run = postgres_session.get(SourceRun, refreshed_job.source_run_id)
+    assert source_run is not None
+    assert "block_like_fetch_failure" in (source_run.errors or "")
+    alerts = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.scope["source_name"].astext == "urbanize_la"
+        )
+    ).scalars().all()
+    alert_keys = {alert.alert_key for alert in alerts}
+    assert "news_source_block_like_failure" in alert_keys
+    assert "news_source_auto_paused" in alert_keys
 
 
 def test_duplicate_scheduled_news_job_keeps_session_usable(

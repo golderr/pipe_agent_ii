@@ -29,6 +29,7 @@ from tcg_pipeline.api.errors import raise_not_implemented
 from tcg_pipeline.api.schemas import (
     CoStarUploadResponse,
     CoverageScrapeRequest,
+    NewsSourceHealthResponse,
     ScrapeJobResponse,
     ScrapeWorkerHealthResponse,
 )
@@ -40,12 +41,14 @@ from tcg_pipeline.db.models import (
     CoStarUpload,
     CoStarUploadStatus,
     Jurisdiction,
+    NewsSource,
     ScrapeJob,
     ScrapeJobKind,
     ScrapeJobStatus,
     ScrapeTriggerType,
     SourceRegistration,
     SourceRun,
+    SystemAlert,
 )
 from tcg_pipeline.db.seed import CoStarPersistResult, seed_costar_workbooks
 from tcg_pipeline.ingesters.costar import COSTAR_SOURCE_NAME, CoStarImportResult
@@ -181,6 +184,15 @@ def get_scrape_worker_health(
         worker_count=status.worker_count,
         error=status.error,
     )
+
+
+@router.get("/coverage/news_sources/health")
+def list_news_source_health(
+    _user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> list[NewsSourceHealthResponse]:
+    sources = session.execute(select(NewsSource).order_by(NewsSource.slug.asc())).scalars().all()
+    return [_serialize_news_source_health(session, source) for source in sources]
 
 
 def enqueue_scrape_job(
@@ -641,6 +653,76 @@ def _serialize_scrape_job(job: ScrapeJob) -> ScrapeJobResponse:
         source_run_id=job.source_run_id,
         error_text=job.error_text,
         progress=job.progress,
+    )
+
+
+def _serialize_news_source_health(
+    session: Session,
+    source: NewsSource,
+) -> NewsSourceHealthResponse:
+    latest_run = session.execute(
+        select(SourceRun)
+        .where(SourceRun.source_name == source.slug)
+        .order_by(SourceRun.run_timestamp.desc(), SourceRun.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    latest_job = None
+    if latest_run is not None:
+        latest_job = session.execute(
+            select(ScrapeJob)
+            .where(ScrapeJob.source_run_id == latest_run.id)
+            .order_by(ScrapeJob.queued_at.desc(), ScrapeJob.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+    progress = (
+        latest_job.progress
+        if latest_job is not None and isinstance(latest_job.progress, dict)
+        else {}
+    )
+    alert = session.execute(
+        select(SystemAlert)
+        .where(
+            SystemAlert.cleared_at.is_(None),
+            SystemAlert.scope["source_name"].astext == source.slug,
+        )
+        .order_by(SystemAlert.last_seen_at.desc(), SystemAlert.raised_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    config = source.config if isinstance(source.config, dict) else {}
+    return NewsSourceHealthResponse(
+        id=source.id,
+        slug=source.slug,
+        name=source.name,
+        active=source.active,
+        paused=not source.active,
+        fetch_path=str(config.get("fetch_path") or "polite"),
+        schedule_cron=source.schedule_cron,
+        schedule_timezone=source.schedule_timezone,
+        source_strategy_doc=(
+            config.get("source_strategy_doc")
+            if isinstance(config.get("source_strategy_doc"), str)
+            else None
+        ),
+        last_run_at=latest_run.run_timestamp.isoformat() if latest_run else None,
+        last_run_finished_at=(
+            latest_run.finished_at.isoformat()
+            if latest_run and latest_run.finished_at
+            else None
+        ),
+        last_run_had_error=bool(
+            latest_run and (latest_run.errors or latest_run.error_text)
+        ),
+        discovered_count=latest_run.records_pulled if latest_run else None,
+        fetched_count=latest_run.rows_updated if latest_run else None,
+        failed_count=(
+            progress.get("failed_fetch_count")
+            if isinstance(progress.get("failed_fetch_count"), int)
+            else None
+        ),
+        last_alert_key=alert.alert_key if alert else None,
+        last_alert_severity=alert.severity if alert else None,
+        last_alert_message=alert.message if alert else None,
+        last_alert_at=alert.last_seen_at.isoformat() if alert else None,
     )
 
 

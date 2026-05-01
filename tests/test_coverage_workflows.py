@@ -19,12 +19,14 @@ from tcg_pipeline.db.models import (
     CoStarUploadStatus,
     Jurisdiction,
     Market,
+    NewsSource,
     Project,
     ScrapeJob,
     ScrapeJobKind,
     ScrapeJobStatus,
     SourceRegistration,
     SourceRun,
+    SystemAlert,
 )
 from tcg_pipeline.db.seed import CoStarPersistResult
 
@@ -272,6 +274,75 @@ def test_list_scrape_jobs_filters_recent_source_history(postgres_session: Sessio
     assert history[0].error_text == "source unavailable"
 
 
+def test_list_news_source_health_reports_latest_run_and_alert(
+    postgres_session: Session,
+) -> None:
+    _ensure_coverage_tables(postgres_session)
+    source = NewsSource(
+        slug=f"health-news-{uuid.uuid4().hex}",
+        name="Health News",
+        base_url="https://example.com",
+        collector_class="PoliteNewsCollector",
+        active=False,
+        schedule_cron="30 7 * * *",
+        schedule_timezone="America/Los_Angeles",
+        config={
+            "fetch_path": "polite",
+            "source_strategy_doc": "docs/sources/news/health_news.md",
+        },
+    )
+    postgres_session.add(source)
+    postgres_session.flush()
+    source_run = SourceRun(
+        market="unscoped",
+        source_name=source.slug,
+        collection_mode="incremental",
+        trigger_type="scheduled",
+        records_pulled=4,
+        rows_inserted=3,
+        rows_updated=2,
+        rows_unchanged=1,
+        errors="block_like_fetch_failure: article returned HTTP 429",
+        finished_at=datetime(2026, 5, 1, 15, 0, tzinfo=UTC),
+    )
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    postgres_session.add(
+        ScrapeJob(
+            kind=ScrapeJobKind.NEWS_SCRAPE.value,
+            source_name=source.slug,
+            source_run_id=source_run.id,
+            status=ScrapeJobStatus.FAILED,
+            progress={"failed_fetch_count": 2},
+        )
+    )
+    postgres_session.add(
+        SystemAlert(
+            alert_key="news_source_auto_paused",
+            severity="high",
+            scope={"source_name": source.slug},
+            message="News source auto-paused.",
+        )
+    )
+    postgres_session.flush()
+
+    health = coverage_router.list_news_source_health(
+        _user=_user(postgres_session),
+        session=postgres_session,
+    )
+
+    item = next(row for row in health if row.slug == source.slug)
+    assert item.active is False
+    assert item.paused is True
+    assert item.fetch_path == "polite"
+    assert item.discovered_count == 4
+    assert item.fetched_count == 2
+    assert item.failed_count == 2
+    assert item.last_run_had_error is True
+    assert item.last_alert_key == "news_source_auto_paused"
+    assert item.last_alert_severity == "high"
+
+
 def test_process_costar_upload_records_success_audit(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -423,9 +494,11 @@ def _ensure_coverage_tables(postgres_session: Session) -> None:
         "costar_uploads",
         "jurisdictions",
         "markets",
+        "news_sources",
         "scrape_jobs",
         "source_registrations",
         "source_runs",
+        "system_alerts",
     }
     missing = [
         table_name for table_name in required_tables if not inspector.has_table(table_name)

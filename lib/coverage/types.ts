@@ -15,6 +15,27 @@ export type CoverageSourceSummary = {
   rowsUnchanged: number | null;
 };
 
+export type CoverageNewsSourceHealth = {
+  id: string;
+  slug: string;
+  name: string;
+  active: boolean;
+  paused: boolean;
+  fetchPath: string;
+  scheduleCron: string | null;
+  scheduleTimezone: string | null;
+  lastRunAt: string | null;
+  lastRunFinishedAt: string | null;
+  lastRunHadError: boolean;
+  discoveredCount: number | null;
+  fetchedCount: number | null;
+  failedCount: number | null;
+  lastAlertKey: string | null;
+  lastAlertSeverity: string | null;
+  lastAlertMessage: string | null;
+  lastAlertAt: string | null;
+};
+
 export type CoverageJurisdiction = {
   id: string;
   slug: string;

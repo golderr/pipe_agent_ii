@@ -258,6 +258,28 @@ class ScrapeWorkerHealthResponse(BaseModel):
     error: str | None = None
 
 
+class NewsSourceHealthResponse(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    active: bool
+    paused: bool
+    fetch_path: str
+    schedule_cron: str | None
+    schedule_timezone: str | None
+    source_strategy_doc: str | None
+    last_run_at: str | None
+    last_run_finished_at: str | None
+    last_run_had_error: bool
+    discovered_count: int | None
+    fetched_count: int | None
+    failed_count: int | None
+    last_alert_key: str | None
+    last_alert_severity: str | None
+    last_alert_message: str | None
+    last_alert_at: str | None
+
+
 class CoStarUploadResponse(BaseModel):
     id: uuid.UUID
     jurisdiction_id: uuid.UUID

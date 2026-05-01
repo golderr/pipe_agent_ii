@@ -5,7 +5,7 @@ import { getCoverageData } from "@/lib/coverage/data";
 export const dynamic = "force-dynamic";
 
 export default async function CoveragePage() {
-  const { data: jurisdictions, error } = await getCoverageData();
+  const { data: jurisdictions, newsSources, error } = await getCoverageData();
 
   if (error) {
     return (
@@ -21,5 +21,5 @@ export default async function CoveragePage() {
     );
   }
 
-  return <CoverageClient jurisdictions={jurisdictions} />;
+  return <CoverageClient jurisdictions={jurisdictions} newsSources={newsSources} />;
 }

@@ -1,5 +1,9 @@
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import type { CoverageJurisdiction, CoverageSourceSummary } from "@/lib/coverage/types";
+import type {
+  CoverageJurisdiction,
+  CoverageNewsSourceHealth,
+  CoverageSourceSummary
+} from "@/lib/coverage/types";
 
 const PAGE_SIZE = 1000;
 
@@ -66,9 +70,29 @@ type RawSourceRun = {
   error_text: string | null;
 };
 
+type RawNewsSource = {
+  id: string;
+  slug: string;
+  name: string;
+  active: boolean;
+  schedule_cron: string | null;
+  schedule_timezone: string | null;
+  config: Record<string, unknown> | null;
+};
+
+type RawSystemAlert = {
+  alert_key: string;
+  severity: string;
+  scope: Record<string, unknown> | null;
+  message: string;
+  raised_at: string | null;
+  last_seen_at: string | null;
+  cleared_at: string | null;
+};
+
 type CoverageDataResult =
-  | { data: CoverageJurisdiction[]; error: null }
-  | { data: CoverageJurisdiction[]; error: string };
+  | { data: CoverageJurisdiction[]; newsSources: CoverageNewsSourceHealth[]; error: null }
+  | { data: CoverageJurisdiction[]; newsSources: CoverageNewsSourceHealth[]; error: string };
 
 async function fetchAllRows<T>(
   supabase: SupabaseServerClient,
@@ -150,6 +174,72 @@ function latestRunForSource(
   return latest;
 }
 
+function latestRunForNewsSource(runs: RawSourceRun[], sourceName: string) {
+  let latest: RawSourceRun | null = null;
+
+  for (const run of runs) {
+    if (run.source_name === sourceName && isRunNewer(run, latest)) {
+      latest = run;
+    }
+  }
+
+  return latest;
+}
+
+function latestAlertForNewsSource(alerts: RawSystemAlert[], sourceName: string) {
+  let latest: RawSystemAlert | null = null;
+
+  for (const alert of alerts) {
+    if (alert.cleared_at !== null || alert.scope?.source_name !== sourceName) {
+      continue;
+    }
+    const alertDate = alert.last_seen_at ?? alert.raised_at;
+    const latestDate = latest?.last_seen_at ?? latest?.raised_at;
+    if (!latest || (alertDate && (!latestDate || new Date(alertDate) > new Date(latestDate)))) {
+      latest = alert;
+    }
+  }
+
+  return latest;
+}
+
+function newsSourceHealthSummary(
+  source: RawNewsSource,
+  runs: RawSourceRun[],
+  alerts: RawSystemAlert[]
+): CoverageNewsSourceHealth {
+  const latest = latestRunForNewsSource(runs, source.slug);
+  const latestAlert = latestAlertForNewsSource(alerts, source.slug);
+  const recordsPulled = latest?.records_pulled ?? null;
+  const fetched = latest?.rows_updated ?? null;
+  const existing = latest?.rows_unchanged ?? null;
+  const failed =
+    recordsPulled !== null && fetched !== null
+      ? Math.max(0, recordsPulled - fetched - (existing ?? 0))
+      : null;
+
+  return {
+    id: source.id,
+    slug: source.slug,
+    name: source.name,
+    active: source.active,
+    paused: !source.active,
+    fetchPath: typeof source.config?.fetch_path === "string" ? source.config.fetch_path : "polite",
+    scheduleCron: source.schedule_cron,
+    scheduleTimezone: source.schedule_timezone,
+    lastRunAt: latest ? runTimestamp(latest) : null,
+    lastRunFinishedAt: latest?.finished_at ?? null,
+    lastRunHadError: Boolean(latest?.errors ?? latest?.error_text),
+    discoveredCount: recordsPulled,
+    fetchedCount: fetched,
+    failedCount: failed,
+    lastAlertKey: latestAlert?.alert_key ?? null,
+    lastAlertSeverity: latestAlert?.severity ?? null,
+    lastAlertMessage: latestAlert?.message ?? null,
+    lastAlertAt: latestAlert ? (latestAlert.last_seen_at ?? latestAlert.raised_at) : null
+  };
+}
+
 function sourceSummary(
   registration: RawSourceRegistration,
   runs: RawSourceRun[],
@@ -202,10 +292,18 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
     .order("name", { ascending: true });
 
   if (jurisdictionError) {
-    return { data: [], error: jurisdictionError.message };
+    return { data: [], newsSources: [], error: jurisdictionError.message };
   }
 
-  const [projects, reviewItems, sourceRegistrations, sourceRuns, researcherOverrides] = await Promise.all([
+  const [
+    projects,
+    reviewItems,
+    sourceRegistrations,
+    sourceRuns,
+    researcherOverrides,
+    newsSources,
+    systemAlerts
+  ] = await Promise.all([
     fetchAllRows<RawProject>(
       supabase,
       "projects",
@@ -226,6 +324,16 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
       supabase,
       "researcher_overrides",
       "project_id, cleared_at"
+    ),
+    fetchAllRows<RawNewsSource>(
+      supabase,
+      "news_sources",
+      "id, slug, name, active, schedule_cron, schedule_timezone, config"
+    ),
+    fetchAllRows<RawSystemAlert>(
+      supabase,
+      "system_alerts",
+      "alert_key, severity, scope, message, raised_at, last_seen_at, cleared_at"
     )
   ]);
 
@@ -234,9 +342,11 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
     reviewItems.error ??
     sourceRegistrations.error ??
     sourceRuns.error ??
-    researcherOverrides.error;
+    researcherOverrides.error ??
+    newsSources.error ??
+    systemAlerts.error;
   if (error) {
-    return { data: [], error };
+    return { data: [], newsSources: [], error };
   }
 
   const projectJurisdiction = new Map<string, string>();
@@ -316,5 +426,9 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
     } satisfies CoverageJurisdiction;
   });
 
-  return { data: jurisdictions, error: null };
+  const newsSourceHealth = newsSources.rows
+    .map((source) => newsSourceHealthSummary(source, sourceRuns.rows, systemAlerts.rows))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return { data: jurisdictions, newsSources: newsSourceHealth, error: null };
 }

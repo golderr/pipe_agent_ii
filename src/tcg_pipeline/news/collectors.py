@@ -113,6 +113,7 @@ class PoliteNewsCollector:
             raise ValueError(f"Unsupported fetch_path '{fetch_path}' for {self.source.slug}.")
         self._ensure_can_fetch(url)
         self._respect_rate_limit(url)
+        # Conditional GET is discovery-only for now; article refetch/update policy is D.late work.
         return fetch_article_pass0(url, client=self._client, user_agent=self.user_agent)
 
     def _discover_sitemap_urls(

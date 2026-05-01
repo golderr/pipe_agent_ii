@@ -22,10 +22,15 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import type { CoverageJurisdiction, CoverageSourceSummary } from "@/lib/coverage/types";
+import type {
+  CoverageJurisdiction,
+  CoverageNewsSourceHealth,
+  CoverageSourceSummary
+} from "@/lib/coverage/types";
 
 type CoverageClientProps = {
   jurisdictions: CoverageJurisdiction[];
+  newsSources: CoverageNewsSourceHealth[];
 };
 
 type QueueFilter = "any" | "pending" | "cleared" | "high";
@@ -227,6 +232,66 @@ function Metric({ label, value }: { label: string; value: string }) {
     <div className="min-w-28 border-l border-slate-200 pl-4 first:border-l-0 first:pl-0">
       <p className="text-xs text-slate-500">{label}</p>
       <p className="text-base font-semibold text-slate-950">{value}</p>
+    </div>
+  );
+}
+
+function NewsSourceHealthPanel({ sources }: { sources: CoverageNewsSourceHealth[] }) {
+  if (sources.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mb-4 rounded-md border border-slate-200 bg-white">
+      <div className="border-b border-slate-100 px-3 py-2">
+        <h2 className="text-sm font-semibold text-slate-950">News Source Health</h2>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {sources.map((source) => (
+          <div
+            className="grid gap-3 px-3 py-3 text-sm md:grid-cols-[minmax(12rem,1fr)_8rem_10rem_10rem_minmax(14rem,1fr)]"
+            key={source.id}
+          >
+            <div>
+              <p className="font-medium text-slate-950">{source.name}</p>
+              <p className="font-mono text-xs text-slate-500">{source.slug}</p>
+            </div>
+            <div>
+              <span
+                className={cn(
+                  "inline-flex h-6 items-center rounded border px-2 text-xs font-medium",
+                  source.paused
+                    ? "border-red-200 bg-red-50 text-red-700"
+                    : "border-teal-200 bg-teal-50 text-teal-800"
+                )}
+              >
+                {source.paused ? "Paused" : "Active"}
+              </span>
+            </div>
+            <div className="text-slate-700">
+              <p>{source.fetchPath}</p>
+              <p className="text-xs text-slate-500">{source.scheduleCron ?? "Manual"}</p>
+            </div>
+            <div className="text-slate-700">
+              <p>{formatDate(source.lastRunAt)}</p>
+              <p className="text-xs text-slate-500">{freshnessText(source.lastRunAt)}</p>
+            </div>
+            <div className="text-xs text-slate-600">
+              <p>
+                {number(source.discoveredCount ?? 0)} discovered, {number(source.fetchedCount ?? 0)} fetched,{" "}
+                {number(source.failedCount ?? 0)} failed
+              </p>
+              {source.lastAlertMessage ? (
+                <p className="mt-1 text-red-700">{source.lastAlertMessage}</p>
+              ) : source.lastRunHadError ? (
+                <p className="mt-1 text-red-700">Last run logged an error</p>
+              ) : (
+                <p className="mt-1 text-slate-500">No active alert</p>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -475,7 +540,7 @@ function SourceDetail({
   );
 }
 
-export function CoverageClient({ jurisdictions }: CoverageClientProps) {
+export function CoverageClient({ jurisdictions, newsSources }: CoverageClientProps) {
   const [filters, setFilters] = useState<CoverageFilters>(DEFAULT_FILTERS);
   const [pinnedIds, setPinnedIds] = useState<Set<string>>(new Set());
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -736,6 +801,8 @@ export function CoverageClient({ jurisdictions }: CoverageClientProps) {
           ))}
         </div>
       </div>
+
+      <NewsSourceHealthPanel sources={newsSources} />
 
       <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
         <table className="min-w-[1080px] w-full border-collapse text-left text-sm">
