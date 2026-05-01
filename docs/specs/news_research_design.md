@@ -1,10 +1,10 @@
 # Phase D — News Scraping & Deep Research Design
 
-> **Status:** Design — implementation contract for ROADMAP.md Phase D items D.1–D.7. D.8 (additional sources) and any cross-source corroboration ("deep research") work are explicitly deferred and routed to other phases.
+> **Status:** Design — implementation contract for ROADMAP.md Phase D items D.1–D.B. Additional sources, paid-source capability, advanced fetch, auto-apply, and cross-source corroboration ("deep research") are explicitly deferred to D-late or later phases.
 >
 > **Audience:** Engineers implementing Phase D. Researchers evaluating the system's behavior. A future contributor joining the team six months from now and asking "what is Phase D and why is it shaped this way?"
 >
-> **Last updated:** 2026-04-28 (v2 after senior review — see Revision History)
+> **Last updated:** 2026-05-01 (D.2-docs Urbanize pivot revision — see Revision History)
 > **Owner:** Nate Goldstein (researcher), pipeline maintainers (engineering)
 >
 > **Read alongside:**
@@ -20,6 +20,38 @@
 ---
 
 ## 0. Revision History
+
+### D.2-docs Urbanize pivot revision - 2026-05-01
+
+This revision makes the active Phase D scheduled-source design Urbanize-first
+instead of BizJournals-first.
+
+Active Phase D source posture:
+
+- `urbanize_la` is the only live scheduled-source pilot for D.2a/D.6.
+- `urbanize_la` is seeded as market-unscoped (`market_id = NULL`,
+  `jurisdiction_id = NULL`). The matcher decides whether each reference belongs
+  to an active market or should remain discarded/new-candidate signal.
+- The unscoped branch in `news_matcher` project scoping is load-bearing. Do not
+  replace it with source-specific `if market_slug == ...` maps.
+- `bizjournals_la` remains mapped to `news_article`, but is inactive and
+  unscheduled until D.late.C ships paid-source capability.
+- D.B prices the full Urbanize 12-month URL set observed in D.2v (988 URLs with
+  `lastmod >= 2025-05-01`), not an LA-filtered subset.
+
+D.2a/D.6 gates added by this revision:
+
+- D.2a must repeat the five-URL validation through the seeded `urbanize_la`
+  source and host-routing path. D.2v used `news_paste_a_link`, so source-specific
+  routing was not exercised.
+- Before D.6 enables the cron, rerun those five URLs in staging with an Anthropic
+  key and verify Haiku triage plus Opus extraction/integration output.
+- Pass 1 tuning for comma-formatted unit counts, title/headline-only addresses,
+  and completion-date phrases is promoted to explicit D.2a-prep work before
+  high-volume backfill.
+- The initial cron candidate is `30 7 * * *` in `America/Los_Angeles`, roughly
+  75-90 minutes after the observed Urbanize RSS publication window
+  (`06:00`-`06:15` PT). D.6 may add jitter around that configured time.
 
 ### D.2v source validation addendum - 2026-04-30
 
@@ -116,7 +148,8 @@ The downstream consumer side — `developer.py`, `units.py`, `delivery_year.py`,
 
 ### 2.1 Goals
 
-- Reliably collect news articles from BizJournals LA on a daily schedule, plus accept any URL pasted by a researcher.
+- Reliably collect news articles from configured polite sources, with Urbanize LA
+  as the first live scheduled pilot, plus accept any URL pasted by a researcher.
 - Extract structured project references, status signals, developer names, unit counts, delivery dates, and operational signal flags from article text.
 - Match extracted references against existing projects, propose new projects when no match is plausible, or discard when no project is meaningfully described.
 - Surface every match decision and every evidence row to the researcher through the existing Review Queue. Nothing in Phase D auto-applies to projects.
@@ -127,7 +160,10 @@ The downstream consumer side — `developer.py`, `units.py`, `delivery_year.py`,
 
 - **Cross-source LLM corroboration** ("deep research" — given an article mentions Project X, agentically search permits, CoStar, and other articles for confirmation). The roadmap names "Deep Research" but does not define items. Corroboration is the resolution engine's job; new evidence already gets resolved against all existing evidence on the project. Adding agentic LLM corroboration would explode cost, latency, and failure modes. **Routed to Phase E** as a resolution-engine refinement; see §25.2.
 - **Auto-apply for high-confidence article matches.** All article-derived changes go through the Review Queue in Phase D. Auto-apply is a future refinement once researchers have built confidence in extraction quality. See §25 for the deferred follow-up.
-- **Additional news sources** (D.8). The Architect, Urbanize LA, Curbed LA, LA Times — deferred. The schema and pipeline are designed for multi-source from day one, but only BizJournals is wired up.
+- **Additional live sources beyond Urbanize** (D.late.E1/E2/C). LA YIMBY, The
+  Real Deal LA, BizJournals LA, and other publishers are deferred until the
+  Urbanize path proves the generic collector. The schema and pipeline are
+  designed for multi-source from day one.
 - **Sentiment scoring** as a numeric field. Sentiment is captured as discrete signal flags (`community_opposition`, `lawsuit_filed`, etc.), not a `-1.0..1.0` score.
 - **Article body redistribution.** Articles are stored in the database for internal use only. They never leave the tool.
 
@@ -141,7 +177,7 @@ The downstream consumer side — `developer.py`, `units.py`, `delivery_year.py`,
               ┌───────────────────────────────────────────────────────┐
               │                Render Worker (new)                     │
               │                                                        │
-   schedule ─►│  scheduler ──► fetcher_bizjournals ──┐                │
+   schedule ─►│  scheduler ──► polite_news_collector ─┐                │
               │                                       │                │
    FastAPI ──►│  paste_a_link  ──────────────────────┼─► ingest_pipeline
    /research/ │                                       │     ├─ Pass 0  │
@@ -181,7 +217,7 @@ The downstream consumer side — `developer.py`, `units.py`, `delivery_year.py`,
               │   /research/extractions/* (audit)      │
               │   /research/graveyard     (discarded)  │
               │   /research/cost          (admin)      │
-              │   /research/auth/bizjournals (cookies) │
+              │   /research/admin + source health       │
               │                                        │
               └────────────────────────────────────────┘
                                   ▲
@@ -200,14 +236,18 @@ The downstream consumer side — `developer.py`, `units.py`, `delivery_year.py`,
 ### 3.2 Process boundaries
 
 - **Render Worker (new).** Long-running Python process. Roles:
-  - Scheduled news scraping (BizJournals daily, configurable per source).
+  - Scheduled news scraping (Urbanize LA pilot, configurable per source).
   - Consumer of the existing C.tail.1 RQ/Redis scrape_jobs queue (`src/tcg_pipeline/workers/scrape_jobs.py:26`); Phase D registers new job kinds — see §12.
   - Article ingest pipeline orchestrator (Pass 0–3).
   - Article matcher.
   - Evidence integrator.
   - Cost tracking + alert dispatch.
   - **Also retroactively unblocks C.l** for non-LADBS Socrata sources by consuming their queued `scrape_jobs` rows.
-- **FastAPI (existing service, extended).** Adds a small `/research/*` surface for paste-a-link, ingest status reads, audit reads, graveyard browse, cost admin, and BizJournals auth rotation. Mutating endpoints stage `scrape_jobs` rows that the Worker consumes; FastAPI itself does not run Playwright or call LLMs.
+- **FastAPI (existing service, extended).** Adds a small `/research/*` surface for
+  paste-a-link, ingest status reads, audit reads, graveyard browse, cost admin,
+  source health/admin actions, and later paid-source auth rotation. Mutating
+  endpoints stage `scrape_jobs` rows that the Worker consumes; FastAPI itself
+  does not fetch articles or call LLMs.
 - **Next.js (existing).** Adds the paste-a-link UI, graveyard browser, news ops admin tile in Coverage, and renders news-derived review items through the existing Review Queue surfaces (already news-aware via `render_news_article_snippet`).
 - **Postgres (Supabase).** All durable state. New tables described in §4. RLS conventions match `data_model_changes.md`: authenticated SELECT only for read-only client surfaces; mutations service-role-only via FastAPI / Worker.
 
@@ -239,15 +279,15 @@ A registry of news publications we ingest from. Lets us add new sources without 
 ```sql
 CREATE TABLE news_sources (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  slug              TEXT NOT NULL UNIQUE,            -- 'bizjournals_la'
-  name              TEXT NOT NULL,                   -- 'L.A. Business Journal'
+  slug              TEXT NOT NULL UNIQUE,            -- 'urbanize_la'
+  name              TEXT NOT NULL,                   -- 'Urbanize LA'
   base_url          TEXT NOT NULL,
-  collector_class   TEXT NOT NULL,                   -- 'BizJournalsCollector'
+  collector_class   TEXT NOT NULL,                   -- 'PoliteNewsCollector'
   active            BOOLEAN NOT NULL DEFAULT TRUE,
-  schedule_cron     TEXT,                            -- '0 13 * * *' (daily 06:00 PT)
+  schedule_cron     TEXT,                            -- '30 7 * * *' (daily 07:30 PT)
   schedule_timezone TEXT,                            -- IANA TZ for schedule_cron, e.g. 'America/Los_Angeles'
   config            JSONB,                           -- collector-specific config
-  market_id         UUID REFERENCES markets(id),     -- null = multi-market
+  market_id         UUID REFERENCES markets(id),     -- null = unscoped; matcher decides relevance
   jurisdiction_id   UUID REFERENCES jurisdictions(id),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -256,17 +296,36 @@ CREATE TABLE news_sources (
 CREATE INDEX ix_news_sources_active ON news_sources(active);
 ```
 
-Seeded with one row at migration time:
+Active scheduled seed row for D.2a:
 
 ```sql
-INSERT INTO news_sources (slug, name, base_url, collector_class, schedule_cron, schedule_timezone, market_id, jurisdiction_id)
-VALUES ('bizjournals_la', 'L.A. Business Journal', 'https://www.bizjournals.com/losangeles',
-        'BizJournalsCollector', '0 13 * * *', 'America/Los_Angeles',
-        (SELECT id FROM markets WHERE slug = 'los_angeles'),
-        (SELECT id FROM jurisdictions WHERE slug = 'city_of_los_angeles'));
+INSERT INTO news_sources (
+  slug, name, base_url, collector_class, active,
+  schedule_cron, schedule_timezone, config, market_id, jurisdiction_id
+)
+VALUES (
+  'urbanize_la',
+  'Urbanize LA',
+  'https://la.urbanize.city',
+  'PoliteNewsCollector',
+  TRUE,
+  '30 7 * * *',
+  'America/Los_Angeles',
+  '{
+    "fetch_path": "polite",
+    "hosts": ["la.urbanize.city"],
+    "rss_urls": ["https://la.urbanize.city/rss.xml"],
+    "sitemap_urls": ["https://la.urbanize.city/sitemap.xml"],
+    "robots_url": "https://la.urbanize.city/robots.txt",
+    "rate_limit_seconds": 2,
+    "source_strategy_doc": "docs/sources/news/urbanize_la.md"
+  }'::jsonb,
+  NULL,
+  NULL
+);
 ```
 
-`schedule_cron` is informational; the actual cadence is enforced by the Worker's scheduler reading these rows.
+`schedule_cron` is informational; the actual cadence is enforced by the Worker's scheduler reading these rows. `bizjournals_la` may exist for historical migrations and orphan-link compatibility, but it must be `active = FALSE` with `schedule_cron = NULL` until D.late.C ships paid-source capability.
 
 ### 4.2 `news_articles`
 
@@ -337,7 +396,10 @@ Notes on shape:
 - **`body_text`** is the LLM input. Stable plaintext with stable character offsets — these offsets are referenced by `passage_excerpts.offset_start/end` in extractions and snippets.
 - **`fetch_status`** values cover every terminal outcome. No article fetched is ever silently dropped — even `fetch_failed` and `paywalled` rows persist with `fetch_error_text`.
 - **`current_extraction_id`** is updated in lockstep with re-extraction; `current_extraction_version` is the auditable version counter. Old extractions remain queryable by `news_extractions.article_id`.
-- **`paywall_state`** reflects the response we actually got. With cookie-injection auth, this should be `subscriber_only` for BizJournals. If we get `metered` we know our session is invalid (see §16).
+- **`paywall_state`** reflects the response we actually got. Urbanize validation
+  articles all returned `open`; no speculative Urbanize paywall behavior should
+  be added until a real gated article is observed. Paid-source session/paywall
+  semantics are deferred to D.late.C (see §16).
 
 ### 4.3 `news_extractions`
 
@@ -348,7 +410,7 @@ CREATE TABLE news_extractions (
   id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   article_id               UUID NOT NULL REFERENCES news_articles(id) ON DELETE CASCADE,
   pass                     TEXT NOT NULL,             -- 'triage', 'extraction', 'reextraction'
-  triggered_by             TEXT NOT NULL,             -- 'initial', 'prompt_version_change', 'pass1_pass2_conflict', 'pass2_low_confidence', 'pass2_new_candidate', 'user_reextract'
+  triggered_by             TEXT NOT NULL,             -- 'initial', 'prompt_version_change', 'pass1_pass2_conflict', 'pass2_low_confidence', 'pass2_parse_error', 'pass2_new_candidate', 'user_reextract'
   supersedes_extraction_id UUID REFERENCES news_extractions(id),
   prompt_id                TEXT NOT NULL,             -- 'triage_v3', 'extract_v7', 'reextract_v2'
   prompt_version           TEXT NOT NULL,             -- 'v7' (matches prompt_id suffix)
@@ -526,7 +588,7 @@ Initial seed (full list in §8.6). Adding flags is reviewer-driven; a CLI `tcg-p
 
 ### 4.8 `service_credentials`
 
-Secure storage for third-party credentials (BizJournals cookie state, future news-source cookies, etc.).
+Secure storage for third-party credentials (D.late.C paid-source cookie state, future news-source cookies, etc.).
 
 ```sql
 CREATE TABLE service_credentials (
@@ -556,7 +618,7 @@ A live alert table backing the Coverage banner and email-dispatch dedup. One row
 ```sql
 CREATE TABLE system_alerts (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  alert_key           TEXT NOT NULL,                  -- 'bizjournals_session_invalid' | 'cost_warn_cap' | 'cost_hard_cap' | 'worker_stale' | 'extraction_error_rate' | 'fetch_failure_rate' | 'source_dark'
+  alert_key           TEXT NOT NULL,                  -- 'source_auth_invalid' | 'cost_warn_cap' | 'cost_hard_cap' | 'worker_stale' | 'extraction_error_rate' | 'fetch_failure_rate' | 'source_dark'
   severity            TEXT NOT NULL,                  -- 'info' | 'medium' | 'high'
   scope               JSONB,                          -- e.g., {news_source_id: '<uuid>'} or {jurisdiction_id: '<uuid>'}
   message             TEXT NOT NULL,
@@ -595,7 +657,7 @@ Each worker writes its own row every 30s. The health endpoint compares `NOW() - 
 
 ### 4.11 `service_credential_validations`
 
-Audit + last-known-state for credential-payload validity. Drives the BizJournals-cookie status surface.
+Audit + last-known-state for credential-payload validity. Drives D.late.C paid-source cookie status surfaces.
 
 ```sql
 CREATE TABLE service_credential_validations (
@@ -611,11 +673,11 @@ CREATE TABLE service_credential_validations (
 CREATE INDEX ix_service_credential_validations_credential ON service_credential_validations(credential_slug, validated_at DESC);
 ```
 
-Latest-row-per-slug answers the FastAPI `/research/auth/bizjournals/status` query.
+Latest-row-per-slug answers D.late.C FastAPI auth-status queries such as `/research/auth/bizjournals/status`.
 
 ### 4.12 `news_admin_actions`
 
-CLI / admin audit rows for actions that don't touch a project (so don't fit `change_log`): `auth-bizjournals` runs, prompt-version bumps, cost-cap bumps, source pause/resume, signal-flag registry edits.
+CLI / admin audit rows for actions that don't touch a project (so don't fit `change_log`): paid-source auth runs, prompt-version bumps, cost-cap bumps, source pause/resume, signal-flag registry edits.
 
 ```sql
 CREATE TABLE news_admin_actions (
@@ -661,7 +723,7 @@ The corrected posture:
 | `news_signal_flag_registry` | SELECT (full row) | full |
 | `system_alerts` | SELECT (full row) — drives the Coverage banner | mutation via FastAPI / Worker only |
 | `worker_heartbeats` | SELECT (full row) — drives the Coverage worker-status indicator | only the Worker writes |
-| `service_credential_validations` | **No SELECT.** Status comes through FastAPI `/research/auth/bizjournals/status`. | full |
+| `service_credential_validations` | **No SELECT.** Status comes through D.late.C FastAPI auth-status routes. | full |
 | `service_credentials` | **No SELECT, no anything.** Service role only. | service role only |
 | `news_admin_actions` | SELECT (full row) — read-only audit view | mutation via Worker / FastAPI only |
 
@@ -744,7 +806,7 @@ Two Alembic migrations:
 **`2026_05_NN_create_news_research_phase_d_tables`** — the news content tables:
 
 0. Create `news_summary_reader` role (`NOLOGIN`) as a marker role for the summary-view boundary.
-1. `news_sources` + seed `bizjournals_la`.
+1. `news_sources` + seed `news_paste_a_link`; D.2a later seeds active unscoped `urbanize_la` and disables/unschedules historical `bizjournals_la`.
 2. `news_articles` + `news_articles_summary` view per §4.14.
 3. `news_extractions` + `news_extractions_summary` view per §4.14.
 4. `news_project_references` + `news_project_references_summary` view excluding `passage_excerpts`.
@@ -758,7 +820,7 @@ Two Alembic migrations:
 
 10. `scrape_jobs`: add `kind TEXT NOT NULL DEFAULT 'collector_run'`, `target_payload JSONB`. Make `jurisdiction_id` nullable. Drop the existing partial unique index on `(jurisdiction_id, source_name) WHERE status IN ('queued','running')`. Replace with `(jurisdiction_id, source_name, kind) WHERE kind = 'collector_run' AND status IN ('queued','running')` so collector-style scheduled jobs remain de-duplicated while news jobs do not collide. (See §12.2 for the news-job de-dup story.)
 11. `evidence`: add `superseded_at TIMESTAMPTZ NULL` and a partial index `WHERE superseded_at IS NULL` for resolver reads. (See §15.5.)
-12. `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`: add `bizjournals_la`, `news_paste_a_link`, `news_backfill`, `news_reextraction` → `news_article` per §5.1. This is a code change shipped alongside the migration (the dict lives in `src/tcg_pipeline/source_tiers.py`, not the database) but must land in the same release so orphan-evidence accept works.
+12. `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`: add `bizjournals_la`, `urbanize_la`, `news_paste_a_link`, `news_backfill`, `news_reextraction` → `news_article` per §5.1. This is a code change shipped alongside the migration (the dict lives in `src/tcg_pipeline/source_tiers.py`, not the database) but must land in the same release so orphan-evidence accept works.
 
 A third follow-on migration adds the trigger or worker-side aggregation that updates `news_extraction_costs` from `news_extractions` inserts.
 
@@ -840,12 +902,12 @@ A third follow-on migration adds the trigger or worker-side aggregation that upd
   "article_id": "uuid...",
   "extraction_id": "uuid...",
   "reference_id": "uuid...",
-  "publication": "L.A. Business Journal",
-  "publisher": "Bizjournals",
-  "source_name": "L.A. Business Journal",
+  "publication": "Urbanize LA",
+  "publisher": "urbanize_la",
+  "source_name": "Urbanize LA",
   "published_at": "2026-04-08",
   "author": "Jane Reporter",
-  "url": "https://www.bizjournals.com/...",
+  "url": "https://la.urbanize.city/post/...",
   "title": "Helio breaks ground on 310-unit project",
   "body_excerpt": "First 600 chars of the article body for the snippet renderer detail line"
 }
@@ -857,7 +919,7 @@ This is a denormalization on purpose. The evidence row carries everything the re
 
 Phase D follows the existing convention in `src/tcg_pipeline/source_tiers.py`:
 
-- `source_runs.source_name` carries the **runtime source slug** (the publisher / job-kind identifier — e.g., `bizjournals_la`, `news_paste_a_link`).
+- `source_runs.source_name` carries the **runtime source slug** (the publisher / job-kind identifier — e.g., `urbanize_la`, `news_paste_a_link`).
 - `evidence.source_type` carries the **logical type** (`news_article` for all news, mirroring how `ladbs_permits` and `ladbs_permit_activity` both map to `ladbs_permit`).
 - `get_logical_source_type(source_name)` is the dict lookup that converts.
 
@@ -869,22 +931,23 @@ The Phase D migration adds these entries to `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`
 LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME = {
     # ... existing LADBS / Pipedream / CoStar entries ...
     "bizjournals_la":     "news_article",
+    "urbanize_la":        "news_article",
     "news_paste_a_link":  "news_article",
     "news_backfill":      "news_article",
     "news_reextraction":  "news_article",
 }
 ```
 
-When a future news source is added (D.8 — Architect, Urbanize, etc.), the source_runs slug for that publisher gets one entry mapped to `news_article` and is referenced in `news_sources.slug`. The convention is "one slug per publisher OR per ingest pathway, all mapping to the same logical type."
+When a future news source is added (D.late.E1/E2/C), the source_runs slug for that publisher gets one entry mapped to `news_article` and is referenced in `news_sources.slug`. The convention is "one slug per publisher OR per ingest pathway, all mapping to the same logical type."
 
 How each Phase D ingest path uses these slugs:
 
 | Ingest path | `source_runs.source_name` | `evidence.source_type` |
 |---|---|---|
-| Scheduled BizJournals scrape | `bizjournals_la` | `news_article` |
-| Paste-a-link, BizJournals URL | `bizjournals_la` (publisher detected from URL host) | `news_article` |
+| Scheduled Urbanize scrape | `urbanize_la` | `news_article` |
+| Paste-a-link, Urbanize URL after D.2a host routing | `urbanize_la` (publisher detected from URL host) | `news_article` |
 | Paste-a-link, unknown publisher | `news_paste_a_link` | `news_article` |
-| 8-week backfill | `news_backfill` | `news_article` |
+| 12-month Urbanize backfill | `news_backfill` or `urbanize_la` run context, with article source `urbanize_la` | `news_article` |
 | Re-extraction (prompt-version sweep, conflict-triggered) | `news_reextraction` | `news_article` |
 
 The result: orphan evidence written by any news ingest path can be linked on accept of any news-source-run review item, because all of them resolve to the same logical type. The publisher-specific attribution survives in `news_articles.news_source_id` and the source_run's runtime slug.
@@ -893,28 +956,39 @@ The result: orphan evidence written by any news ingest path can be linked on acc
 
 ## 6. Component 1 — Article Fetcher
 
-### 6.1 BizJournals collector
+### 6.1 Generic polite NewsCollector
 
-Implements the existing `BaseCollector` interface (`src/tcg_pipeline/collectors/base.py`).
+D.2a implements a config-driven polite collector, not a publisher-specific
+Urbanize scraper and not the deferred BizJournals paid-source path. It reads
+`news_sources.config` (or the source YAML/doc equivalent) for:
+
+- `fetch_path`: `polite` or `advanced`; `advanced` hard-fails with a system
+  alert until D.late.ADV implements it.
+- `hosts`: hostnames routed to this source, used by paste-a-link and scheduled
+  discovery.
+- `rss_urls`: feeds used for incremental discovery.
+- `sitemap_urls` / archive URLs: used for dry-run and backfill discovery.
+- `robots_url`, robots cache TTL, crawl-delay handling, per-host rate limit,
+  retry/backoff policy, `Retry-After` handling, conditional GET settings, and
+  source strategy doc path.
 
 ```python
-class BizJournalsCollector(BaseCollector):
-    source_name = "bizjournals_la"
+class PoliteNewsCollector:
+    fetch_path = "polite"
 
     async def discover_urls(self, since: datetime) -> list[str]:
-        """Return article URLs published since `since`."""
-        # 1. Load auth.json from service_credentials('bizjournals_session').
-        # 2. Use httpx to fetch the section index (https://www.bizjournals.com/losangeles/news/real-estate)
-        #    with the auth cookies. The section index is server-rendered; readability + selectors
-        #    extract article links and dates. No Playwright needed for discovery.
-        # 3. Filter for published_at >= since.
-        # 4. Return canonical-URL list.
+        """Return canonical article URLs discovered from configured feeds/sitemaps."""
+        # 1. Load the source config and source strategy doc pointer.
+        # 2. Fetch robots.txt with a 24h cache; refuse disallowed paths.
+        # 3. Fetch configured RSS URLs for incremental runs.
+        # 4. Fetch configured sitemap/archive URLs for backfill dry-runs.
+        # 5. Canonicalize, dedupe, and return URLs published/modified since `since`.
 
     async def fetch_article(self, url: str) -> ArticleFetchResult:
-        """Fetch one article. Returns body+metadata or a structured failure."""
-        # Try httpx + readability-lxml first (cheap path).
-        # If the page renders empty body (SPA hydration), fall back to Playwright headless
-        # with storageState=auth.json. One retry, then mark fetch_failed.
+        """Fetch one article through the polite path."""
+        # Use httpx + trafilatura/readability with an identifying User-Agent.
+        # Respect robots, per-host limits, Retry-After, and conditional GET.
+        # Persist structured failures; do not silently drop a URL.
 ```
 
 `ArticleFetchResult` shape:
@@ -938,26 +1012,34 @@ class ArticleFetchResult:
     fetch_error_text: str | None
 ```
 
-### 6.2 Auth cookie injection (the critical reliability decision)
+### 6.2 Urbanize LA source configuration
 
-Auto-login Playwright is a known maintenance hazard. We use **session-state injection** instead:
+Urbanize LA is the only live Phase D scheduled source:
 
-1. Researcher runs `tcg-pipeline news auth-bizjournals` once. The CLI:
-   - Launches a **visible** Playwright Chromium window.
-   - Researcher logs into bizjournals.com manually.
-   - Researcher hits Enter in the terminal.
-   - CLI dumps Playwright's `storageState` (cookies + localStorage + IndexedDB) to a JSON blob.
-   - Encrypts the blob with `pgcrypto` and inserts/updates the `service_credentials` row keyed by slug `'bizjournals_session'`.
-2. The Worker reads `service_credentials('bizjournals_session')` once per scrape run, decrypts, writes to a temp file, and uses it as `storageState` when launching Playwright.
-3. Session-validity detection runs on every fetch:
-   - HTTP 302 redirect to `/login` → invalid.
-   - `paywall_state` parsed as `metered` for an article that should be subscriber-only → invalid.
-   - JSON-LD or HTML markers indicating logged-out state → invalid.
-4. On invalid detection: Worker pauses BizJournals scraping, sets a flag, sends an email to `ng@theconcordgroup.com`, and raises a Coverage banner. Researcher reruns `tcg-pipeline news auth-bizjournals`; cookies refresh; Worker auto-resumes on next loop iteration.
+- Host: `la.urbanize.city`
+- Incremental discovery: `https://la.urbanize.city/rss.xml`
+- Backfill discovery: `https://la.urbanize.city/sitemap.xml`
+- Robots: `https://la.urbanize.city/robots.txt`
+- Fetch path: `polite`
+- Scope: market-unscoped (`market_id = NULL`, `jurisdiction_id = NULL`)
+- Initial cron candidate: `30 7 * * *` in `America/Los_Angeles`
 
-This approach has the property that **none of our automation interacts with the login UI**. Login is the most fragile part of any scraper; eliminating it is worth a lot.
+The source is intentionally unscoped. The matcher decides relevance across live
+markets; Orange County/Santa Monica/non-modeled articles may become discarded or
+new-candidate signal instead of being filtered at collection time.
 
-If cookie expiry is more frequent than expected (< 14 days), we can add an automated relogin path as a follow-on. Default ACBJ session TTLs are 30+ days for "remember me," which we set during the manual login.
+D.2v validated the five representative URLs through `news_paste_a_link`, not
+through `urbanize_la`. D.2a must repeat that validation after the source row and
+host routing are in place. Before D.6 turns on the cron, rerun the same URLs in
+staging with an Anthropic key so Haiku triage and Opus extraction/integration are
+smoke-tested against real Urbanize text.
+
+### 6.2.1 Paid-source auth is deferred
+
+Cookie/session auth for BizJournals and other paid sources is D.late.C. The
+original session-state injection design remains valid for that later work, but
+it is not part of the active D.2a/D.6 Urbanize path. `bizjournals_la` should stay
+inactive and unscheduled until the paid-source capability ships.
 
 ### 6.3 URL canonicalization
 
@@ -968,7 +1050,7 @@ def canonicalize_url(url: str) -> str:
     2. Strip query parameters: utm_*, ref, fbclid, gclid, mc_cid, mc_eid, _hsenc, _hsmi, source, share.
     3. Strip trailing slash from path.
     4. Strip URL fragment.
-    5. Preserve all other query params (some BizJournals tracking is in the path; rare, but possible).
+    5. Preserve all other query params that may be source-significant.
     """
 ```
 
@@ -984,7 +1066,7 @@ Authorization: Bearer <supabase token>
 Content-Type: application/json
 
 {
-  "url": "https://www.bizjournals.com/losangeles/news/...",
+  "url": "https://la.urbanize.city/post/example-project-update",
   "force_reextract": false,
   "force_project_id": null,
   "note": "optional researcher note"
@@ -1012,7 +1094,11 @@ Behavior:
 3. The Worker picks up the job, runs the full pipeline (fetch → Pass 0/1/2/3 → match → integrate).
 4. UI polls the article status (or subscribes via WebSocket — out of scope; HTTP polling is fine for MVP).
 
-For paste-a-link, **non-BizJournals URLs are fetched via httpx + readability** as the cheap path; Playwright fallback runs only when the cheap path returns empty body. This keeps paste-a-link working for any publisher without Phase D needing to ship per-publisher collectors.
+For paste-a-link, host routing checks configured news sources first. A routed
+Urbanize URL uses the `urbanize_la` source context; unknown hosts fall back to
+`news_paste_a_link`. D.2a/D.2b use the polite fetch path only. If a source config
+requests `fetch_path = advanced` before D.late.ADV exists, the worker records a
+hard failure and system alert rather than trying a browser/proxy fallback.
 
 ---
 
@@ -1026,17 +1112,17 @@ Outputs: a populated `news_articles` row with `fetch_status`, `body_text`, metad
 Steps:
 
 1. Persist `raw_html` (TOAST-compressed automatically). Compute `raw_html_hash`.
-2. Run readability-lxml (or trafilatura) to extract `body_text`. Trafilatura's `extract()` with `output_format='txt'` is preferred — it handles ACBJ markup well and produces stable plaintext.
+2. Run readability-lxml (or trafilatura) to extract `body_text`. Trafilatura's `extract()` with `output_format='txt'` is preferred for the polite path because it handled Urbanize validation pages well and produces stable plaintext.
 3. Compute `body_text_hash`. If a previously-ingested article has the same body hash, log a `notes` entry and treat as the same article (skip extraction; Pass-2 already done).
 4. Parse JSON-LD from `<script type="application/ld+json">` for `headline`, `author.name`, `datePublished`, `articleSection`, `keywords`, `identifier`. Fall back to OpenGraph (`og:title`, `og:author`, `article:published_time`, `article:section`, `article:tag`).
-5. Detect `paywall_state` — if the body is < 200 chars and contains "subscribe" / "log in to read", mark `metered`. ACBJ subscriber-only flag is also detectable from a specific class on a stub element.
+5. Detect `paywall_state` — if the body is < 200 chars and contains "subscribe" / "log in to read", mark `metered`. Source-specific paid-wall markers are D.late.C unless observed on an active Phase D source.
 6. Update `news_articles` row: `fetch_status='fetched'`, `fetched_at=NOW()`, all metadata fields populated.
 
 **Pass 0 has no LLM cost.** It's pure text manipulation. It always runs. Re-extraction never re-runs Pass 0 (the article body is durable).
 
 ### 7.2 Pass 1 — Structural signal extraction
 
-Inputs: `news_articles.body_text` (plus title, byline, etc.).
+Inputs: `news_articles.body_text` plus title/headline metadata where noted.
 Outputs: `news_articles.structural_signals` JSONB blob, `structural_signals_at = NOW()`.
 
 The structural pass is a battery of regex / NER / dictionary lookups. It produces *candidates* with character offsets — it does not interpret which project they belong to. Its purpose is to give the LLM concrete anchors and to act as a sanity check on LLM output.
@@ -1064,8 +1150,8 @@ class StructuralSignal:
 
 Extractors:
 
-1. **`unit_count`** — `\b(\d{2,5})[-\s]?(?:unit|units|apartment|apartments|residences|residential\s+units|condos|condominium|condominiums|keys|rooms)\b` (case-insensitive). Canonical = the integer. Excludes obvious non-counts ("$310M unit").
-2. **`address`** — `usaddress.tag()` over the body, plus a regex pre-pass for street-numbered patterns. We bias toward LA address patterns (cardinal + numbered street + suffix). Canonical = the parsed `(street_number, street_name, suffix, city, zip)` tuple normalized through the existing `tcg_pipeline.matching.normalizer.normalize_address`.
+1. **`unit_count`** — `\b(\d{1,3}(?:,\d{3})+|\d{2,5})[-\s]?(?:unit|units|apartment|apartments|residences|residential\s+units|condos|condominium|condominiums|keys|rooms)\b` (case-insensitive). Canonical = the integer after stripping commas. Excludes obvious non-counts ("$310M unit").
+2. **`address`** — `usaddress.tag()` over the body and title/headline, plus a regex pre-pass for street-numbered patterns. We bias toward LA address patterns (cardinal + numbered street + suffix). Canonical = the parsed `(street_number, street_name, suffix, city, zip)` tuple normalized through the existing `tcg_pipeline.matching.normalizer.normalize_address`.
 3. **`case_number`** — `\b(CPC|VTT|TT|ENV|DIR|ZA|APCC|APCSV|APCNV|APCS|APCH|APCE|APCW)-\d{4}-\d+(-[A-Z0-9-]+)?\b`. Canonical = uppercased exact match.
 4. **`permit_number`** — PCIS pattern `\b\d{2}[A-Z]?\d{3}-?\d{5}-?\d{5}\b`.
 5. **`apn`** — LA APN patterns. `\b\d{4}-\d{3}-\d{3}\b` and variants.
@@ -1086,7 +1172,7 @@ Extractors:
    - `"opposition"`, `"opposed by"`, `"residents protested"`, `"community pushback"`, `"NIMBY"` → `signal_flag: community_opposition`.
    - `"construction loan"`, `"financing closed"`, `"secured financing"`, `"refinanced"` → `signal_flag: construction_financing_announced`.
    - `"leasing center open"`, `"sales office open"`, `"now leasing"`, `"now selling"`, `"pre-leasing"` → `signal_flag: sales_or_leasing_center_open`.
-10. **`delivery_phrase`** — `(expected to|scheduled to|will|set to|aiming to|projected to)\s+(deliver|open|complete|finish)\s+(in|by)?\s+(.+?\b(?:Q[1-4] \d{4}|early|mid|late) \d{4}|spring|summer|fall|winter)`. Canonical = best-effort parsed date.
+10. **`delivery_phrase`** — `(expected to|scheduled to|will|set to|aiming to|projected to)\s+(deliver|open|complete|finish)\s+(in|by)?\s+(.+?\b(?:Q[1-4] \d{4}|early|mid|late) \d{4}|spring|summer|fall|winter)` plus noun-first variants like `completion is expected in Fall 2027` and `expected completion in late 2027`. Canonical = best-effort parsed date.
 11. **`product_type_phrase`** — `\b(apartment(s)?|condo(s)?|condominium(s)?|townhom(e|es)|build-to-rent|BTR|single-family|micro[-\s]unit|co-living)\b`.
 12. **`age_restriction_phrase`** — `\b(senior\s+(housing|living|apartment(s)?)|55\+|62\+|student\s+housing|university\s+housing)\b`.
 13. **`affordable_split_phrase`** — `\b(\d{1,4})\s+(?:affordable|low-income|workforce|moderate-income|market-rate|market\s+rate)\b`. Also `\b(\d{1,3})%\s+(affordable|inclusionary)\b`.
@@ -1437,7 +1523,7 @@ We introduce `tcg_pipeline.matching.news_matcher` as a sibling module. It reuses
 ```python
 @dataclass
 class ArticleReferenceMatchInput:
-    market_id: UUID
+    market_id: UUID | None  # None means source is unscoped; query all active markets
     candidate_name: str | None
     candidate_address: str | None
     candidate_developer: str | None
@@ -1468,7 +1554,8 @@ class ArticleReferenceMatchInput:
 - Score ≥ 0.85 → `confirmed`. 0.65–0.84 → `possible`. < 0.65 → fall through.
 
 **Tier 3 — Developer + neighborhood + unit fingerprint** (used when address is absent).
-- Query `projects` filtered by market_id and:
+- Query `projects` filtered by `market_id` when present; for unscoped sources,
+  query all active markets and let scoring decide relevance. Then score:
   - `developer` ILIKE candidate_developer (canonicalized)
   - OR `costar_submarket` matches candidate_neighborhood
 - For each candidate, score:
@@ -1573,7 +1660,7 @@ The senior reviewer's concern: if confirmed-match news evidence auto-applies, a 
 2. **Researcher overrides are review-protected.** Any field with an active override will trigger `OVERRIDE_CONTRADICTION` rather than silently changing — the reviewer is notified.
 3. **Confidence chips on the queue.** Low-confidence article-derived changes get a visible LOW priority chip, sorting to the bottom.
 4. **Pass 3 catches load-bearing low-confidence + structural disagreements** before evidence is even written (§8.7).
-5. **Article-derived `STATUS_CHANGE` items have a distinctive `news_context` payload** so reviewers see at a glance "this came from BizJournals 2026-04-08, here's the passage" and can revert in one keystroke.
+5. **Article-derived `STATUS_CHANGE` items have a distinctive `news_context` payload** so reviewers see at a glance "this came from Urbanize LA 2026-04-08, here's the passage" and can revert in one keystroke.
 
 If confidence in extraction quality grows over time and reviewers consistently accept-new on confirmed-match news evidence, we eventually graduate to true auto-apply (no review item raised) per §25.1. Phase D ships with the conservative "post-apply review" model.
 
@@ -1581,7 +1668,11 @@ If confidence in extraction quality grows over time and reviewers consistently a
 
 Discovery accept (`new_candidate` / `possible_match`) requires a `source_run` on the review item per `review_workflow.py:1349`. Phase D creates source_runs as follows:
 
-- **Scheduled scrape:** one `source_runs` row per scrape kickoff, scoped to the news source's market/jurisdiction, `source_name=news_sources.slug`, `trigger_type='scheduled'`. All review items produced from articles in that scrape reference this source_run.
+- **Scheduled scrape:** one `source_runs` row per scrape kickoff, scoped to the
+  news source's configured market/jurisdiction when present or `market='unscoped'`
+  when the source is market-unscoped. `source_name=news_sources.slug`,
+  `trigger_type='scheduled'`. All review items produced from articles in that
+  scrape reference this source_run.
 - **Paste-a-link:** one `source_runs` row per paste, scoped to the article's inferred jurisdiction (or the news_source's default jurisdiction; or a sentinel "unknown jurisdiction" row when paste-a-link points at a non-LA URL — see §12.3 for the sentinel jurisdiction handling), `trigger_type='user_initiated'`, `initiated_by_user_id` populated.
 - **Backfill:** one `source_runs` row per backfill batch (per source). Review items reference the batch source_run.
 - **Re-extraction:** if the re-extraction generates new review items (the materially-changed-output gating in §15.3), they reference a fresh source_run with `trigger_type='backfill'` and a note pointing at the prompt-version bump.
@@ -1890,7 +1981,7 @@ Render starting plan: 1 worker instance, 1 scheduler-flagged. Scale to 2-3 worke
 
 ### 12.5 Scheduling
 
-`news_sources.schedule_cron` and `news_sources.schedule_timezone` are read every 60 seconds by the scheduler tick. Cron expressions are parsed via `croniter` in the source's IANA timezone (for `bizjournals_la`, `America/Los_Angeles`) so the intended local fire time survives DST changes. When a scheduled tick fires, the scheduler inserts a `scrape_jobs` row of kind `news_scrape` with `trigger_type='scheduled'`, then enqueues the matching RQ task.
+`news_sources.schedule_cron` and `news_sources.schedule_timezone` are read every 60 seconds by the scheduler tick. Cron expressions are parsed via `croniter` in the source's IANA timezone (for `urbanize_la`, `America/Los_Angeles`) so the intended local fire time survives DST changes. When a scheduled tick fires, the scheduler inserts a `scrape_jobs` row of kind `news_scrape` with `trigger_type='scheduled'`, then enqueues the matching RQ task. The initial Urbanize candidate is `30 7 * * *`, roughly 75-90 minutes after the observed RSS publication window; D.6 may apply jitter around that configured time.
 
 Process restarts (Render redeploys, OOM kills) are tolerated: the scheduler re-evaluates cron on startup against `derive_last_scheduled_scrape(source)` (computed from `source_runs` per the helper above — no column on `news_sources`) to decide whether a missed tick should fire. Missed daily ticks fire at most once per day.
 
@@ -1929,9 +2020,9 @@ Process restarts (Render redeploys, OOM kills) are tolerated: the scheduler re-e
 
 ### 12.7 Backfill mode
 
-`tcg-pipeline news backfill --source bizjournals_la --since 2026-03-03` runs an 8-week backfill (per the user's confirmed 8-week horizon). Backfill:
+`tcg-pipeline news backfill --source urbanize_la --since <12mo>` runs a 12-month Urbanize backfill. Backfill:
 
-1. Calls `BizJournalsCollector.discover_urls(since=...)` and gets the URL list. For LABJ at typical real-estate volume, this is ~200 URLs over 8 weeks (~25-30 articles/week real-estate-tagged).
+1. Calls `PoliteNewsCollector.discover_urls(since=...)` and gets the URL list from the configured sitemap/archive path. D.2v observed 988 Urbanize URLs with `lastmod >= 2025-05-01`; because `urbanize_la` is market-unscoped, D.B prices the full count, not an LA-filtered subset.
 2. Chunks the URL list into groups of 25 and inserts one `news_backfill_chunk` `scrape_jobs` row per chunk.
 3. The worker drains them through the normal pipeline.
 4. Cost-capped — if we hit the cap, queued chunks stay queued until the cap resets at midnight PT or the researcher bumps it.
@@ -1953,14 +2044,14 @@ All alerts go to two destinations:
 
 | Condition | Severity | Detection | Cooldown |
 |---|---|---|---|
-| BizJournals session invalid (cookie expired) | High | Two consecutive fetches return login redirect or `metered` paywall on subscriber-only article | Email immediately; banner persists until session refreshed; Worker pauses BizJournals scraping |
+| Source block/auth signal on active source | High | Repeated `401/403/429/503`, login redirect, or metered/subscriber-only marker where source config expects open access | Email immediately; banner persists until source is resumed; Worker pauses that source when policy requires it |
 | Worker heartbeat stale > 5 min | High | Health endpoint reports stale | Email; Render restarts dyno automatically; banner persists until heartbeat fresh |
 | Daily cost ≥ warn cap ($25) | Medium | Cost rollup check on each LLM call | Email once per day; banner persists until next midnight PT |
 | Daily cost ≥ hard cap ($35) | High | Same | Email; Worker pauses LLM calls (in-flight calls allowed to finish); banner persists until cap bumped or cap resets |
 | Pass-2 schema-invalid rate > 5% over last 100 calls | Medium | Rolling counter in Worker | Email once per hour while elevated; banner persists |
 | Pass-2 LLM API error rate > 10% over last 50 calls | Medium | Same | Email once per hour while elevated; banner |
 | Article fetch failure rate > 20% over last 50 fetches | Medium | Rolling counter | Email once per hour while elevated; banner |
-| Hard fetch error (HTTP 5xx repeated) on `bizjournals_la` for > 1 hour | Medium | Rolling counter | Email once per hour |
+| Hard fetch error (HTTP 5xx repeated) on active source for > 1 hour | Medium | Rolling counter | Email once per hour |
 
 ### 13.3 Cost cap enforcement (race-protected)
 
@@ -2014,7 +2105,7 @@ This writes `news_cost_caps.override_until = NOW() + 8h, override_hard_usd = 50`
 
 `/coverage` gets a "News Operations" tile (rendered when any of these are true):
 
-- Active BizJournals auth alert.
+- Active source pause/block/auth alert.
 - Active cost cap warning or hard pause.
 - Active extraction error rate alert.
 - Worker heartbeat stale.
@@ -2145,7 +2236,11 @@ A `tcg-pipeline news prune-extractions --before <date>` exists for genuine clean
 
 ---
 
-## 16. Auth / Credentials Management
+## 16. Auth / Credentials Management (D.late.C)
+
+Active D.2a/D.6 Urbanize collection does not require credentials. This section
+is retained as the paid-source design for D.late.C, with BizJournals as the first
+known consumer once that capability is approved and scheduled.
 
 ### 16.1 BizJournals cookie rotation
 
@@ -2241,36 +2336,40 @@ rate and cache reads below it.
 ### 17.2 Daily budget
 
 Assume:
-- 50 BizJournals articles fetched/day.
-- 60% triaged relevant (broad-net): 30 articles to Pass 2.
-- 20% trigger Pass 3: 6 articles to Pass 3.
+- 10-20 Urbanize URLs discovered on a typical weekday RSS run.
+- 50-60% triaged relevant (broad-net): 5-12 articles to Pass 2.
+- 20% trigger Pass 3: 1-3 articles to Pass 3.
 
 Daily cost depends on cache-hit behavior. For a tight scrape batch, a working
-estimate is `50 × $0.005 (triage) + 30 × $0.20 (extract) + 6 × $0.20
-(reextract) = $0.25 + $6.00 + $1.20 = ~$7.45/day`. Sporadic paste-a-link calls
+estimate is `20 × $0.005 (triage) + 12 × $0.20 (extract) + 3 × $0.20
+(reextract) = $0.10 + $2.40 + $0.60 = ~$3.10/day`. Sporadic paste-a-link calls
 are reserved at `$0.75` each to cover cache misses against the current LA
 glossary size.
 
 This is well under the $25 warn cap. The cap exists to catch:
 
 - Runaway loops (a bug that retries extraction).
-- Backfill spikes (8-week backfill could touch ~400 articles in one go).
+- Backfill spikes (12-month Urbanize backfill starts from the 988 URLs observed in D.2v).
 - Future expansion to multiple sources.
 
-### 17.3 Backfill cost (corrected from v1)
+### 17.3 Backfill cost (Urbanize D.B)
 
-v1 priced the 8-week backfill at 2,800 articles, which conflicted with §12.7's estimate of ~200 URLs. The 200-URL figure is the realistic LABJ real-estate volume (LABJ publishes ~25–30 real-estate-tagged articles per week, of which most reach the section index). v2 reconciles to ~200.
+D.2v observed 988 Urbanize URLs with `lastmod >= 2025-05-01`. Because
+`urbanize_la` is market-unscoped, the D.B dry-run prices the full URL set rather
+than filtering to LA-labeled articles before fetch/triage.
 
-For ~200 URLs: triage all = ~$1. Pass 2 on 60% (~120 articles) at cached-batch
-rates is roughly ~$24. Pass 3 on 20% of those (~24 articles) is roughly ~$5.
-Total backfill is now expected around ~$30-$40 depending on cache hit rate and
-article length.
+For 988 URLs: triage all is roughly ~$5. If 50-60% pass triage, Pass 2 touches
+~500-590 articles; at cached-batch rates that is roughly ~$100-$120, with Pass 3
+adding another ~$20-$25 if 20% of extracted articles re-extract. The dry-run
+must report ranges for relevance, projected LLM cost, cache-hit assumptions, and
+runtime instead of a single optimistic estimate.
 
 This may need a temporary cap bump above the default $35 hard cap or a multi-day
 backfill window. Researcher kicks off the backfill in the morning; it completes
 over a few hours when cap headroom allows.
 
-The 2,800-article figure remains useful as an upper bound when planning capacity for D.8 multi-source expansion; treat it as "headroom we have if we add 5+ news sources" rather than the BizJournals backfill estimate.
+The older 2,800-article figure remains useful as a multi-source expansion
+capacity sanity check, not as the Urbanize D.B estimate.
 
 ### 17.4 Caching effect
 
@@ -2318,13 +2417,13 @@ All routes auth-gated by Supabase JWT + `ALLOWED_EMAILS`. Mutations stage `scrap
 | `GET` | `/research/cost/today` | Today's spend, current cap, time until reset. |
 | `POST` | `/research/cost/bump` | Bump today's hard cap. Body `{cap_usd, expires_in_hours, note}`. |
 
-### 18.5 Auth
+### 18.5 Paid-source auth (deferred to D.late.C)
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/research/auth/bizjournals/status` | Returns `{valid, expires_at, last_validated_at, last_invalidated_at, last_invalidated_reason}`. |
-| `POST` | `/research/auth/bizjournals` | Receives an auth.json blob from the CLI. Server-side encryption + persist. |
-| `POST` | `/research/auth/bizjournals/validate` | Force a validation check. |
+| `GET` | `/research/auth/bizjournals/status` | D.late.C. Returns `{valid, expires_at, last_validated_at, last_invalidated_at, last_invalidated_reason}`. |
+| `POST` | `/research/auth/bizjournals` | D.late.C. Receives an auth.json blob from the CLI. Server-side encryption + persist. |
+| `POST` | `/research/auth/bizjournals/validate` | D.late.C. Force a validation check. |
 
 ### 18.6 Source admin
 
@@ -2352,15 +2451,11 @@ All `/research/*` routes use the privileged FastAPI DB session, validated by Sup
 `src/tcg_pipeline/cli.py` extensions (`tcg-pipeline news ...`):
 
 ```
-tcg-pipeline news auth-bizjournals
-    Refresh the BizJournals cookie. Opens a real browser; researcher logs in;
-    cookie is stored encrypted.
-
-tcg-pipeline news scrape --source bizjournals_la [--since YYYY-MM-DD] [--limit N]
+tcg-pipeline news scrape --source urbanize_la [--since YYYY-MM-DD] [--limit N]
     Run a scrape now (manually triggered). Writes scrape_jobs rows; Worker drains.
 
-tcg-pipeline news backfill --source bizjournals_la --since YYYY-MM-DD
-    Bulk backfill helper. Default 8 weeks if --since not set.
+tcg-pipeline news backfill --source urbanize_la --since YYYY-MM-DD
+    Bulk backfill helper. D.B uses a 12-month Urbanize horizon.
 
 tcg-pipeline news ingest-url <url> [--reextract] [--force-project <uuid>]
     Same as POST /research/articles, but from the CLI.
@@ -2378,8 +2473,12 @@ tcg-pipeline news cost [--since YYYY-MM-DD]
     Print cost rollup table.
 
 tcg-pipeline news doctor
-    Health check: cookie validity, prompt configuration, model availability,
+    Health check: source routing, robots/fetch config, prompt configuration, model availability,
     cost rollup integrity, Worker heartbeat. Prints a diagnostic.
+
+tcg-pipeline news auth-bizjournals
+    D.late.C only. Refresh the BizJournals cookie. Opens a real browser;
+    researcher logs in; cookie is stored encrypted.
 ```
 
 Each command writes audit rows so its execution is reproducible.
@@ -2392,10 +2491,10 @@ Each command writes audit rows so its execution is reproducible.
 
 | Failure | Detection | Recovery | Impact |
 |---|---|---|---|
-| BizJournals cookie expired | Auth-invalid response markers; next fetch fails | Email + banner; researcher runs `auth-bizjournals`; Worker resumes on next tick | New scrapes paused for hours, not days |
-| BizJournals login flow broken | Cookie validation fails after manual login | Researcher escalates; we revisit the discovery selectors | Total scrape pause until investigated |
+| Active source blocked/paused | Repeated `401/403/429/503`, robots disallow, or configured block marker | Email + banner; source pauses per policy until researcher resumes or config changes | New scrapes for that source pause; other sources continue |
+| Paid-source cookie expired (D.late.C) | Auth-invalid response markers; next fetch fails | Email + banner; researcher runs source auth CLI; Worker resumes on next tick | Paid-source scrapes paused for hours, not days |
 | Article fetch fails (transient network) | HTTP 5xx from origin | Retry with exponential backoff (3 attempts); persist `fetch_failed` after | Article retried automatically next tick |
-| Article body unreadable (anti-bot blocking) | Body < 200 chars on subscriber-only page | Falls back to Playwright; if still blocked, persist `parse_failed`; alert if rate > 20% | Per-article; rare unless source escalates |
+| Article body unreadable | Body < 200 chars or extractor returns no article-like text | Persist `parse_failed`; alert if rate > 20%. Advanced/browser fallback is D.late.ADV only. | Per-article; rare unless source escalates |
 | Anthropic API outage | Connection error / 5xx from anthropic | Retry with exponential backoff (3 attempts); enqueue extraction for later | Extractions resume when API recovers |
 | Anthropic rate limit | 429 from anthropic | Backoff per retry-after header; lower concurrency | Slows ingest, no data loss |
 | Anthropic schema-invalid response | Parse error on output_json | Persist row with parse_status='schema_invalid'; alert if rate > 5% | Article waits for prompt fix |
@@ -2407,8 +2506,8 @@ Each command writes audit rows so its execution is reproducible.
 | `news_articles` URL collision (race) | UNIQUE violation on `url_hash` | Deterministic — second worker reads existing row | Idempotent |
 | Re-extraction floods queue with cosmetic changes | Materially-changed gating in §15.3 | Filter at integrator | No queue noise |
 | Schema drift (column added but worker not updated) | Worker startup sanity check | Worker refuses to start; fix and redeploy | Prevents corruption |
-| Dependency upgrade breaks Playwright | CI test catches | Pin major versions; explicit upgrade testing | Caught pre-deploy |
-| `auth.json` payload corrupted | Validation step fails post-decrypt | Researcher reruns `auth-bizjournals` | Same as cookie expiry |
+| Dependency upgrade breaks fetch/extraction library | CI fixture test catches | Pin major versions; explicit upgrade testing | Caught pre-deploy |
+| Paid-source `auth.json` payload corrupted (D.late.C) | Validation step fails post-decrypt | Researcher reruns source auth CLI | Same as cookie expiry |
 | LLM emits a fake offset (offset doesn't exist in body) | Validate offsets server-side; mark passage with `valid_offset: false` | The passage still renders but without highlight; reviewer sees flag | Per-passage; soft |
 | Article published_at missing | Falls back to fetched_at | Evidence date is approximate; flag in evidence notes | Soft |
 | Two extractions in flight on the same article (race) | Single-flight guard in worker (`SELECT FOR UPDATE` on `news_articles.id`) | One waits, the other proceeds | Idempotent |
@@ -2419,10 +2518,10 @@ Each command writes audit rows so its execution is reproducible.
 
 These are the failure modes that must produce alerts within hours, not days:
 
-1. **Stale BizJournals login.** Email + banner instantly. Worker visibly paused.
+1. **Active source blocked or paused.** Email + banner quickly. Worker visibly paused for that source.
 2. **Worker not running.** Heartbeat staleness > 5 min triggers Render restart; > 30 min triggers email.
 3. **Cost cap reached.** Email + banner; Worker visibly paused on LLM calls.
-4. **Source went dark.** If `bizjournals_la` returns zero new URLs for > 36 hours during expected coverage window, alert.
+4. **Source went dark.** If `urbanize_la` returns zero new URLs for > 36 hours during expected coverage window, alert.
 
 ### 20.3 Replay / re-process semantics
 
@@ -2541,7 +2640,7 @@ Given any evidence row written by Phase D, a reviewer can trace:
 4. The extraction's `output_json` contains the full LLM input + output.
 5. Each `extracted_fields[field].highlights` references character offsets into `news_articles.body_text`.
 
-That's a complete chain from "the project's developer is Helio Capital because…" to "…the LLM extracted that from the BizJournals article fetched 2026-04-08, at offset 145–158, which we can show you with the surrounding sentence."
+That's a complete chain from "the project's developer is Helio Capital because…" to "…the LLM extracted that from the Urbanize article fetched 2026-04-08, at offset 145–158, which we can show you with the surrounding sentence."
 
 ### 22.2 Re-runnability
 
@@ -2558,7 +2657,7 @@ The existing `change_log` table captures every researcher decision on a news-der
 
 `change_log.review_item_id` → `review_items.payload.news_context.article_id` → article + extraction context.
 
-This means every decision is auditable end-to-end: "On 2026-04-30, NG accepted that the project's status changed from Approved to Under Construction. The proposed value came from BizJournals article X published 2026-04-28, extracted with prompt extract_v7 by Opus 4.7 at cost $0.04, anchored to passage 'Helio broke ground last week' at offset 220–252."
+This means every decision is auditable end-to-end: "On 2026-04-30, NG accepted that the project's status changed from Approved to Under Construction. The proposed value came from Urbanize article X published 2026-04-28, extracted with prompt extract_v7 by Opus 4.7 at cost $0.04, anchored to passage 'Helio broke ground last week' at offset 220–252."
 
 ### 22.4 What is intentionally not audited
 
@@ -2587,34 +2686,36 @@ v1 listed D.W as "Render Worker scaffold." That's wrong — C.tail.1 already shi
 | **D.4-resolver** | Implement §21f recent-article delivery-date priority in the resolver (`delivery_year.py` `_select_explicit_delivery_observation`). Add resolver-side filter `WHERE evidence.superseded_at IS NULL` so re-extraction supersession works. | 1 day | D.4 |
 | **D.5** | Review-queue rendering of news context. `news_context` payload extension. Confidence chip. Structural-disagreement chip. Verify the existing `render_news_article_snippet` works against the data Phase D writes. | 2 days | D.4 |
 | **D.7b** | Paste-a-link UI in Next.js. Article admin view (admin-only via `/research/articles/{id}`). | 2 days | D.5 |
-| **D.2a** | BizJournals fetcher: `discover_urls`, `fetch_article`, cookie-injection auth flow. CLI `tcg-pipeline news auth-bizjournals`. Session-validity detection during fetch. | 3 days | D.7b |
-| **D.6** | Scheduled scrapes via `news_sources.schedule_cron` and the new in-process scheduler tick. | 1 day | D.2a |
+| **D.2-docs** | Revise this design for the Urbanize-first polite collector pivot, 12-month Urbanize backfill, source-doc discipline, deferred advanced fetch, and D-late source expansion. | 0.5 day | D.2v |
+| **D.2a-prep** | Pass 1 tightening from D.2v: comma-formatted unit counts, title/headline address scan, completion-date phrase variants. Capture sanitized Urbanize/LA YIMBY fixtures. | 1 day | D.2-docs |
+| **D.2a** | Generic polite NewsCollector + Urbanize LA pilot: config-driven RSS/sitemap discovery, robots/rate-limit/Retry-After/conditional GET, host routing, source docs, seed unscoped `urbanize_la`, and disable/unschedule `bizjournals_la`. Repeat five-URL validation through host routing. | 2-3 days | D.2-docs |
+| **D.6** | Scheduled Urbanize scrapes via `news_sources.schedule_cron` and the in-process scheduler tick. Before enabling cron, rerun the five D.2v URLs in staging with an Anthropic key and verify Haiku triage plus Opus extraction/integration output. | 1 day | D.2a, D.2b |
 | **D.M** | Monitoring: SMTP email dispatcher; `system_alerts` reader for the Coverage banner; news ops admin tile; cost-cap bump UI. | 3 days | D.6 |
 | **D.G** | Graveyard UI + manual relink endpoint. `news_admin_actions` writes for audit. | 2 days | D.5 |
-| **D.B** | 8-week BizJournals backfill execution. ~$10 cost; observable via Coverage queue depth. | 1 day live + monitoring | D.6, D.M |
+| **D.B** | 12-month Urbanize backfill. Dry-run the full 988-URL D.2v-sized set first, report relevance/cost/runtime ranges, get approval, then enqueue under source pause/rate-limit/cost-cap controls. | 1 day live + monitoring | D.6, D.M, D.2a-prep |
 
 Total ballpark: ~4 weeks for a focused engineer. Phase D is bigger than any single Phase C step.
 
 ### 23.2 Why this order beats the roadmap order
 
-- **D.7 first as a vertical slice.** Paste-a-link is the same pipeline minus the riskiest component (auth-scraping a SPA). Shipping it first proves the schema, the worker extension, the LLM integration, the matcher, and the review surfaces against real articles. We learn what extraction needs to do well on real data before BizJournals introduces auth-pause failure modes.
+- **D.7 first as a vertical slice.** Paste-a-link is the same pipeline minus scheduled discovery. Shipping it first proves the schema, the worker extension, the LLM integration, the matcher, and the review surfaces against real articles. We learn what extraction needs to do well on real data before scheduled Urbanize volume starts.
 - **D.W (Worker extension) second.** Now that C.tail.1's RQ worker exists, we just register new task functions and add the scheduler tick. Much lower risk than v1's "build a new worker."
-- **D.3 (extraction) before D.2 (BizJournals).** Extraction quality is the load-bearing concern. Wiring up BizJournals before we trust extraction means we'd be debugging both at once. With paste-a-link, we can iterate on prompts against curated articles.
+- **D.3 (extraction) before D.2a (collector).** Extraction quality is the load-bearing concern. Wiring up scheduled collection before we trust extraction means we'd be debugging both at once. With paste-a-link, we can iterate on prompts against curated articles.
 - **D.4 (matcher) after extraction lands.** The matcher's input is the extraction output; we want extractions to be stable before matcher tuning starts. D.4 also folds in the §21f resolver change because the rule is impossible to validate without real article evidence flowing.
 - **D.6 (scheduling) near the end.** Scheduling is the simplest part. It's not at the front because there's nothing to schedule until everything else works.
 - **Backfill last.** Backfill is a dollars-burning operation. We do it once everything is trustworthy.
 
-### 23.3 Roadmap.md updates
+### 23.3 Roadmap.md alignment
 
-The corresponding ROADMAP.md updates (to be made in a follow-up commit when this design is approved):
+ROADMAP.md is authoritative for status. The active alignment after D.2-docs:
 
-- D.1 stays as the schema design step but its Notes column points at this document.
-- D.2, D.3, D.4, D.5, D.6, D.7 reordered per §23.1; D.7 becomes early.
-- New rows D.W (worker extension), D.M (monitoring), D.G (graveyard), D.B (backfill), D.4-resolver (§21f implementation + supersession filter).
-- D.8 (additional sources) remains deferred.
-- A new row references "Auto-apply for high-confidence article matches" → routed to **Phase E** (resolution-engine refinement) per §25.
-- A new row references "Cross-source LLM corroboration / deep research" → routed to **Phase E** per §25.
-- Decision Log entry: "Phase D ordered with paste-a-link first as the vertical-slice pattern. Phase D extends the C.tail.1 RQ worker rather than introducing a separate worker. Article evidence uses post-apply review semantics consistent with existing collectors. Rationale: see `docs/specs/news_research_design.md` §23 and Revision History (§0)."
+- D.2-docs records this Urbanize-first design revision.
+- D.2a-prep captures the Pass 1 tightening and fixture-capture work surfaced by D.2v.
+- D.2a implements the generic polite collector and unscoped `urbanize_la` seed.
+- D.2b adds the `fetch_path` routing/interface and hard-failure posture for `advanced`.
+- D.6 enables scheduled Urbanize scrapes only after the staging Anthropic-key smoke test.
+- D.B runs a 12-month Urbanize backfill dry-run over the full unscoped URL set.
+- D.late.E1/E2/C/ADV hold LA YIMBY, The Real Deal, paid-source/BizJournals, and advanced-fetch expansion.
 
 ---
 
@@ -2632,13 +2733,13 @@ The corresponding ROADMAP.md updates (to be made in a follow-up commit when this
 
 ### 24.3 Scraper bitrot
 
-- **Risk:** BizJournals changes their HTML structure. Our discovery selectors break silently.
-- **Mitigation:** Daily "did we find any articles?" sanity check; alert on zero articles for > 36 hours. Selectors are versioned and unit-tested against archived HTML samples.
+- **Risk:** Urbanize changes its RSS/sitemap/body structure. Discovery or body extraction breaks silently.
+- **Mitigation:** Daily "did we find any articles?" sanity check; alert on zero articles for > 36 hours. Discovery/body behavior is fixture-tested against archived Urbanize samples.
 
 ### 24.4 Auth bitrot
 
-- **Risk:** BizJournals changes their auth flow. Our cookie-injection no longer produces a valid session.
-- **Mitigation:** The `auth-bizjournals` CLI is a single command; if login flow changes, researcher reruns it from the new login URL. We never automated login, so there's no automation to fix. Validation step catches dead cookies before they get persisted.
+- **Risk:** Future paid sources change auth flow. Our cookie-injection no longer produces a valid session.
+- **Mitigation:** Paid-source auth is D.late.C. The `auth-bizjournals` CLI design stays manual-session based; if login flow changes, researcher reruns it from the new login URL. We never automate login, so there is no login automation to fix.
 
 ### 24.5 Cost runaway
 
@@ -2667,8 +2768,8 @@ The corresponding ROADMAP.md updates (to be made in a follow-up commit when this
 
 ### 24.10 Single-source dependency
 
-- **Risk:** BizJournals goes paywalled-harder, blocks our IP, sells, etc.
-- **Mitigation:** Schema and pipeline are multi-source from day one. Adding The Architect / Urbanize / Curbed is a collector-class implementation, not a redesign. D.8 stays in the roadmap.
+- **Risk:** Urbanize blocks polite access, changes ownership, or becomes noisy for target markets.
+- **Mitigation:** Schema and pipeline are multi-source from day one. Adding LA YIMBY, The Real Deal, or BizJournals is a source-row/config/doc/migration exercise with any advanced/paid fetch handled by D.late.ADV/D.late.C.
 
 ---
 
@@ -2690,11 +2791,14 @@ Phase D explicitly punts the following to other phases. Each carries an explicit
 - **Why not in Phase D:** It's not a producer-side problem (which is what Phase D is). Building it on top of Phase D would make the producer-side pipeline harder to test and reason about.
 - **Sketch when implemented:** Resolver gains a `corroboration_pass` step that, for high-impact field changes, queries other recent evidence on the project and emits a `corroboration_score` into the resolution log. Used to escalate or de-escalate review item priority.
 
-### 25.3 Additional news sources (D.8)
+### 25.3 Additional news sources (D.late.E1/E2/C)
 
-- Stays as roadmap D.8.
-- The schema and pipeline accept new sources by adding a row to `news_sources` and a `BaseCollector` subclass. No design changes.
-- Candidates: The Architect, Urbanize LA, Curbed LA, LA Times Real Estate, LADBS news feed, etc.
+- D.8 is superseded by explicit D-late source rows.
+- The schema and pipeline accept new polite sources by adding a source row/config,
+  `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME` mapping, source strategy doc, migration,
+  host routing, and fixtures. No design changes if D.2a holds.
+- Candidates: LA YIMBY (D.late.E1), The Real Deal LA (D.late.E2), and
+  BizJournals LA through paid-source capability (D.late.C).
 
 ### 25.4 Eval set bootstrapping
 
@@ -2760,7 +2864,7 @@ Phase D introduces the following Python dependencies. All are added under the ex
 |---|---|---|---|
 | `anthropic` | ≥ 0.40.0 | Anthropic SDK (LLM extraction calls) | Pin major version. Track Anthropic's release notes for API stability. |
 | `playwright` | ≥ 1.45 | Headless browser for SPA-hydrated article fetches | Requires `playwright install chromium` at deploy. Render base image must include the system libs Chromium needs (`libnss3`, `libatk1.0-0`, `libxss1`, etc.). Add a Render `build.sh` step or a custom Dockerfile. |
-| `trafilatura` | ≥ 1.10 | HTML → plaintext body extraction | Preferred over `readability-lxml` for ACBJ markup. |
+| `trafilatura` | ≥ 1.10 | HTML → plaintext body extraction | Preferred over `readability-lxml` for Urbanize validation pages and polite-source body extraction. |
 | `dateparser` | ≥ 1.2 | Natural-language date parsing for delivery_year_text → date | Used in Pass 1 structural extraction. |
 | `croniter` | ≥ 2.0 | Cron-expression evaluation for the scheduler tick | Tiny library, well-tested. |
 | `pyahocorasick` | ≥ 2.0 | Aho-Corasick automaton for fast multi-string matching (developer / project name dictionary scans) | Used in Pass 1 to scan article bodies against the developer registry and project list. |
@@ -2771,7 +2875,7 @@ Optional / dev-only:
 
 | Package | Min version | Purpose |
 |---|---|---|
-| `pytest-vcr` | ≥ 1.0 | Record/replay BizJournals fetches in tests without hitting the network |
+| `pytest-vcr` | ≥ 1.0 | Record/replay source fetches in tests without hitting the network |
 | `respx` | ≥ 0.21 | Mock httpx for unit tests of the fetcher |
 | `pytest-asyncio` | already installed | Test async paths in worker tasks |
 
@@ -2789,8 +2893,8 @@ CLI additions are wired through `src/tcg_pipeline/cli.py` per §19; no new top-l
 
 - **Provider markup vs Vercel AI Gateway.** Default is direct Anthropic SDK. Revisit if multi-provider A/B becomes a need.
 - **Article body PII / sensitive-quote handling.** Articles are public. Quotes from named individuals are public. No special handling planned. Revisit if a researcher flags an article.
-- **Cookie-injection key rotation cadence.** Default to indefinite; rotate when researcher notices anomaly. Formalize a quarterly rotation if security review demands.
-- **Multi-jurisdiction news sources.** A news source about both LA and OC: how does the matcher constrain the search? Currently `market_id` on `news_sources` is a soft hint; matcher uses the project's market. Sufficient for MVP; revisit when we add cross-market sources.
+- **Paid-source credential key rotation cadence.** D.late.C decision. Default to indefinite; rotate when researcher notices anomaly. Formalize a quarterly rotation if security review demands.
+- **Multi-jurisdiction news sources.** `urbanize_la` is intentionally market-unscoped. The matcher queries all active markets and decides relevance; non-modeled geography may land as discarded/new-candidate signal. Revisit only if volume makes unscoped matching too expensive.
 - **Articles in non-English languages.** `news_articles.language='en'` default. If we ingest Spanish-language sources later, the LLM handles it natively but the structural extractor regex set is English-only. Address when the source list expands.
 - **Article archival.** Body text + raw HTML grow over time. At ~30KB/article × 50/day × 365 = ~550MB/year. Sustainable indefinitely on Supabase. Revisit at 5GB.
 - **WebSocket-based article-status push.** UI currently HTTP-polls. Push from Worker would be nice. Out of scope for D.

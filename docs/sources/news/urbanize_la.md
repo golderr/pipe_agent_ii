@@ -6,6 +6,7 @@
 - Status: validated for D.2a implementation; not yet seeded in `news_sources`
 - Intended Phase D role: only live scheduled-source pilot
 - Logical source type: `news_article`
+- Source scope: market-unscoped (`market_id = NULL`, `jurisdiction_id = NULL`)
 - Validation date: 2026-04-30 local / 2026-05-01 UTC
 
 ## Access
@@ -63,6 +64,22 @@ D.2a recommendation:
 - Use RSS for daily incrementals and sitemap pages for backfill.
 - Start with conservative per-host throttling, for example one request every 1-2 seconds, plus `Retry-After` handling.
 - Do not auto-pause on ordinary 404s for article or optional endpoint misses.
+- Seed `schedule_cron = '30 7 * * *'` in `America/Los_Angeles`. This runs roughly 75-90 minutes after the observed RSS publication window around 06:00-06:15 PT; D.6 can add jitter around the configured time.
+
+## Scope And Matching
+
+D.2a should seed `urbanize_la` without a market or jurisdiction. The collector
+ingests all eligible Urbanize LA URLs; the matcher decides relevance across live
+markets. This is intentional:
+
+- LA-relevant articles should match LA projects.
+- Santa Monica articles may match the Santa Monica market as it comes online.
+- Orange County or other non-modeled articles may become discarded references or
+  new-candidate/graveyard signal.
+- D.B dry-run cost should use the full 12-month sitemap count, not an LA-filtered
+  subset.
+
+The unscoped matcher path in D.4 is load-bearing for this source.
 
 ## D.2v Article Validation
 
@@ -89,11 +106,23 @@ Validation article IDs in the development DB:
 - Urbanize HTML is friendly to the existing Pass 0 stack: metadata title, author, publication date, body text, and open/paywall state persisted cleanly.
 - RSS descriptions include full-ish body HTML and tags; D.2a should still fetch canonical article pages so body extraction and hash behavior stay consistent across paste/scheduled/backfill paths.
 - Sitemap is large enough for a 12-month backfill but small enough to process politely in one dry-run pass.
-- Pass 1 should be tightened before or during high-volume backfill:
+- Pass 1 tightening is now explicit D.2a-prep work before high-volume backfill:
   - capture comma-formatted unit counts such as `2,250 residential units`
-  - consider title/headline address scanning, not only body text
+  - scan title/headline metadata for title-only addresses such as `2101 W. 8th Street`
   - review completion-date extraction for phrases like `Completion is expected in Fall 2027`
-- Orange County and Santa Monica articles are valuable for pipeline intelligence but may sit outside the current LA jurisdiction. D.2a should keep source collection market-agnostic and let matcher/jurisdiction logic decide whether a reference belongs in the active market.
+- All validation articles returned `paywall_state = open`. No actually gated Urbanize article was found during D.2v, so D.2a should not add speculative Urbanize paywall logic until one is observed.
+- Article-update behavior was not tested. D.2a/D.6 should treat changed `body_text_hash` on refetch as a known monitoring gap for dedup and stale-body behavior.
+
+## Pre-D.6 Staging Gate
+
+D.2v ran through `news_paste_a_link` with no Anthropic key in the dev DB. Before
+scheduled scraping is enabled in D.6:
+
+- Seed `urbanize_la` and repeat the five URLs through host routing so the
+  source-specific config path is exercised.
+- Rerun those same URLs in staging with an Anthropic key.
+- Confirm Haiku triage, Opus extraction/re-extraction if triggered, matching,
+  evidence integration, and review payloads produce sensible output.
 
 ## Light Reconnaissance Of Deferred Sources
 
@@ -115,11 +144,12 @@ The Real Deal LA:
 ## Open Issues For D.2a
 
 - Seed `urbanize_la` as the only active scheduled Phase D source.
+- Seed it with `market_id = NULL` and `jurisdiction_id = NULL`; matcher decides relevance.
 - Disable/unschedule `bizjournals_la` until paid-source capability ships.
 - Add `urbanize_la -> news_article` to `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`.
 - Add host routing for `la.urbanize.city` from `news_sources.config` or source YAML, with short in-process cache.
 - Confirm daily cron after a short production observation window. Initial candidate: `30 7 * * *` in `America/Los_Angeles`, with D.6 jitter.
-- Add fixture coverage using Urbanize and LA YIMBY-like RSS/article samples so the polite collector stays source-generic.
+- Add fixture coverage using sanitized Urbanize validation bodies plus LA YIMBY-like RSS/article samples so the polite collector stays source-generic and tests do not refetch live URLs.
 
 ## Code References
 
