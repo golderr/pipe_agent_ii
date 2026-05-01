@@ -128,31 +128,40 @@ Paste-a-link uses the FastAPI write boundary:
 ```text
 POST /research/articles
 GET  /research/articles/{article_id}
+POST /research/articles/{article_id}/refetch
 ```
 
 `POST /research/articles` accepts `{url, force_reextract?, force_project_id?,
-note?}`. In D.7a, `force_reextract=true` returns `400` because re-extraction is
-a later Phase D step. For a new URL, the API canonicalizes and hashes the URL,
+note?}`. `force_project_id` is passed to the D.4 matcher as a single-reference
+project hint. `force_reextract=true` currently returns `400` because the manual
+re-extraction endpoint is not implemented yet. For a new URL, the API canonicalizes and hashes the URL,
 creates a pending `news_articles` row, creates a
 `scrape_jobs(kind='news_paste_a_link')` row, commits it, and enqueues the RQ
 task. Redis is required in production; local/dev execution may fall back to a
 FastAPI background task when Redis is unavailable.
 
-The worker runs Pass 0, Pass 1, Pass 2a, and Pass 2b for successfully fetched
-and triage-relevant articles: HTTP fetch, trafilatura body extraction, metadata
+`POST /research/articles/{article_id}/refetch` retries terminal fetch failures
+(`fetch_failed`, `parse_failed`, `paywalled`, `dead_link`). The endpoint reuses
+an active paste-a-link job if one exists; otherwise it resets fetch metadata,
+preserves the original `force_project_id` hint, creates a new
+`news_paste_a_link` job, and enqueues it through the same RQ/background fallback.
+
+The worker runs Pass 0, Pass 1, Pass 2a, Pass 2b, optional Pass 3a/3b, and
+integration for successfully fetched and triage-relevant articles: HTTP fetch,
+trafilatura body extraction, metadata
 parsing, paywall/dead-link/fetch-status detection, durable `news_articles`
 updates, structural signal extraction into `news_articles.structural_signals`,
 Haiku triage into `news_extractions(pass='triage')`, and Opus extraction into
 `news_extractions(pass='extraction')` plus pending `news_project_references`.
-It also records a `source_runs` audit row and completes the scrape job. Matching,
-evidence creation, review items, and re-extraction triggers remain later Phase D
-steps.
+It also runs D.4 matching/integration, writes news evidence, creates post-apply
+review items, records `source_runs` audit rows, and completes the scrape job.
 
 If Pass 2b extraction raises after Pass 0/1/2a succeeded, the scrape job still
 completes because the article ingest and triage state are durable. The job
 progress records `extraction_skipped_reason = "error"` and
-`extraction_error_text` for admin follow-up; forced retry/re-extraction is a
-later Phase D path.
+`extraction_error_text` for admin follow-up. Terminal fetch failures can be
+retried with the refetch endpoint; manual re-extraction remains a later Phase D
+path.
 
 Pass 2a/2b use the active prompts in `config/news_prompts.yaml` and prompt files
 under `src/tcg_pipeline/news/prompts/`. Pass 2b renders the known

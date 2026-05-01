@@ -971,6 +971,14 @@ class ScrapeJob(Base):
             postgresql_where=text("status IN ('queued', 'running')"),
         ),
         Index(
+            "ix_scrape_jobs_article_id_kind_status_queued_at",
+            text("(target_payload ->> 'article_id')"),
+            "kind",
+            "status",
+            text("queued_at DESC"),
+            postgresql_where=text("target_payload ? 'article_id'"),
+        ),
+        Index(
             "uq_scrape_jobs_one_active_collector",
             "jurisdiction_id",
             "source_name",

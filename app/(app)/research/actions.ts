@@ -108,7 +108,7 @@ export async function retryResearchArticleFetchAction(
 ): Promise<{ ok: boolean; message: string; scrapeJobId: string | null }> {
   try {
     const apiBaseUrl = await apiBaseUrlForWrite();
-    const response = await fetch(`${apiBaseUrl}/research/articles/${articleId}/retry-fetch`, {
+    const response = await fetch(`${apiBaseUrl}/research/articles/${articleId}/refetch`, {
       method: "POST",
       headers: await jsonHeadersForApi()
     });

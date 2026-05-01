@@ -188,7 +188,7 @@ def test_retry_research_article_fetch_queues_new_job(
     postgres_session.flush()
 
     response = client.post(
-        f"/research/articles/{article.id}/retry-fetch",
+        f"/research/articles/{article.id}/refetch",
         headers=_auth_headers(),
     )
 
@@ -263,7 +263,7 @@ def test_retry_research_article_fetch_reuses_active_job(
     postgres_session.flush()
 
     response = client.post(
-        f"/research/articles/{article.id}/retry-fetch",
+        f"/research/articles/{article.id}/refetch",
         headers=_auth_headers(),
     )
 
@@ -303,7 +303,7 @@ def test_retry_research_article_fetch_rejects_non_terminal_status(
     postgres_session.flush()
 
     response = client.post(
-        f"/research/articles/{article.id}/retry-fetch",
+        f"/research/articles/{article.id}/refetch",
         headers=_auth_headers(),
     )
 

@@ -274,7 +274,10 @@ class ResearchArticleCreateRequest(BaseModel):
     force_reextract: bool = False
     force_project_id: uuid.UUID | None = Field(
         default=None,
-        description="Stored for the D.4 matcher; ignored until that pipeline ships.",
+        description=(
+            "Optional project UUID hint used by the news matcher for "
+            "single-reference paste-a-link articles."
+        ),
     )
     note: str | None = Field(default=None, max_length=2000)
 

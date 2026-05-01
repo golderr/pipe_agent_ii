@@ -125,8 +125,9 @@ def get_research_article(
     )
 
 
-@router.post("/research/articles/{article_id}/retry-fetch")
-def retry_research_article_fetch(
+@router.post("/research/articles/{article_id}/retry-fetch", include_in_schema=False)
+@router.post("/research/articles/{article_id}/refetch")
+def refetch_research_article(
     article_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     user: AuthenticatedUser = AUTH_USER,
@@ -190,7 +191,7 @@ def enqueue_paste_a_link_article(
     if payload.force_reextract:
         raise HTTPException(
             status_code=400,
-            detail="Force re-extract is not available until the extraction pipeline ships.",
+            detail="Manual re-extraction endpoint is not yet implemented.",
         )
 
     try:
