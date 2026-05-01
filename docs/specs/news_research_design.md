@@ -4,7 +4,7 @@
 >
 > **Audience:** Engineers implementing Phase D. Researchers evaluating the system's behavior. A future contributor joining the team six months from now and asking "what is Phase D and why is it shaped this way?"
 >
-> **Last updated:** 2026-05-01 (D.2a Urbanize collector implementation — see Revision History)
+> **Last updated:** 2026-05-01 (D.2b advanced-fetch guardrail implementation — see Revision History)
 > **Owner:** Nate Goldstein (researcher), pipeline maintainers (engineering)
 >
 > **Read alongside:**
@@ -1100,7 +1100,9 @@ For paste-a-link, host routing checks configured news sources first. A routed
 Urbanize URL uses the `urbanize_la` source context; unknown hosts fall back to
 `news_paste_a_link`. D.2a/D.2b use the polite fetch path only. If a source config
 requests `fetch_path = advanced` before D.late.ADV exists, the worker records a
-hard failure and system alert rather than trying a browser/proxy fallback.
+hard failure and `news_advanced_fetch_deferred` system alert rather than trying a
+browser/proxy fallback. Paste-a-link job progress records the selected
+`fetch_path` so the admin article view can explain which path ran or failed.
 
 ---
 

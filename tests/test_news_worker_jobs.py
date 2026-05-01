@@ -369,6 +369,7 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
     assert refreshed_article is not None
     assert refreshed_job.status == ScrapeJobStatus.COMPLETED
     assert refreshed_job.source_run_id is not None
+    assert refreshed_job.progress["fetch_path"] == "polite"
     assert refreshed_job.progress["fetch_status"] == NewsFetchStatus.FETCHED.value
     assert refreshed_job.progress["triage_status"] == NewsTriageStatus.RELEVANT.value
     assert refreshed_job.progress["triage_extraction_id"] == str(triage_extraction_id)
@@ -393,6 +394,91 @@ def test_paste_link_worker_runs_pass0_and_completes_job(
     assert source_run.records_pulled == 1
     assert source_run.rows_updated == 1
     assert source_run.errors is None
+
+
+def test_paste_link_worker_hard_fails_deferred_advanced_fetch_path(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = NewsSource(
+        slug=f"advanced-source-{uuid.uuid4().hex}",
+        name="Advanced Source",
+        base_url="https://advanced.example",
+        collector_class="PoliteNewsCollector",
+        active=True,
+        config={
+            "fetch_path": "advanced",
+            "source_strategy_doc": "docs/sources/news/advanced_source.md",
+        },
+    )
+    postgres_session.add(source)
+    postgres_session.flush()
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical="https://advanced.example/story",
+        url_original="https://advanced.example/story",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.PENDING.value,
+        ingest_method=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    job = ScrapeJob(
+        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        source_name=source.slug,
+        target_payload={
+            "article_id": str(article.id),
+            "url": article.url_original,
+            "url_canonical": article.url_canonical,
+            "url_hash": article.url_hash,
+        },
+        status=ScrapeJobStatus.QUEUED,
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+
+    with pytest.raises(news_jobs.AdvancedFetchRequiredError, match="D.late.ADV"):
+        news_jobs.run_news_paste_a_link_job(
+            job.id,
+            fetcher=lambda _url: pytest.fail("Advanced fetch must fail before HTTP fetch."),
+            triage_runner=None,
+            extraction_runner=None,
+        )
+
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_job is not None
+    assert refreshed_article is not None
+    assert refreshed_job.status == ScrapeJobStatus.FAILED
+    assert refreshed_job.progress == {
+        "message": "Advanced fetch is not implemented.",
+        "article_id": str(article.id),
+        "source_name": source.slug,
+        "fetch_path": "advanced",
+        "source_strategy_doc": "docs/sources/news/advanced_source.md",
+        "error": refreshed_job.error_text,
+    }
+    assert refreshed_article.fetch_status == NewsFetchStatus.FETCH_FAILED.value
+    assert refreshed_article.fetch_error_text == refreshed_job.error_text
+    alert = postgres_session.execute(
+        select(SystemAlert).where(SystemAlert.alert_key == "news_advanced_fetch_deferred")
+    ).scalar_one()
+    assert alert.scope == {"source_name": source.slug, "fetch_path": "advanced"}
+    assert alert.detail == {
+        "job_id": str(job.id),
+        "article_id": str(article.id),
+        "source_strategy_doc": "docs/sources/news/advanced_source.md",
+        "source_doc_required": False,
+    }
 
 
 def test_paste_link_worker_completes_when_extraction_stage_errors(

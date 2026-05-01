@@ -19,6 +19,10 @@ from tcg_pipeline.news.ingest import (
 )
 from tcg_pipeline.news.urls import host_matches_route
 
+POLITE_FETCH_PATH = "polite"
+ADVANCED_FETCH_PATH = "advanced"
+SUPPORTED_FETCH_PATHS = frozenset({POLITE_FETCH_PATH, ADVANCED_FETCH_PATH})
+
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredArticleUrl:
@@ -100,12 +104,12 @@ class PoliteNewsCollector:
         return _dedupe_discovered_urls(discovered)
 
     def fetch_article(self, url: str) -> ArticleFetchResult:
-        fetch_path = str(self.config.get("fetch_path") or "polite")
-        if fetch_path == "advanced":
+        fetch_path = str(self.config.get("fetch_path") or POLITE_FETCH_PATH)
+        if fetch_path == ADVANCED_FETCH_PATH:
             raise AdvancedFetchRequiredError(
                 f"Source '{self.source.slug}' requires advanced fetching."
             )
-        if fetch_path != "polite":
+        if fetch_path != POLITE_FETCH_PATH:
             raise ValueError(f"Unsupported fetch_path '{fetch_path}' for {self.source.slug}.")
         self._ensure_can_fetch(url)
         self._respect_rate_limit(url)

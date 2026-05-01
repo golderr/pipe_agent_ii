@@ -26,6 +26,12 @@ from tcg_pipeline.db.models import (
     SourceRun,
     SystemAlert,
 )
+from tcg_pipeline.news.collectors import (
+    ADVANCED_FETCH_PATH,
+    POLITE_FETCH_PATH,
+    SUPPORTED_FETCH_PATHS,
+    AdvancedFetchRequiredError,
+)
 from tcg_pipeline.news.extraction import (
     NewsExtractionRunResult,
     run_news_extraction_for_article,
@@ -66,6 +72,8 @@ class NewsPasteLinkPlan:
     initiated_by_user_id: uuid.UUID | None
     initiated_by_email: str | None
     force_project_id: uuid.UUID | None
+    fetch_path: str
+    source_strategy_doc: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +85,7 @@ class NewsPasteLinkIngestResult:
     fetch_status: str | None
     http_status: int | None
     body_text_chars: int
+    fetch_path: str | None
 
 
 def enqueue_news_job_execution(
@@ -235,6 +244,11 @@ def run_news_paste_a_link_job(
     if plan is None:
         return
 
+    if plan.fetch_path == ADVANCED_FETCH_PATH:
+        error = _advanced_fetch_required_error(plan)
+        _record_advanced_fetch_deferred(job_id, plan=plan, error=error)
+        raise error
+
     result = fetcher(plan.url)
     ingest_result: NewsPasteLinkIngestResult
     with session_factory() as session:
@@ -336,6 +350,8 @@ def start_news_paste_a_link_job(
     job.progress = {
         "message": "Fetching and parsing article.",
         "article_id": str(article.id),
+        "source_name": source.slug,
+        "fetch_path": _source_fetch_path(source),
     }
     session.flush()
     return NewsPasteLinkPlan(
@@ -349,6 +365,8 @@ def start_news_paste_a_link_job(
         initiated_by_user_id=job.initiated_by_user_id,
         initiated_by_email=job.initiated_by_email,
         force_project_id=_payload_uuid(payload, "force_project_id", required=False),
+        fetch_path=_source_fetch_path(source),
+        source_strategy_doc=_source_strategy_doc(source),
     )
 
 
@@ -377,6 +395,7 @@ def complete_news_paste_a_link_job(
             fetch_status=article.fetch_status,
             http_status=article.http_status,
             body_text_chars=len(article.body_text or ""),
+            fetch_path=plan.fetch_path,
         )
 
     _apply_article_fetch_result(session, article=article, result=result)
@@ -411,6 +430,7 @@ def complete_news_paste_a_link_job(
         "message": "Article ingest completed; triage pending.",
         "article_id": str(article.id),
         "fetch_status": article.fetch_status,
+        "fetch_path": plan.fetch_path,
         "http_status": article.http_status,
         "body_text_chars": len(article.body_text or ""),
     }
@@ -423,6 +443,7 @@ def complete_news_paste_a_link_job(
         fetch_status=article.fetch_status,
         http_status=article.http_status,
         body_text_chars=len(article.body_text or ""),
+        fetch_path=plan.fetch_path,
     )
 
 
@@ -447,6 +468,7 @@ def finish_news_paste_a_link_job(
         "message": "Article ingest completed.",
         "article_id": str(ingest_result.article_id),
         "fetch_status": ingest_result.fetch_status,
+        "fetch_path": ingest_result.fetch_path,
         "http_status": ingest_result.http_status,
         "body_text_chars": ingest_result.body_text_chars,
     }
@@ -635,6 +657,81 @@ def mark_news_job_failed(
             article.fetch_error_text = str(error)
     session.flush()
     return job
+
+
+def _record_advanced_fetch_deferred(
+    job_id: uuid.UUID,
+    *,
+    plan: NewsPasteLinkPlan,
+    error: AdvancedFetchRequiredError,
+) -> None:
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        job = session.get(ScrapeJob, job_id)
+        if job is None:
+            return
+        now = datetime.now(UTC)
+        job.status = ScrapeJobStatus.FAILED
+        job.completed_at = now
+        job.error_text = str(error)
+        job.progress = {
+            "message": "Advanced fetch is not implemented.",
+            "article_id": str(plan.article_id),
+            "source_name": plan.source_name,
+            "fetch_path": plan.fetch_path,
+            "source_strategy_doc": plan.source_strategy_doc,
+            "error": str(error),
+        }
+        article = session.get(NewsArticle, plan.article_id)
+        if article is not None:
+            article.fetch_status = NewsFetchStatus.FETCH_FAILED.value
+            article.fetch_error_text = str(error)
+        raise_system_alert(
+            session,
+            alert_key="news_advanced_fetch_deferred",
+            severity="warning",
+            message="News source requested advanced fetch before implementation.",
+            scope={"source_name": plan.source_name, "fetch_path": plan.fetch_path},
+            detail={
+                "job_id": str(job_id),
+                "article_id": str(plan.article_id),
+                "source_strategy_doc": plan.source_strategy_doc,
+                "source_doc_required": plan.source_strategy_doc is None,
+            },
+        )
+        session.commit()
+
+
+def _advanced_fetch_required_error(
+    plan: NewsPasteLinkPlan,
+) -> AdvancedFetchRequiredError:
+    if plan.source_strategy_doc is None:
+        return AdvancedFetchRequiredError(
+            f"Source '{plan.source_name}' requests fetch_path='advanced' without "
+            "config.source_strategy_doc; advanced fetching is deferred to D.late.ADV."
+        )
+    return AdvancedFetchRequiredError(
+        f"Source '{plan.source_name}' requests fetch_path='advanced', but advanced "
+        "fetching is deferred to D.late.ADV."
+    )
+
+
+def _source_fetch_path(source: NewsSource) -> str:
+    config = source.config if isinstance(source.config, dict) else {}
+    fetch_path = str(config.get("fetch_path") or POLITE_FETCH_PATH)
+    if fetch_path not in SUPPORTED_FETCH_PATHS:
+        raise RuntimeError(
+            f"News source '{source.slug}' has unsupported fetch_path '{fetch_path}'."
+        )
+    return fetch_path
+
+
+def _source_strategy_doc(source: NewsSource) -> str | None:
+    config = source.config if isinstance(source.config, dict) else {}
+    source_strategy_doc = config.get("source_strategy_doc")
+    if isinstance(source_strategy_doc, str) and source_strategy_doc.strip():
+        return source_strategy_doc
+    return None
 
 
 def _latest_scheduled_source_run(session: Session, source: NewsSource) -> datetime | None:
