@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, ClipboardList, Database, MapPinned } from "lucide-react";
+import { BarChart3, ClipboardList, Database, MapPinned, Newspaper } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/coverage", label: "Coverage", icon: MapPinned },
+  { href: "/research", label: "Research", icon: Newspaper },
   { href: "/review", label: "Review", icon: ClipboardList },
   { href: "/pipeline", label: "Pipeline", icon: Database },
   { href: "/dashboard", label: "Dashboard", icon: BarChart3 }

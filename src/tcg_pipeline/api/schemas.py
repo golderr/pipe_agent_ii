@@ -294,6 +294,13 @@ class ResearchArticleCreateResponse(BaseModel):
     existing_article: bool
 
 
+class ResearchArticleRetryResponse(BaseModel):
+    article_id: uuid.UUID
+    scrape_job_id: uuid.UUID
+    status: str
+    existing_active_job: bool
+
+
 class ResearchArticleDetail(BaseModel):
     id: uuid.UUID
     news_source_id: uuid.UUID
@@ -316,6 +323,12 @@ class ResearchArticleDetail(BaseModel):
     body_text: str | None
     body_text_hash: str | None
     raw_html_hash: str | None
+    structural_signals_at: str | None
+    triage_status: str | None
+    triage_at: str | None
+    triage_extraction_id: uuid.UUID | None
+    current_extraction_id: uuid.UUID | None
+    current_extraction_version: int
     ingest_method: str
     ingested_by_user_id: uuid.UUID | None
     notes: str | None

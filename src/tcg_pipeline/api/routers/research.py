@@ -15,6 +15,7 @@ from tcg_pipeline.api.schemas import (
     ResearchArticleCreateResponse,
     ResearchArticleDetail,
     ResearchArticleDetailResponse,
+    ResearchArticleRetryResponse,
     ResearchExtractionSummary,
     ResearchReferenceSummary,
     ScrapeJobResponse,
@@ -41,6 +42,13 @@ router = APIRouter(tags=["research"])
 AUTH_USER = Depends(require_user)
 DB_SESSION = Depends(get_db_session)
 APP_SETTINGS = Depends(get_app_settings)
+ACTIVE_PASTE_A_LINK_STATUSES = (ScrapeJobStatus.QUEUED, ScrapeJobStatus.RUNNING)
+RETRYABLE_FETCH_STATUSES = {
+    NewsFetchStatus.FETCH_FAILED.value,
+    NewsFetchStatus.PARSE_FAILED.value,
+    NewsFetchStatus.PAYWALLED.value,
+    NewsFetchStatus.DEAD_LINK.value,
+}
 
 
 @router.post("/research/articles")
@@ -59,20 +67,14 @@ def create_research_article(
     session.commit()
 
     if job is not None:
-        queued = enqueue_news_job_execution(
-            job.id,
-            kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        _enqueue_paste_a_link_job(
+            session,
+            job=job,
+            background_tasks=background_tasks,
             settings=settings,
+            rq_message="Queued for news article ingest.",
+            background_message="Queued for API background article ingest.",
         )
-        job.progress = {
-            "message": "Queued for news article ingest."
-            if queued
-            else "Queued for API background article ingest.",
-            "queue_backend": "rq" if queued else "background",
-        }
-        session.commit()
-        if not queued:
-            background_tasks.add_task(run_news_paste_a_link_task, str(job.id))
 
     return ResearchArticleCreateResponse(
         article_id=article.id,
@@ -123,6 +125,62 @@ def get_research_article(
     )
 
 
+@router.post("/research/articles/{article_id}/retry-fetch")
+def retry_research_article_fetch(
+    article_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+    settings: Settings = APP_SETTINGS,
+) -> ResearchArticleRetryResponse:
+    article = session.get(NewsArticle, article_id)
+    if article is None:
+        raise HTTPException(status_code=404, detail="Article not found.")
+
+    active_job = _active_paste_a_link_job_for_article(session, article_id)
+    if active_job is not None:
+        return ResearchArticleRetryResponse(
+            article_id=article.id,
+            scrape_job_id=active_job.id,
+            status=_job_status(active_job),
+            existing_active_job=True,
+        )
+
+    if article.fetch_status not in RETRYABLE_FETCH_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Article fetch is not in a retryable terminal state.",
+        )
+
+    article.fetch_status = NewsFetchStatus.PENDING.value
+    article.fetch_error_text = None
+    article.http_status = None
+    article.fetched_at = None
+    job = _create_paste_a_link_job(
+        session,
+        article=article,
+        source=article.source,
+        user=user,
+        force_project_id=_latest_force_project_id_for_article(session, article.id),
+        progress_message="Queued for news article refetch.",
+    )
+    session.commit()
+    _enqueue_paste_a_link_job(
+        session,
+        job=job,
+        background_tasks=background_tasks,
+        settings=settings,
+        rq_message="Queued for news article refetch.",
+        background_message="Queued for API background article refetch.",
+    )
+    return ResearchArticleRetryResponse(
+        article_id=article.id,
+        scrape_job_id=job.id,
+        status=_job_status(job),
+        existing_active_job=False,
+    )
+
+
 def enqueue_paste_a_link_article(
     session: Session,
     *,
@@ -169,6 +227,26 @@ def enqueue_paste_a_link_article(
             raise
         return raced_article, None, True
 
+    job = _create_paste_a_link_job(
+        session,
+        article=article,
+        source=source,
+        user=user,
+        force_project_id=payload.force_project_id,
+        progress_message="Queued for news article ingest.",
+    )
+    return article, job, False
+
+
+def _create_paste_a_link_job(
+    session: Session,
+    *,
+    article: NewsArticle,
+    source: NewsSource,
+    user: AuthenticatedUser,
+    force_project_id: uuid.UUID | str | None,
+    progress_message: str,
+) -> ScrapeJob:
     job = ScrapeJob(
         jurisdiction_id=source.jurisdiction_id,
         kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
@@ -179,18 +257,74 @@ def enqueue_paste_a_link_article(
         status=ScrapeJobStatus.QUEUED,
         target_payload={
             "article_id": str(article.id),
-            "url": canonical_url.original_url,
-            "url_canonical": canonical_url.canonical_url,
-            "url_hash": canonical_url.url_hash,
-            "force_project_id": str(payload.force_project_id)
-            if payload.force_project_id
-            else None,
+            "url": article.url_original,
+            "url_canonical": article.url_canonical,
+            "url_hash": article.url_hash,
+            "force_project_id": str(force_project_id) if force_project_id else None,
         },
-        progress={"message": "Queued for news article ingest."},
+        progress={"message": progress_message},
     )
     session.add(job)
     session.flush()
-    return article, job, False
+    return job
+
+
+def _enqueue_paste_a_link_job(
+    session: Session,
+    *,
+    job: ScrapeJob,
+    background_tasks: BackgroundTasks,
+    settings: Settings,
+    rq_message: str,
+    background_message: str,
+) -> None:
+    queued = enqueue_news_job_execution(
+        job.id,
+        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        settings=settings,
+    )
+    job.progress = {
+        "message": rq_message if queued else background_message,
+        "queue_backend": "rq" if queued else "background",
+    }
+    session.commit()
+    if not queued:
+        background_tasks.add_task(run_news_paste_a_link_task, str(job.id))
+
+
+def _active_paste_a_link_job_for_article(
+    session: Session,
+    article_id: uuid.UUID,
+) -> ScrapeJob | None:
+    return session.execute(
+        select(ScrapeJob)
+        .where(
+            ScrapeJob.kind == ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+            ScrapeJob.status.in_(ACTIVE_PASTE_A_LINK_STATUSES),
+            ScrapeJob.target_payload["article_id"].astext == str(article_id),
+        )
+        .order_by(ScrapeJob.queued_at.desc(), ScrapeJob.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _latest_force_project_id_for_article(
+    session: Session,
+    article_id: uuid.UUID,
+) -> str | None:
+    job = session.execute(
+        select(ScrapeJob)
+        .where(
+            ScrapeJob.kind == ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+            ScrapeJob.target_payload["article_id"].astext == str(article_id),
+        )
+        .order_by(ScrapeJob.queued_at.desc(), ScrapeJob.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if job is None or not isinstance(job.target_payload, dict):
+        return None
+    force_project_id = job.target_payload.get("force_project_id")
+    return force_project_id if isinstance(force_project_id, str) else None
 
 
 def _load_news_source(session: Session, source_slug: str) -> NewsSource:
@@ -228,6 +362,12 @@ def _serialize_article(article: NewsArticle) -> ResearchArticleDetail:
         body_text=article.body_text,
         body_text_hash=article.body_text_hash,
         raw_html_hash=article.raw_html_hash,
+        structural_signals_at=_iso(article.structural_signals_at),
+        triage_status=article.triage_status,
+        triage_at=_iso(article.triage_at),
+        triage_extraction_id=article.triage_extraction_id,
+        current_extraction_id=article.current_extraction_id,
+        current_extraction_version=article.current_extraction_version,
         ingest_method=article.ingest_method,
         ingested_by_user_id=article.ingested_by_user_id,
         notes=article.notes,
@@ -266,7 +406,6 @@ def _serialize_scrape_job(job: ScrapeJob) -> ScrapeJobResponse:
     trigger_type = (
         job.trigger_type.value if hasattr(job.trigger_type, "value") else job.trigger_type
     )
-    status = job.status.value if hasattr(job.status, "value") else job.status
     return ScrapeJobResponse(
         id=job.id,
         jurisdiction_id=job.jurisdiction_id,
@@ -276,7 +415,7 @@ def _serialize_scrape_job(job: ScrapeJob) -> ScrapeJobResponse:
         trigger_type=trigger_type,
         initiated_by_user_id=job.initiated_by_user_id,
         initiated_by_email=job.initiated_by_email,
-        status=status,
+        status=_job_status(job),
         queued_at=_iso_required(job.queued_at),
         started_at=_iso(job.started_at),
         completed_at=_iso(job.completed_at),
@@ -284,6 +423,10 @@ def _serialize_scrape_job(job: ScrapeJob) -> ScrapeJobResponse:
         error_text=job.error_text,
         progress=job.progress,
     )
+
+
+def _job_status(job: ScrapeJob) -> str:
+    return job.status.value if hasattr(job.status, "value") else job.status
 
 
 def _iso(value: datetime | None) -> str | None:

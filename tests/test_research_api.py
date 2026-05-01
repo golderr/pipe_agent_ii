@@ -12,7 +12,14 @@ from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.deps import get_db_session
 from tcg_pipeline.api.main import create_app
 from tcg_pipeline.api.routers import research as research_router
-from tcg_pipeline.db.models import NewsArticle, NewsSource, ScrapeJob, ScrapeJobKind
+from tcg_pipeline.db.models import (
+    NewsArticle,
+    NewsFetchStatus,
+    NewsSource,
+    ScrapeJob,
+    ScrapeJobKind,
+    ScrapeJobStatus,
+)
 from tcg_pipeline.settings import Settings
 
 USER_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -135,6 +142,173 @@ def test_get_research_article_returns_body_not_raw_html(
     assert payload["scrape_jobs"] == []
     assert payload["extractions"] == []
     assert payload["references"] == []
+
+
+def test_retry_research_article_fetch_queues_new_job(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_research_tables(postgres_session)
+    enqueued_jobs: list[tuple[uuid.UUID, str]] = []
+    monkeypatch.setattr(
+        research_router,
+        "enqueue_news_job_execution",
+        lambda job_id, *, kind, settings: enqueued_jobs.append((job_id, kind)) or True,
+    )
+    client = _client(postgres_session)
+    source = _news_source(postgres_session)
+    assert source is not None
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical="https://example.com/retry",
+        url_original="https://example.com/retry?utm_source=email",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCH_FAILED.value,
+        fetch_error_text="503 Service Unavailable",
+        http_status=503,
+        ingest_method=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        ingested_by_user_id=USER_ID,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    original_job = ScrapeJob(
+        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        source_name=source.slug,
+        status=ScrapeJobStatus.FAILED,
+        target_payload={
+            "article_id": str(article.id),
+            "url": article.url_original,
+            "url_canonical": article.url_canonical,
+            "url_hash": article.url_hash,
+            "force_project_id": str(uuid.UUID("22222222-2222-2222-2222-222222222222")),
+        },
+        error_text="503 Service Unavailable",
+    )
+    postgres_session.add(original_job)
+    postgres_session.flush()
+
+    response = client.post(
+        f"/research/articles/{article.id}/retry-fetch",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["article_id"] == str(article.id)
+    assert payload["status"] == "queued"
+    assert payload["existing_active_job"] is False
+    assert payload["scrape_job_id"] is not None
+    retry_job = postgres_session.get(ScrapeJob, uuid.UUID(payload["scrape_job_id"]))
+    assert retry_job is not None
+    assert retry_job.id != original_job.id
+    assert retry_job.kind == ScrapeJobKind.NEWS_PASTE_A_LINK.value
+    assert retry_job.status == ScrapeJobStatus.QUEUED
+    assert retry_job.target_payload == {
+        "article_id": str(article.id),
+        "url": article.url_original,
+        "url_canonical": article.url_canonical,
+        "url_hash": article.url_hash,
+        "force_project_id": "22222222-2222-2222-2222-222222222222",
+    }
+    assert retry_job.progress == {
+        "message": "Queued for news article refetch.",
+        "queue_backend": "rq",
+    }
+    postgres_session.refresh(article)
+    assert article.fetch_status == NewsFetchStatus.PENDING.value
+    assert article.fetch_error_text is None
+    assert article.http_status is None
+    assert enqueued_jobs == [(retry_job.id, ScrapeJobKind.NEWS_PASTE_A_LINK.value)]
+
+
+def test_retry_research_article_fetch_reuses_active_job(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_research_tables(postgres_session)
+    enqueue_calls: list[Any] = []
+    monkeypatch.setattr(
+        research_router,
+        "enqueue_news_job_execution",
+        lambda *args, **kwargs: enqueue_calls.append((args, kwargs)) or True,
+    )
+    client = _client(postgres_session)
+    source = _news_source(postgres_session)
+    assert source is not None
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical="https://example.com/retry-active",
+        url_original="https://example.com/retry-active",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCH_FAILED.value,
+        fetch_error_text="timeout",
+        ingest_method=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        ingested_by_user_id=USER_ID,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    active_job = ScrapeJob(
+        kind=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        source_name=source.slug,
+        status=ScrapeJobStatus.QUEUED,
+        target_payload={
+            "article_id": str(article.id),
+            "url": article.url_original,
+            "url_canonical": article.url_canonical,
+            "url_hash": article.url_hash,
+            "force_project_id": None,
+        },
+    )
+    postgres_session.add(active_job)
+    postgres_session.flush()
+
+    response = client.post(
+        f"/research/articles/{article.id}/retry-fetch",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "article_id": str(article.id),
+        "scrape_job_id": str(active_job.id),
+        "status": "queued",
+        "existing_active_job": True,
+    }
+    assert enqueue_calls == []
+
+
+def test_retry_research_article_fetch_rejects_non_terminal_status(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_research_tables(postgres_session)
+    monkeypatch.setattr(
+        research_router,
+        "enqueue_news_job_execution",
+        lambda *args, **kwargs: True,
+    )
+    client = _client(postgres_session)
+    source = _news_source(postgres_session)
+    assert source is not None
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical="https://example.com/already-fetched",
+        url_original="https://example.com/already-fetched",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        ingest_method=ScrapeJobKind.NEWS_PASTE_A_LINK.value,
+        ingested_by_user_id=USER_ID,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+
+    response = client.post(
+        f"/research/articles/{article.id}/retry-fetch",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Article fetch is not in a retryable terminal state."
 
 
 def _client(postgres_session: Session) -> TestClient:
