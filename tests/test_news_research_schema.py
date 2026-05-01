@@ -16,6 +16,7 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
             SELECT
                 slug,
                 name,
+                active,
                 schedule_cron,
                 schedule_timezone,
                 market_id,
@@ -27,10 +28,41 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
     ).mappings().one_or_none()
     assert news_source is not None
     assert news_source["name"] == "L.A. Business Journal"
-    assert news_source["schedule_cron"] == "0 13 * * *"
+    assert news_source["active"] is False
+    assert news_source["schedule_cron"] is None
     assert news_source["schedule_timezone"] == "America/Los_Angeles"
     assert news_source["market_id"] is not None
     assert news_source["jurisdiction_id"] is not None
+
+    urbanize_source = postgres_session.execute(
+        text(
+            """
+            SELECT
+                slug,
+                name,
+                active,
+                schedule_cron,
+                schedule_timezone,
+                market_id,
+                jurisdiction_id,
+                config
+            FROM news_sources
+            WHERE slug = 'urbanize_la'
+            """
+        )
+    ).mappings().one_or_none()
+    assert urbanize_source is not None
+    assert urbanize_source["name"] == "Urbanize LA"
+    assert urbanize_source["active"] is True
+    assert urbanize_source["schedule_cron"] == "30 7 * * *"
+    assert urbanize_source["schedule_timezone"] == "America/Los_Angeles"
+    assert urbanize_source["market_id"] is None
+    assert urbanize_source["jurisdiction_id"] is None
+    assert urbanize_source["config"]["fetch_path"] == "polite"
+    assert urbanize_source["config"]["hosts"] == ["la.urbanize.city"]
+    assert urbanize_source["config"]["source_strategy_doc"] == (
+        "docs/sources/news/urbanize_la.md"
+    )
 
     paste_source = postgres_session.execute(
         text(
@@ -159,6 +191,11 @@ def _ensure_news_schema(postgres_session: Session) -> None:
     }
     if "schedule_timezone" not in news_source_columns:
         pytest.skip("Apply the latest D.1 news schema migration before running tests.")
+    urbanize_source = postgres_session.execute(
+        text("SELECT 1 FROM news_sources WHERE slug = 'urbanize_la'")
+    ).scalar_one_or_none()
+    if urbanize_source is None:
+        pytest.skip("Apply migration 202605010025 before running news schema tests.")
     extraction_columns = {
         column["name"] for column in inspector.get_columns("news_extractions")
     }

@@ -79,6 +79,41 @@ def test_create_research_article_writes_article_and_job(
     assert enqueued_jobs == [(job.id, ScrapeJobKind.NEWS_PASTE_A_LINK.value)]
 
 
+def test_create_research_article_routes_configured_source_hosts(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_research_tables(postgres_session)
+    research_router.clear_news_source_route_cache()
+    source = _urbanize_news_source(postgres_session)
+    enqueued_jobs: list[tuple[uuid.UUID, str]] = []
+    monkeypatch.setattr(
+        research_router,
+        "enqueue_news_job_execution",
+        lambda job_id, *, kind, settings: enqueued_jobs.append((job_id, kind)) or True,
+    )
+    client = _client(postgres_session)
+
+    response = client.post(
+        "/research/articles",
+        json={
+            "url": "https://la.urbanize.city/post/test-routing?utm_source=newsletter",
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    article = postgres_session.get(NewsArticle, uuid.UUID(payload["article_id"]))
+    job = postgres_session.get(ScrapeJob, uuid.UUID(payload["scrape_job_id"]))
+    assert article is not None
+    assert job is not None
+    assert article.news_source_id == source.id
+    assert article.url_canonical == "https://la.urbanize.city/post/test-routing"
+    assert job.source_name == "urbanize_la"
+    assert enqueued_jobs == [(job.id, ScrapeJobKind.NEWS_PASTE_A_LINK.value)]
+
+
 def test_create_research_article_returns_existing_without_job(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -345,3 +380,28 @@ def _news_source(postgres_session: Session) -> NewsSource | None:
     return postgres_session.execute(
         select(NewsSource).where(NewsSource.slug == "news_paste_a_link")
     ).scalar_one_or_none()
+
+
+def _urbanize_news_source(postgres_session: Session) -> NewsSource:
+    source = postgres_session.execute(
+        select(NewsSource).where(NewsSource.slug == "urbanize_la")
+    ).scalar_one_or_none()
+    if source is None:
+        source = NewsSource(
+            slug="urbanize_la",
+            name="Urbanize LA",
+            base_url="https://la.urbanize.city",
+            collector_class="PoliteNewsCollector",
+            active=True,
+            schedule_cron="30 7 * * *",
+            schedule_timezone="America/Los_Angeles",
+            config={"hosts": ["la.urbanize.city"]},
+            market_id=None,
+            jurisdiction_id=None,
+        )
+        postgres_session.add(source)
+    else:
+        source.active = True
+        source.config = {"hosts": ["la.urbanize.city"]}
+    postgres_session.flush()
+    return source

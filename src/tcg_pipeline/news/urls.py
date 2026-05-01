@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -27,7 +28,7 @@ class CanonicalNewsUrl:
     source_slug: str
 
 
-def canonicalize_news_url(url: str) -> CanonicalNewsUrl:
+def canonicalize_news_url(url: str, *, source_slug: str | None = None) -> CanonicalNewsUrl:
     original_url = url.strip()
     parsed = urlsplit(original_url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
@@ -54,18 +55,54 @@ def canonicalize_news_url(url: str) -> CanonicalNewsUrl:
         original_url=original_url,
         canonical_url=canonical_url,
         url_hash=hashlib.sha256(canonical_url.encode("utf-8")).hexdigest(),
-        source_slug=source_slug_for_url(canonical_url),
+        source_slug=source_slug or source_slug_for_url(canonical_url),
     )
 
 
-def source_slug_for_url(url: str) -> str:
+def source_slug_for_url(
+    url: str,
+    *,
+    host_routes: Mapping[str, str] | Iterable[tuple[str, str]] | None = None,
+) -> str:
+    source_slug = configured_source_slug_for_url(url, host_routes=host_routes)
+    if source_slug is not None:
+        return source_slug
+    return PASTE_A_LINK_SOURCE_SLUG
+
+
+def configured_source_slug_for_url(
+    url: str,
+    *,
+    host_routes: Mapping[str, str] | Iterable[tuple[str, str]] | None,
+) -> str | None:
+    if not host_routes:
+        return None
     parsed = urlsplit(url)
     hostname = (parsed.hostname or "").lower()
-    path = parsed.path.lower()
-    if hostname == "bizjournals.com" or hostname.endswith(".bizjournals.com"):
-        if path.startswith("/losangeles"):
-            return BIZJOURNALS_LA_SOURCE_SLUG
-    return PASTE_A_LINK_SOURCE_SLUG
+    if not hostname:
+        return None
+    route_items = host_routes.items() if isinstance(host_routes, Mapping) else host_routes
+    for route_host, source_slug in route_items:
+        if host_matches_route(hostname, route_host):
+            return source_slug
+    return None
+
+
+def host_matches_route(hostname: str, route_host: str) -> bool:
+    normalized_hostname = hostname.lower().strip(".")
+    normalized_route = route_host.lower().strip()
+    if normalized_route.startswith("*."):
+        route_suffix = normalized_route[2:].strip(".")
+        return normalized_hostname == route_suffix or normalized_hostname.endswith(
+            f".{route_suffix}"
+        )
+    if normalized_route.startswith("."):
+        route_suffix = normalized_route[1:].strip(".")
+        return normalized_hostname == route_suffix or normalized_hostname.endswith(
+            f".{route_suffix}"
+        )
+    normalized_route = normalized_route.strip(".")
+    return normalized_hostname == normalized_route
 
 
 def _is_tracking_query_key(key: str) -> bool:

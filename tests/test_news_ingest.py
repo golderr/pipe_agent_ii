@@ -6,10 +6,10 @@ import httpx
 
 from tcg_pipeline.db.models import NewsFetchStatus
 from tcg_pipeline.news.ingest import fetch_article_pass0
-from tcg_pipeline.news.urls import canonicalize_news_url
+from tcg_pipeline.news.urls import canonicalize_news_url, source_slug_for_url
 
 
-def test_canonicalize_news_url_strips_tracking_and_detects_source() -> None:
+def test_canonicalize_news_url_strips_tracking_and_uses_fallback_source() -> None:
     canonical = canonicalize_news_url(
         "HTTPS://www.bizjournals.com/losangeles/news/story/?utm_source=x&b=2&a=1#top"
     )
@@ -17,8 +17,18 @@ def test_canonicalize_news_url_strips_tracking_and_detects_source() -> None:
     assert canonical.canonical_url == (
         "https://www.bizjournals.com/losangeles/news/story?a=1&b=2"
     )
-    assert canonical.source_slug == "bizjournals_la"
+    assert canonical.source_slug == "news_paste_a_link"
     assert len(canonical.url_hash) == 64
+
+
+def test_source_slug_for_url_uses_configured_host_routes() -> None:
+    assert (
+        source_slug_for_url(
+            "https://la.urbanize.city/post/project",
+            host_routes={"la.urbanize.city": "urbanize_la"},
+        )
+        == "urbanize_la"
+    )
 
 
 def test_canonicalize_news_url_falls_back_to_paste_source() -> None:

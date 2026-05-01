@@ -16,6 +16,7 @@ def test_get_logical_source_type_maps_runtime_source_names() -> None:
     assert get_logical_source_type("ladbs_inspections") == "ladbs_inspection"
     assert get_logical_source_type("costar") == "costar"
     assert get_logical_source_type("bizjournals_la") == "news_article"
+    assert get_logical_source_type("urbanize_la") == "news_article"
     assert get_logical_source_type("news_paste_a_link") == "news_article"
     assert get_logical_source_type("news_backfill") == "news_article"
     assert get_logical_source_type("news_reextraction") == "news_article"

@@ -4,7 +4,7 @@
 >
 > **Audience:** Engineers implementing Phase D. Researchers evaluating the system's behavior. A future contributor joining the team six months from now and asking "what is Phase D and why is it shaped this way?"
 >
-> **Last updated:** 2026-05-01 (D.2-docs Urbanize pivot revision — see Revision History)
+> **Last updated:** 2026-05-01 (D.2a Urbanize collector implementation — see Revision History)
 > **Owner:** Nate Goldstein (researcher), pipeline maintainers (engineering)
 >
 > **Read alongside:**
@@ -41,9 +41,9 @@ Active Phase D source posture:
 
 D.2a/D.6 gates added by this revision:
 
-- D.2a must repeat the five-URL validation through the seeded `urbanize_la`
-  source and host-routing path. D.2v used `news_paste_a_link`, so source-specific
-  routing was not exercised.
+- D.2a added the seeded `urbanize_la` source and host-routing path. D.2v used
+  `news_paste_a_link`, so D.6 must rerun those five URLs in staging through
+  `urbanize_la` before enabling cron.
 - Before D.6 enables the cron, rerun those five URLs in staging with an Anthropic
   key and verify Haiku triage plus Opus extraction/integration output.
 - Pass 1 tuning for comma-formatted unit counts, title/headline-only addresses,
@@ -317,8 +317,10 @@ VALUES (
     "rss_urls": ["https://la.urbanize.city/rss.xml"],
     "sitemap_urls": ["https://la.urbanize.city/sitemap.xml"],
     "robots_url": "https://la.urbanize.city/robots.txt",
+    "robots_cache_ttl_seconds": 86400,
     "rate_limit_seconds": 2,
-    "source_strategy_doc": "docs/sources/news/urbanize_la.md"
+    "source_strategy_doc": "docs/sources/news/urbanize_la.md",
+    "user_agent": "Mozilla/5.0 (compatible; TCGPipelineTracker/0.1; +https://tcg-pipeline.vercel.app)"
   }'::jsonb,
   NULL,
   NULL
@@ -1029,10 +1031,10 @@ markets; Orange County/Santa Monica/non-modeled articles may become discarded or
 new-candidate signal instead of being filtered at collection time.
 
 D.2v validated the five representative URLs through `news_paste_a_link`, not
-through `urbanize_la`. D.2a must repeat that validation after the source row and
-host routing are in place. Before D.6 turns on the cron, rerun the same URLs in
-staging with an Anthropic key so Haiku triage and Opus extraction/integration are
-smoke-tested against real Urbanize text.
+through `urbanize_la`. D.2a added the source row and host-routing path; before
+D.6 turns on the cron, rerun the same URLs in staging with an Anthropic key so
+Haiku triage and Opus extraction/integration are smoke-tested against real
+Urbanize text through the source-specific path.
 
 ### 6.2.1 Paid-source auth is deferred
 

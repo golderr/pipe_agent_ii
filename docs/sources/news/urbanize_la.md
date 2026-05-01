@@ -3,7 +3,7 @@
 ## Status
 
 - Source slug: `urbanize_la`
-- Status: validated for D.2a implementation; not yet seeded in `news_sources`
+- Status: seeded by Alembic migration `202605010025` for D.2a
 - Intended Phase D role: only live scheduled-source pilot
 - Logical source type: `news_article`
 - Source scope: market-unscoped (`market_id = NULL`, `jurisdiction_id = NULL`)
@@ -58,7 +58,7 @@ Relevant robots posture:
 - `User-agent: ChatGPT-User` and `User-agent: GPTBot` are disallowed. The collector should use the project-identifying `TCGPipelineTracker` user agent, not either of those bot names.
 - No crawl-delay directive observed.
 
-D.2a recommendation:
+D.2a collector posture:
 
 - Cache robots.txt for 24 hours.
 - Use RSS for daily incrementals and sitemap pages for backfill.
@@ -68,7 +68,7 @@ D.2a recommendation:
 
 ## Scope And Matching
 
-D.2a should seed `urbanize_la` without a market or jurisdiction. The collector
+D.2a seeds `urbanize_la` without a market or jurisdiction. The collector
 ingests all eligible Urbanize LA URLs; the matcher decides relevance across live
 markets. This is intentional:
 
@@ -104,7 +104,7 @@ Validation article IDs in the development DB:
 ## Quality Notes
 
 - Urbanize HTML is friendly to the existing Pass 0 stack: metadata title, author, publication date, body text, and open/paywall state persisted cleanly.
-- RSS descriptions include full-ish body HTML and tags; D.2a should still fetch canonical article pages so body extraction and hash behavior stay consistent across paste/scheduled/backfill paths.
+- RSS descriptions include full-ish body HTML and tags; D.2a still fetches canonical article pages so body extraction and hash behavior stay consistent across paste/scheduled/backfill paths.
 - Sitemap is large enough for a 12-month backfill but small enough to process politely in one dry-run pass.
 - D.2a-prep implemented the first Pass 1 tightening slice before high-volume backfill:
   - capture comma-formatted unit counts such as `2,250 residential units`
@@ -142,15 +142,23 @@ The Real Deal LA:
 - `/la/sitemap.xml` and root `/sitemap.xml` returned 404 in validation
 - The site has heavier frontend/paywall/commercial-news noise than Urbanize. Keep as D.late.E2 and require source-specific section filtering plus compliance review before any advanced fetch path.
 
-## Open Issues For D.2a
+## D.2a Implementation
 
-- Seed `urbanize_la` as the only active scheduled Phase D source.
-- Seed it with `market_id = NULL` and `jurisdiction_id = NULL`; matcher decides relevance.
-- Disable/unschedule `bizjournals_la` until paid-source capability ships.
-- Add `urbanize_la -> news_article` to `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`.
-- Add host routing for `la.urbanize.city` from `news_sources.config` or source YAML, with short in-process cache.
-- Confirm daily cron after a short production observation window. Initial candidate: `30 7 * * *` in `America/Los_Angeles`, with D.6 jitter.
-- Reuse the sanitized Urbanize validation fixtures and LA YIMBY-like RSS/article samples in `tests/fixtures/news/` so the polite collector stays source-generic and tests do not refetch live URLs.
+- `urbanize_la` is seeded as the only active scheduled Phase D source.
+- The row is market-unscoped (`market_id = NULL`, `jurisdiction_id = NULL`); matcher decides relevance.
+- `bizjournals_la` is inactive and unscheduled until paid-source capability ships.
+- `urbanize_la -> news_article` is present in `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`.
+- Host routing for `la.urbanize.city` comes from `news_sources.config.hosts` with a short in-process API cache.
+- Initial cron candidate is seeded as `30 7 * * *` in `America/Los_Angeles`; D.6 may add jitter.
+- Sanitized Urbanize validation fixtures and LA YIMBY-like RSS/article samples live under `tests/fixtures/news/`.
+
+## Open Issues For D.6
+
+- Rerun the five validated URLs in staging with an Anthropic key through the
+  seeded `urbanize_la` source path before enabling scheduled cron.
+- Confirm the daily cron after a short production observation window.
+- Move per-host rate limiting to Redis before multiple concurrent news workers
+  can hit the same publisher host.
 
 ## Code References
 

@@ -17,8 +17,8 @@ from tcg_pipeline.db.models import NewsFetchStatus
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (compatible; TCGPipelineTracker/0.1; +https://tcg-pipeline.vercel.app)"
 )
-# Generic D.7a fallback only. D.2 BizJournals auth must add source-specific
-# login/paywall markers from news_sources.config.
+# Generic polite fetcher. D.late.C paid-source auth must add source-specific
+# login/paywall markers from news_sources.config when that capability ships.
 PAYWALL_PATTERN = re.compile(
     r"\b(subscribe|subscription|sign in|log in|login|register to read|already a subscriber)\b",
     re.IGNORECASE,
@@ -50,8 +50,9 @@ def fetch_article_pass0(
     *,
     timeout_seconds: float = 20.0,
     client: httpx.Client | None = None,
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> ArticleFetchResult:
-    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    headers = {"User-Agent": user_agent}
     close_client = client is None
     active_client = client or httpx.Client(
         follow_redirects=True,

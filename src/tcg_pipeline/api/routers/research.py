@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from time import monotonic
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
@@ -31,7 +32,7 @@ from tcg_pipeline.db.models import (
     ScrapeJobStatus,
     ScrapeTriggerType,
 )
-from tcg_pipeline.news.urls import canonicalize_news_url
+from tcg_pipeline.news.urls import canonicalize_news_url, configured_source_slug_for_url
 from tcg_pipeline.settings import Settings
 from tcg_pipeline.workers.news_jobs import (
     enqueue_news_job_execution,
@@ -49,6 +50,9 @@ RETRYABLE_FETCH_STATUSES = {
     NewsFetchStatus.PAYWALLED.value,
     NewsFetchStatus.DEAD_LINK.value,
 }
+NEWS_SOURCE_ROUTE_CACHE_TTL_SECONDS = 300.0
+_news_source_route_cache_expires_at = 0.0
+_news_source_route_cache: tuple[tuple[str, str], ...] = ()
 
 
 @router.post("/research/articles")
@@ -198,6 +202,13 @@ def enqueue_paste_a_link_article(
         canonical_url = canonicalize_news_url(payload.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    source_slug = _source_slug_for_url(
+        session,
+        canonical_url.canonical_url,
+        fallback_source_slug=canonical_url.source_slug,
+    )
+    if source_slug != canonical_url.source_slug:
+        canonical_url = canonicalize_news_url(payload.url, source_slug=source_slug)
 
     existing_article = session.execute(
         select(NewsArticle).where(NewsArticle.url_hash == canonical_url.url_hash)
@@ -237,6 +248,53 @@ def enqueue_paste_a_link_article(
         progress_message="Queued for news article ingest.",
     )
     return article, job, False
+
+
+def clear_news_source_route_cache() -> None:
+    global _news_source_route_cache, _news_source_route_cache_expires_at
+    _news_source_route_cache = ()
+    _news_source_route_cache_expires_at = 0.0
+
+
+def _source_slug_for_url(
+    session: Session,
+    canonical_url: str,
+    *,
+    fallback_source_slug: str,
+) -> str:
+    configured_slug = configured_source_slug_for_url(
+        canonical_url,
+        host_routes=_load_news_source_host_routes(session),
+    )
+    return configured_slug or fallback_source_slug
+
+
+def _load_news_source_host_routes(session: Session) -> tuple[tuple[str, str], ...]:
+    global _news_source_route_cache, _news_source_route_cache_expires_at
+    now = monotonic()
+    if now < _news_source_route_cache_expires_at:
+        return _news_source_route_cache
+
+    routes: list[tuple[str, str]] = []
+    sources = session.execute(
+        select(NewsSource.slug, NewsSource.config)
+        .where(NewsSource.active.is_(True))
+        .order_by(NewsSource.slug.asc())
+    ).all()
+    for slug, config in sources:
+        if not isinstance(config, dict):
+            continue
+        hosts = config.get("hosts")
+        if not isinstance(hosts, list):
+            continue
+        for host in hosts:
+            if isinstance(host, str) and host.strip():
+                routes.append((host.strip(), slug))
+
+    routes.sort(key=lambda item: (-len(item[0].lstrip("*.")), item[0], item[1]))
+    _news_source_route_cache = tuple(routes)
+    _news_source_route_cache_expires_at = now + NEWS_SOURCE_ROUTE_CACHE_TTL_SECONDS
+    return _news_source_route_cache
 
 
 def _create_paste_a_link_job(
