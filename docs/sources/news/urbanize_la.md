@@ -132,6 +132,7 @@ scheduled scraping is enabled in D.6:
 - Source path: scheduled-style `news_scrape` job using `urbanize_la` and `PoliteNewsCollector`.
 - Result: 5 discovered, 5 fetched, 5 triaged relevant, 5 extraction passes `ok`, 0 failed fetches, 0 block-like/transient failures, 0 cost-cap skips.
 - Report artifact: `data/output/d6_urbanize_smoke_d6-smoke-20260501c.json` (ignored by git).
+- Repeat-run cleanup: `python scripts/run_d6_urbanize_smoke.py --allow-non-staging --cleanup-token <token>` deletes smoke articles, jobs, source runs, review items, and article evidence for a prior token. The runner refuses production environments even with `--allow-non-staging`.
 - Finding: the first run with `NEWS_EXTRACT_MAX_TOKENS=2500` truncated the multi-site Santa Monica article. The default and `.env.example` were raised to `5000`; staging/production worker env vars should use the same value before cron is enabled.
 
 ## Light Reconnaissance Of Deferred Sources

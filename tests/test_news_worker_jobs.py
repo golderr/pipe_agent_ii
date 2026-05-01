@@ -314,6 +314,71 @@ def test_scheduler_tick_skips_inactive_news_source(
     assert enqueued_count == 0
 
 
+def test_first_news_scrape_for_fresh_source_uses_no_since_cursor(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    unique_id = uuid.uuid4().hex
+    source = NewsSource(
+        slug=f"fresh-source-{unique_id}",
+        name="Fresh Source",
+        base_url="https://example.com",
+        collector_class="PoliteNewsCollector",
+        active=True,
+        schedule_cron="0 13 * * *",
+        schedule_timezone="UTC",
+        config={"fetch_path": "polite"},
+    )
+    postgres_session.add(source)
+    postgres_session.flush()
+    job = ScrapeJob(
+        kind=ScrapeJobKind.NEWS_SCRAPE.value,
+        source_name=source.slug,
+        trigger_type=ScrapeTriggerType.SCHEDULED,
+        status=ScrapeJobStatus.QUEUED,
+        target_payload={
+            "news_source_id": str(source.id),
+            "scheduled_for": "2026-05-01T13:00:00+00:00",
+        },
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+    seen_since: list[datetime | None] = []
+
+    class EmptyCollector:
+        def __init__(self, _loaded_source: NewsSource) -> None:
+            return None
+
+        def discover_incremental_urls(self, *, since: datetime | None = None):
+            seen_since.append(since)
+            return []
+
+        def close(self) -> None:
+            return None
+
+    news_jobs.run_news_scrape_job(
+        job.id,
+        collector_factory=EmptyCollector,
+        triage_runner=None,
+        extraction_runner=None,
+        integration_runner=None,
+    )
+
+    assert seen_since == [None]
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    assert refreshed_job is not None
+    assert refreshed_job.status == ScrapeJobStatus.COMPLETED
+
+
 def test_consecutive_block_like_runs_use_structured_counter(
     postgres_session: Session,
 ) -> None:

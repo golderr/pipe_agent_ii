@@ -7,14 +7,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.models import (
+    Evidence,
     NewsArticle,
     NewsExtraction,
     NewsProjectReference,
     NewsSource,
+    ReviewDecision,
+    ReviewItem,
     ScrapeJob,
     ScrapeJobKind,
     ScrapeJobStatus,
@@ -29,6 +32,7 @@ from tcg_pipeline.workers.news_jobs import run_news_scrape_job
 FIXTURE_PATH = Path("tests/fixtures/news/urbanize_la/pass1_validation_articles.json")
 DEFAULT_OUTPUT_DIR = Path("data/output")
 SMOKE_QUERY_KEY = "tcg_d6_smoke"
+PRODUCTION_ENVS = {"prod", "production"}
 
 
 class FixedUrbanizeSmokeCollector:
@@ -75,16 +79,23 @@ def main() -> None:
         action="store_true",
         help="Allow running when APP_ENV is not 'staging'.",
     )
+    parser.add_argument(
+        "--cleanup-token",
+        help="Delete database artifacts created by a previous smoke token and exit.",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
+    _validate_environment(settings.app_env, allow_non_staging=args.allow_non_staging)
+    if args.cleanup_token:
+        summary = cleanup_smoke_token(
+            source_slug=args.source_slug,
+            token=args.cleanup_token,
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
     if not settings.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is required for the D.6 smoke test.")
-    if settings.app_env != "staging" and not args.allow_non_staging:
-        raise RuntimeError(
-            "Refusing to run outside APP_ENV=staging without --allow-non-staging. "
-            f"Current APP_ENV is {settings.app_env!r}."
-        )
 
     fixture_rows = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     selected_rows = fixture_rows[: args.limit]
@@ -134,6 +145,150 @@ def main() -> None:
     output_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
     print(f"Report written: {output_path}")
+
+
+def _validate_environment(app_env: str | None, *, allow_non_staging: bool) -> None:
+    normalized_env = (app_env or "").strip().lower()
+    if normalized_env in PRODUCTION_ENVS:
+        raise RuntimeError(
+            "Refusing to run D.6 smoke against production. "
+            "Use staging or a development database."
+        )
+    if normalized_env != "staging" and not allow_non_staging:
+        raise RuntimeError(
+            "Refusing to run outside APP_ENV=staging without --allow-non-staging. "
+            f"Current APP_ENV is {app_env!r}."
+        )
+
+
+def cleanup_smoke_token(*, source_slug: str, token: str) -> dict:
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        source = session.execute(
+            select(NewsSource).where(NewsSource.slug == source_slug)
+        ).scalar_one_or_none()
+        if source is None:
+            raise RuntimeError(f"Missing news source: {source_slug}")
+        article_ids = (
+            session.execute(
+                select(NewsArticle.id).where(
+                    NewsArticle.news_source_id == source.id,
+                    NewsArticle.url_canonical.like(f"%{SMOKE_QUERY_KEY}={token}%"),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        job_rows = (
+            session.execute(
+                select(ScrapeJob.id, ScrapeJob.source_run_id).where(
+                    ScrapeJob.source_name == source_slug,
+                    ScrapeJob.target_payload["d6_smoke_token"].astext == token,
+                )
+            )
+            .all()
+        )
+        job_ids = [row.id for row in job_rows]
+        source_run_ids = [row.source_run_id for row in job_rows if row.source_run_id is not None]
+        reference_rows = []
+        if article_ids:
+            reference_rows = session.execute(
+                select(
+                    NewsProjectReference.review_item_id,
+                    NewsProjectReference.matched_evidence_id,
+                ).where(NewsProjectReference.article_id.in_(article_ids))
+            ).all()
+        review_item_ids = {
+            row.review_item_id for row in reference_rows if row.review_item_id is not None
+        }
+        if source_run_ids:
+            review_item_ids.update(
+                session.execute(
+                    select(ReviewItem.id).where(ReviewItem.source_run_id.in_(source_run_ids))
+                )
+                .scalars()
+                .all()
+            )
+        evidence_ids = {
+            row.matched_evidence_id
+            for row in reference_rows
+            if row.matched_evidence_id is not None
+        }
+        if article_ids:
+            evidence_ids.update(
+                session.execute(
+                    select(Evidence.id).where(
+                        Evidence.source_type == "news_article",
+                        Evidence.raw_data["article_id"].astext.in_(
+                            [str(article_id) for article_id in article_ids]
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        summary = {
+            "token": token,
+            "source_slug": source_slug,
+            "articles": len(article_ids),
+            "review_items": len(review_item_ids),
+            "evidence_rows": len(evidence_ids),
+            "scrape_jobs": len(job_ids),
+            "source_runs": len(source_run_ids),
+            "news_extractions": 0,
+            "news_project_references": 0,
+            "review_decisions": 0,
+        }
+        if article_ids:
+            summary["news_extractions"] = session.execute(
+                select(func.count()).select_from(NewsExtraction).where(
+                    NewsExtraction.article_id.in_(article_ids)
+                )
+            ).scalar_one()
+            summary["news_project_references"] = session.execute(
+                select(func.count()).select_from(NewsProjectReference).where(
+                    NewsProjectReference.article_id.in_(article_ids)
+                )
+            ).scalar_one()
+        if review_item_ids:
+            summary["review_decisions"] = _delete_count(
+                session,
+                delete(ReviewDecision).where(
+                    ReviewDecision.review_item_id.in_(review_item_ids)
+                ),
+            )
+            _delete_count(
+                session,
+                delete(ReviewItem).where(ReviewItem.id.in_(review_item_ids)),
+            )
+        if article_ids:
+            _delete_count(
+                session,
+                delete(NewsArticle).where(NewsArticle.id.in_(article_ids)),
+            )
+        if evidence_ids:
+            _delete_count(
+                session,
+                delete(Evidence).where(Evidence.id.in_(evidence_ids)),
+            )
+        if job_ids:
+            _delete_count(
+                session,
+                delete(ScrapeJob).where(ScrapeJob.id.in_(job_ids)),
+            )
+        if source_run_ids:
+            _delete_count(
+                session,
+                delete(SourceRun).where(SourceRun.id.in_(source_run_ids)),
+            )
+        session.commit()
+        return summary
+
+
+def _delete_count(session, statement) -> int:
+    result = session.execute(statement)
+    return int(result.rowcount or 0)
 
 
 def _build_report(
