@@ -21,6 +21,18 @@
 
 ## 0. Revision History
 
+### D.6 configured-environment smoke - 2026-05-01
+
+The five D.2v Urbanize URLs were rerun through a scheduled-style `news_scrape`
+job using the seeded `urbanize_la` source path and a live Anthropic key in the
+configured development environment (`APP_ENV=development`). The smoke found that
+`NEWS_EXTRACT_MAX_TOKENS=2500` truncated the multi-site Santa Monica article;
+the default was raised to `5000`. With that value, all five articles fetched,
+triaged relevant, and produced `ok` extraction output with no fetch failures,
+block-like failures, transient failures, or cost-cap skips. The production cron
+gate still requires repeating this check in the actual staging/production worker
+environment before `NEWS_SCHEDULER_LEADER=true` is enabled.
+
 ### D.2-docs Urbanize pivot revision - 2026-05-01
 
 This revision makes the active Phase D scheduled-source design Urbanize-first

@@ -39,6 +39,7 @@ from tcg_pipeline.news.llm import (
     LLMUsage,
     anthropic_usage,
     calculate_llm_cost_usd,
+    create_anthropic_message,
     pricing_for_model,
 )
 from tcg_pipeline.news.prompts import (
@@ -56,7 +57,7 @@ PASS3B_TRIGGER_NEW_CANDIDATE = "pass2_new_candidate"
 EXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
 REEXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
 EXTRACTION_TEMPERATURE = 0
-EXTRACTION_MAX_TOKENS = 2500
+EXTRACTION_MAX_TOKENS = 5000
 EXTRACTION_TOOL_NAME = "emit_project_extraction"
 PASS3A_PARSE_TRIGGER_STATUSES = frozenset(
     {
@@ -154,7 +155,8 @@ class AnthropicExtractionClient:
 
     def extract(self, prompt: RenderedPrompt) -> ExtractionLLMResponse:
         started_at = time.perf_counter()
-        response = self._client.messages.create(
+        response = create_anthropic_message(
+            self._client,
             model=self.model,
             max_tokens=self._max_tokens,
             temperature=EXTRACTION_TEMPERATURE,

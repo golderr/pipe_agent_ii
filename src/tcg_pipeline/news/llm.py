@@ -66,3 +66,24 @@ def anthropic_usage(usage: Any) -> LLMUsage:
         input_tokens_cached=cache_read,
         output_tokens=int(getattr(usage, "output_tokens", None) or 0),
     )
+
+
+def create_anthropic_message(
+    client: Any,
+    *,
+    temperature: int | float | None,
+    **kwargs: Any,
+) -> Any:
+    if temperature is None:
+        return client.messages.create(**kwargs)
+    try:
+        return client.messages.create(temperature=temperature, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - Anthropic SDK error classes vary by version.
+        if _is_temperature_deprecated_error(exc):
+            return client.messages.create(**kwargs)
+        raise
+
+
+def _is_temperature_deprecated_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "temperature" in text and "deprecated" in text

@@ -62,7 +62,7 @@ article ingest fall back to FastAPI background tasks.
 `ANTHROPIC_API_KEY` is required before enabling Phase D LLM passes in a worker
 environment. `NEWS_TRIAGE_MODEL` defaults to `claude-haiku-4-5-20251001`, and
 `NEWS_TRIAGE_MAX_TOKENS` defaults to `300`. `NEWS_EXTRACT_MODEL` defaults to
-`claude-opus-4-7`, and `NEWS_EXTRACT_MAX_TOKENS` defaults to `2500`.
+`claude-opus-4-7`, and `NEWS_EXTRACT_MAX_TOKENS` defaults to `5000`.
 Successful article fetches call Anthropic from the worker after Pass 1. If the
 key is missing, the scrape job still completes with durable non-LLM data
 persisted, the relevant LLM pass remains pending/skipped, and

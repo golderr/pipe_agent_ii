@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     news_triage_model: str = "claude-haiku-4-5-20251001"
     news_triage_max_tokens: int = Field(default=300, ge=1)
     news_extract_model: str = "claude-opus-4-7"
-    news_extract_max_tokens: int = Field(default=2500, ge=1)
+    news_extract_max_tokens: int = Field(default=5000, ge=1)
 
     api_cors_origins: str = "http://localhost:3000"
     api_auth_audience: str = "authenticated"

@@ -34,6 +34,7 @@ from tcg_pipeline.news.llm import (
     LLMUsage,
     anthropic_usage,
     calculate_llm_cost_usd,
+    create_anthropic_message,
     pricing_for_model,
 )
 from tcg_pipeline.news.prompts import RenderedPrompt, render_triage_prompt
@@ -112,7 +113,8 @@ class AnthropicTriageClient:
 
     def triage(self, prompt: RenderedPrompt) -> TriageLLMResponse:
         started_at = time.perf_counter()
-        response = self._client.messages.create(
+        response = create_anthropic_message(
+            self._client,
             model=self.model,
             max_tokens=self._max_tokens,
             temperature=TRIAGE_TEMPERATURE,

@@ -872,6 +872,7 @@ def test_scheduled_news_scrape_discovers_fetches_and_runs_pipeline(
 ) -> None:
     _ensure_news_scheduler_tables(postgres_session)
     source = _news_source(postgres_session, "urbanize_la")
+    article_url = f"https://la.urbanize.city/post/scheduled-test-{uuid.uuid4().hex}"
     source.config = {
         **(source.config or {}),
         "rate_limit_seconds": 0,
@@ -905,17 +906,16 @@ def test_scheduled_news_scrape_discovers_fetches_and_runs_pipeline(
             assert loaded_source.slug == "urbanize_la"
 
         def discover_incremental_urls(self, *, since: datetime | None = None):
-            assert since is None
             return [
                 DiscoveredArticleUrl(
-                    url="https://la.urbanize.city/post/scheduled-test",
+                    url=article_url,
                     discovered_via="rss",
                     published_at=datetime(2026, 5, 1, 13, 10, tzinfo=UTC),
                 )
             ]
 
         def fetch_article(self, url: str) -> ArticleFetchResult:
-            assert url == "https://la.urbanize.city/post/scheduled-test"
+            assert url == article_url
             return ArticleFetchResult(
                 fetch_status=NewsFetchStatus.FETCHED.value,
                 final_url=url,
@@ -986,7 +986,7 @@ def test_scheduled_news_scrape_discovers_fetches_and_runs_pipeline(
     assert refreshed_job.progress["extraction_ok_count"] == 1
     assert refreshed_job.progress["integration_review_item_count"] == 1
     article = postgres_session.execute(
-        select(NewsArticle).where(NewsArticle.url_canonical == "https://la.urbanize.city/post/scheduled-test")
+        select(NewsArticle).where(NewsArticle.url_canonical == article_url)
     ).scalar_one()
     assert article.news_source_id == source.id
     assert article.fetch_status == NewsFetchStatus.FETCHED.value

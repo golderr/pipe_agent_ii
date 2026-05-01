@@ -125,6 +125,15 @@ scheduled scraping is enabled in D.6:
 - Confirm Haiku triage, Opus extraction/re-extraction if triggered, matching,
   evidence integration, and review payloads produce sensible output.
 
+2026-05-01 configured-environment smoke:
+
+- Command: `python scripts/run_d6_urbanize_smoke.py --allow-non-staging --token d6-smoke-20260501c`
+- Environment observed by app settings: `APP_ENV=development`; this was not a separate staging deployment.
+- Source path: scheduled-style `news_scrape` job using `urbanize_la` and `PoliteNewsCollector`.
+- Result: 5 discovered, 5 fetched, 5 triaged relevant, 5 extraction passes `ok`, 0 failed fetches, 0 block-like/transient failures, 0 cost-cap skips.
+- Report artifact: `data/output/d6_urbanize_smoke_d6-smoke-20260501c.json` (ignored by git).
+- Finding: the first run with `NEWS_EXTRACT_MAX_TOKENS=2500` truncated the multi-site Santa Monica article. The default and `.env.example` were raised to `5000`; staging/production worker env vars should use the same value before cron is enabled.
+
 ## Light Reconnaissance Of Deferred Sources
 
 LA YIMBY:
@@ -154,8 +163,9 @@ The Real Deal LA:
 
 ## Open Issues For D.6
 
-- Rerun the five validated URLs in staging with an Anthropic key through the
-  seeded `urbanize_la` source path before enabling scheduled cron.
+- Repeat the successful five-URL Anthropic smoke on the actual staging or
+  production worker environment before enabling scheduled cron; the local
+  configured-environment run used `APP_ENV=development`.
 - Confirm the daily cron after a short production observation window.
 - Move per-host rate limiting to Redis before multiple concurrent news workers
   can hit the same publisher host.
