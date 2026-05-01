@@ -21,6 +21,42 @@
 
 ## 0. Revision History
 
+### D.2v source validation addendum - 2026-04-30
+
+Urbanize LA source validation confirmed the Phase D scheduled-source pivot. Detailed
+runbook notes are in `docs/sources/news/urbanize_la.md`.
+
+Findings:
+
+- `https://la.urbanize.city/robots.txt` returned HTTP 200. Article paths,
+  `/rss.xml`, `/sitemap.xml`, and neighborhood pages were not disallowed for a
+  normal project-identifying user agent. `/search/` is disallowed and should not
+  be crawled.
+- `https://la.urbanize.city/rss.xml` returned HTTP 200 with 10 current items.
+  The validation snapshot spanned 2026-04-27 through 2026-04-30, with multiple
+  morning posts per weekday.
+- `https://la.urbanize.city/sitemap.xml` returned a two-page sitemap index with
+  12,111 post URLs total. 988 URLs had `lastmod >= 2025-05-01`, matching the
+  approximate 12-month backfill horizon at validation time.
+- Five Urbanize article URLs were submitted through `POST /research/articles` in
+  the development DB and run through Pass 0 and Pass 1. All five returned
+  `fetch_status='fetched'`, HTTP 200, `paywall_state='open'`, and body text
+  between 1,442 and 2,298 characters. Triage/extraction were intentionally
+  disabled in that environment because no Anthropic key was configured.
+- Pass 1 quality was good enough for source validation but exposed tuning needs:
+  comma-formatted unit counts like `2,250 residential units` were not captured,
+  some title-only addresses were missed, and completion-date phrases should be
+  rechecked before high-volume backfill.
+- Light reconnaissance confirmed LA YIMBY (`https://layimby.com`) has
+  WordPress-style robots/feed/sitemap endpoints suitable for a later fixture and
+  D.late.E1 source. The Real Deal LA exposes `/la/feed/` but has heavier
+  frontend/paywall/commercial-news noise and remains a D.late.E2 candidate.
+
+D.2a should use RSS for incremental discovery, sitemap pages for dry-run/backfill
+discovery, a conservative per-host limiter, 24-hour robots cache, and source
+routing loaded from `news_sources.config` or source YAML rather than hardcoded
+publisher branches.
+
 ### v3 — 2026-04-28 (post second senior review)
 
 The v2 doc fixed the major architectural issues but introduced or left several lower-level mismatches against current code. Senior review caught all of them; v3 corrects them before implementation. Cumulative summary:
