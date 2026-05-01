@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>LA YIMBY Synthetic Feed</title>
+    <link>https://layimby.com</link>
+    <description>Synthetic WordPress-like fixture for D.2a polite collector tests.</description>
+    <item>
+      <title>Permits Filed For Apartments At 1234 Sample Avenue In Los Angeles</title>
+      <link>https://layimby.com/2026/04/permits-filed-for-apartments-at-1234-sample-avenue-in-los-angeles.html</link>
+      <guid isPermaLink="false">layimby-synthetic-1234-sample</guid>
+      <pubDate>Thu, 30 Apr 2026 13:05:00 +0000</pubDate>
+      <description><![CDATA[Plans call for 88 apartments at 1234 Sample Avenue in Los Angeles.]]></description>
+    </item>
+  </channel>
+</rss>

@@ -106,9 +106,10 @@ Validation article IDs in the development DB:
 - Urbanize HTML is friendly to the existing Pass 0 stack: metadata title, author, publication date, body text, and open/paywall state persisted cleanly.
 - RSS descriptions include full-ish body HTML and tags; D.2a should still fetch canonical article pages so body extraction and hash behavior stay consistent across paste/scheduled/backfill paths.
 - Sitemap is large enough for a 12-month backfill but small enough to process politely in one dry-run pass.
-- Pass 1 tightening is now explicit D.2a-prep work before high-volume backfill:
+- D.2a-prep implemented the first Pass 1 tightening slice before high-volume backfill:
   - capture comma-formatted unit counts such as `2,250 residential units`
   - scan title/headline metadata for title-only addresses such as `2101 W. 8th Street`
+  - support numbered street names such as `8th Street`
   - review completion-date extraction for phrases like `Completion is expected in Fall 2027`
 - All validation articles returned `paywall_state = open`. No actually gated Urbanize article was found during D.2v, so D.2a should not add speculative Urbanize paywall logic until one is observed.
 - Article-update behavior was not tested. D.2a/D.6 should treat changed `body_text_hash` on refetch as a known monitoring gap for dedup and stale-body behavior.
@@ -149,7 +150,7 @@ The Real Deal LA:
 - Add `urbanize_la -> news_article` to `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`.
 - Add host routing for `la.urbanize.city` from `news_sources.config` or source YAML, with short in-process cache.
 - Confirm daily cron after a short production observation window. Initial candidate: `30 7 * * *` in `America/Los_Angeles`, with D.6 jitter.
-- Add fixture coverage using sanitized Urbanize validation bodies plus LA YIMBY-like RSS/article samples so the polite collector stays source-generic and tests do not refetch live URLs.
+- Reuse the sanitized Urbanize validation fixtures and LA YIMBY-like RSS/article samples in `tests/fixtures/news/` so the polite collector stays source-generic and tests do not refetch live URLs.
 
 ## Code References
 

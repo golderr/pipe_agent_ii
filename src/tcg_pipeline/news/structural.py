@@ -34,7 +34,7 @@ class StructuralSignal:
 
 
 UNIT_COUNT_RE = re.compile(
-    r"(?<![\d.,])(?P<count>\d{2,5})[-\s]?"
+    r"(?<![\d.,])(?P<count>\d{1,3}(?:,\d{3})+|\d{2,5})[-\s]?"
     r"(?P<label>unit|units|apartment|apartments|residences|residential\s+units|"
     r"condos|condominium|condominiums|keys|rooms)\b",
     re.IGNORECASE,
@@ -42,7 +42,7 @@ UNIT_COUNT_RE = re.compile(
 ADDRESS_RE = re.compile(
     r"\b\d{2,6}(?:-\d{2,6})?\s+"
     r"(?:[NSEW]\.?\s+|North\s+|South\s+|East\s+|West\s+)?"
-    r"[A-Z][A-Za-z0-9.'-]*(?:\s+[A-Z][A-Za-z0-9.'-]*){0,5}\s+"
+    r"[A-Z0-9][A-Za-z0-9.'-]*(?:\s+[A-Z0-9][A-Za-z0-9.'-]*){0,5}\s+"
     r"(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Road|Rd\.?|Drive|Dr\.?|"
     r"Place|Pl\.?|Way|Lane|Ln\.?|Court|Ct\.?)"
     r"(?:,?\s+(?:Los Angeles|Hollywood|Downtown Los Angeles|DTLA))?"
@@ -66,8 +66,12 @@ DATE_LIKE_RE = re.compile(
 )
 DATE_STOPWORDS = {"now", "to", "in", "by", "at", "on"}
 DELIVERY_PHRASE_RE = re.compile(
-    r"\b(?P<prefix>expected to|scheduled to|will|set to|aiming to|projected to)\s+"
-    r"(?P<verb>deliver|open|complete|finish)\s+(?:(?:in|by)\s+)?"
+    r"\b(?:(?P<prefix>expected to|scheduled to|will|set to|aiming to|projected to)\s+"
+    r"(?P<verb>deliver|open|complete|finish)\s+(?:(?:in|by)\s+)?|"
+    r"(?P<noun>completion|delivery|opening)\s+(?:is\s+)?"
+    r"(?P<noun_prefix>expected|scheduled|projected|set)\s+(?:(?:for|in|by)\s+)?|"
+    r"(?P<prefix_noun>expected|scheduled|projected)\s+"
+    r"(?P<noun_after_prefix>completion|delivery|opening)\s+(?:(?:for|in|by)\s+)?)"
     r"(?P<target>(?:Q[1-4]\s+\d{4})|(?:(?:early|mid|late)\s+\d{4})|"
     r"(?:(?:spring|summer|fall|winter)\s+\d{4})|\d{4})\b",
     re.IGNORECASE,
@@ -156,6 +160,7 @@ STATUS_PHRASE_LOOKUP = {
 def build_structural_signals_payload(
     body_text: str,
     *,
+    title_text: str | None = None,
     session: Session | None = None,
     market_slug: str | None = None,
     market_id: uuid.UUID | None = None,
@@ -165,6 +170,7 @@ def build_structural_signals_payload(
     ran_at = now or datetime.now(UTC)
     signals = extract_structural_signals(
         body_text,
+        title_text=title_text,
         session=session,
         market_slug=market_slug,
         market_id=market_id,
@@ -190,6 +196,7 @@ def apply_structural_signals(
     ran_at = now or datetime.now(UTC)
     article.structural_signals = build_structural_signals_payload(
         article.body_text,
+        title_text=getattr(article, "title", None),
         session=session,
         market_slug=market_slug,
         market_id=market_id,
@@ -202,6 +209,7 @@ def apply_structural_signals(
 def extract_structural_signals(
     body_text: str,
     *,
+    title_text: str | None = None,
     session: Session | None = None,
     market_slug: str | None = None,
     market_id: uuid.UUID | None = None,
@@ -210,6 +218,7 @@ def extract_structural_signals(
     signals: list[StructuralSignal] = []
     signals.extend(_unit_count_signals(body_text))
     signals.extend(_address_signals(body_text, market_slug=market_slug))
+    signals.extend(_title_address_signals(title_text, market_slug=market_slug))
     signals.extend(_regex_identifier_signals(body_text))
     signals.extend(_date_signals(body_text, relative_base=published_at))
     signals.extend(_status_phrase_signals(body_text))
@@ -250,7 +259,12 @@ def _unit_count_signals(body_text: str) -> list[StructuralSignal]:
     return signals
 
 
-def _address_signals(body_text: str, *, market_slug: str | None) -> list[StructuralSignal]:
+def _address_signals(
+    body_text: str,
+    *,
+    market_slug: str | None,
+    source: str = "body",
+) -> list[StructuralSignal]:
     signals: list[StructuralSignal] = []
     for match in ADDRESS_RE.finditer(body_text):
         raw_address = match.group(0).rstrip(".,;:")
@@ -277,10 +291,20 @@ def _address_signals(body_text: str, *, market_slug: str | None) -> list[Structu
                     "zip": normalized.postal_code,
                 },
                 confidence=0.8,
-                metadata={"parser": normalized.parser},
+                metadata={"parser": normalized.parser, "source": source},
             )
         )
     return signals
+
+
+def _title_address_signals(
+    title_text: str | None,
+    *,
+    market_slug: str | None,
+) -> list[StructuralSignal]:
+    if not title_text:
+        return []
+    return _address_signals(title_text, market_slug=market_slug, source="title")
 
 
 def _regex_identifier_signals(body_text: str) -> list[StructuralSignal]:
@@ -407,6 +431,12 @@ def _delivery_phrase_signals(body_text: str) -> list[StructuralSignal]:
     for match in DELIVERY_PHRASE_RE.finditer(body_text):
         target = match.group("target")
         parsed = _parse_delivery_target(target)
+        phrase_type = (
+            match.group("verb")
+            or match.group("noun")
+            or match.group("noun_after_prefix")
+            or ""
+        ).lower()
         signals.append(
             StructuralSignal(
                 extractor="delivery_phrase",
@@ -417,7 +447,7 @@ def _delivery_phrase_signals(body_text: str) -> list[StructuralSignal]:
                 confidence=0.75 if parsed else 0.6,
                 metadata={
                     "target": target,
-                    "verb": match.group("verb").lower(),
+                    "phrase_type": phrase_type,
                 },
             )
         )

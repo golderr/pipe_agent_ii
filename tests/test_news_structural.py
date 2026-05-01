@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,8 @@ from tcg_pipeline.news.structural import (
     build_structural_signals_payload,
     extract_structural_signals,
 )
+
+FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "news"
 
 
 def test_structural_regex_extractors_capture_core_article_signals() -> None:
@@ -68,6 +72,96 @@ def test_structural_unit_count_ignores_partial_match_inside_price() -> None:
     assert [(signal.raw_match, signal.canonical) for signal in unit_counts] == [
         ("140-unit", 140)
     ]
+
+
+def test_structural_unit_count_captures_comma_formatted_counts() -> None:
+    signals = extract_structural_signals(
+        "Work begins on a mixed-use plan with 2,250 residential units.",
+        market_slug="los_angeles",
+    )
+
+    unit_signal = next(signal for signal in signals if signal.extractor == "unit_count")
+    assert unit_signal.raw_match == "2,250 residential units"
+    assert unit_signal.canonical == 2250
+
+
+def test_structural_address_scans_title_text() -> None:
+    title_text = "Affordable housing pitched for property at 2101 W. 8th Street in Westlake"
+    body_text = "The proposal would replace a commercial building with apartments."
+
+    signals = extract_structural_signals(
+        body_text,
+        title_text=title_text,
+        market_slug="los_angeles",
+    )
+
+    address_signal = next(signal for signal in signals if signal.extractor == "address")
+    assert address_signal.raw_match == "2101 W. 8th Street"
+    assert address_signal.metadata["source"] == "title"
+    assert title_text[address_signal.offset_start : address_signal.offset_end] == (
+        address_signal.raw_match
+    )
+    assert address_signal.canonical["canonical_address"].startswith(
+        "2101 WEST 8TH STREET"
+    )
+
+
+def test_structural_delivery_phrase_captures_completion_expected_form() -> None:
+    signals = extract_structural_signals(
+        "Completion is expected in Fall 2027, according to the developer.",
+        market_slug="los_angeles",
+    )
+
+    delivery_signal = next(
+        signal for signal in signals if signal.extractor == "delivery_phrase"
+    )
+    assert delivery_signal.raw_match == "Completion is expected in Fall 2027"
+    assert delivery_signal.canonical == "2027-10-01"
+
+
+def test_urbanize_validation_fixtures_cover_pass1_tuning_gaps() -> None:
+    fixture_path = FIXTURE_ROOT / "urbanize_la" / "pass1_validation_articles.json"
+    articles = {
+        item["slug"]: item
+        for item in json.loads(fixture_path.read_text(encoding="utf-8"))
+    }
+
+    westlake_signals = extract_structural_signals(
+        articles["westlake_2101_w_8th"]["body_text"],
+        title_text=articles["westlake_2101_w_8th"]["title"],
+        market_slug="los_angeles",
+    )
+    title_address = next(
+        signal
+        for signal in westlake_signals
+        if signal.extractor == "address" and signal.metadata["source"] == "title"
+    )
+    assert title_address.raw_match == "2101 W. 8th Street"
+
+    womens_center_signals = extract_structural_signals(
+        articles["downtown_womens_center_501_e_5th"]["body_text"],
+        title_text=articles["downtown_womens_center_501_e_5th"]["title"],
+        market_slug="los_angeles",
+    )
+    completion_signal = next(
+        signal
+        for signal in womens_center_signals
+        if signal.extractor == "delivery_phrase"
+    )
+    assert completion_signal.raw_match == "Completion is expected in Fall 2027"
+    assert completion_signal.canonical == "2027-10-01"
+
+    westminster_signals = extract_structural_signals(
+        articles["westminster_mall_2250_units"]["body_text"],
+        title_text=articles["westminster_mall_2250_units"]["title"],
+        market_slug="los_angeles",
+    )
+    assert any(
+        signal.extractor == "unit_count"
+        and signal.raw_match == "2,250 residential units"
+        and signal.canonical == 2250
+        for signal in westminster_signals
+    )
 
 
 def test_structural_date_signals_anchor_relative_dates_to_publication_date() -> None:
