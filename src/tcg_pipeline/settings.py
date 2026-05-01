@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     news_scheduler_leader: bool = False
     news_scheduler_interval_seconds: int = Field(default=60, ge=1)
     news_scheduler_catchup_hours: int = Field(default=24, ge=1)
+    news_scheduler_jitter_seconds: int = Field(default=300, ge=0)
     anthropic_api_key: str | None = None
     news_triage_model: str = "claude-haiku-4-5-20251001"
     news_triage_max_tokens: int = Field(default=300, ge=1)

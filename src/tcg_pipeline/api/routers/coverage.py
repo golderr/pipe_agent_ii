@@ -719,6 +719,11 @@ def _serialize_news_source_health(
             if isinstance(progress.get("failed_fetch_count"), int)
             else None
         ),
+        block_like_failure_count=(
+            latest_run.block_like_failure_count if latest_run else None
+        ),
+        transient_failure_count=latest_run.transient_failure_count if latest_run else None,
+        cost_cap_skipped_count=latest_run.cost_cap_skipped_count if latest_run else None,
         last_alert_key=alert.alert_key if alert else None,
         last_alert_severity=alert.severity if alert else None,
         last_alert_message=alert.message if alert else None,

@@ -66,6 +66,9 @@ type RawSourceRun = {
   rows_inserted: number | null;
   rows_updated: number | null;
   rows_unchanged: number | null;
+  block_like_failure_count: number | null;
+  transient_failure_count: number | null;
+  cost_cap_skipped_count: number | null;
   errors: string | null;
   error_text: string | null;
 };
@@ -233,6 +236,9 @@ function newsSourceHealthSummary(
     discoveredCount: recordsPulled,
     fetchedCount: fetched,
     failedCount: failed,
+    blockLikeFailureCount: latest?.block_like_failure_count ?? null,
+    transientFailureCount: latest?.transient_failure_count ?? null,
+    costCapSkippedCount: latest?.cost_cap_skipped_count ?? null,
     lastAlertKey: latestAlert?.alert_key ?? null,
     lastAlertSeverity: latestAlert?.severity ?? null,
     lastAlertMessage: latestAlert?.message ?? null,
@@ -318,7 +324,7 @@ export async function getCoverageData(): Promise<CoverageDataResult> {
     fetchAllRows<RawSourceRun>(
       supabase,
       "source_runs",
-      "id, market, jurisdiction_id, source_name, run_timestamp, finished_at, records_pulled, rows_inserted, rows_updated, rows_unchanged, errors, error_text"
+      "id, market, jurisdiction_id, source_name, run_timestamp, finished_at, records_pulled, rows_inserted, rows_updated, rows_unchanged, block_like_failure_count, transient_failure_count, cost_cap_skipped_count, errors, error_text"
     ),
     fetchAllRows<RawResearcherOverride>(
       supabase,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -126,6 +127,7 @@ class NewsScrapeRunStats:
     failed_fetch_count: int = 0
     block_like_failure_count: int = 0
     transient_failure_count: int = 0
+    cost_cap_skipped_count: int = 0
     triage_relevant_count: int = 0
     extraction_ok_count: int = 0
     integration_review_item_count: int = 0
@@ -247,10 +249,23 @@ def scheduler_tick(
             )
             if scheduled_for is None:
                 continue
+            jitter_seconds = _schedule_jitter_seconds(
+                source,
+                settings=resolved_settings,
+            )
+            scheduled_due_at, applied_jitter_seconds = _scheduled_due_time(
+                source_name=source.slug,
+                scheduled_for=scheduled_for,
+                max_jitter_seconds=jitter_seconds,
+            )
+            if current_time < scheduled_due_at:
+                continue
             job = _create_news_scrape_job(
                 session,
                 source=source,
                 scheduled_for=scheduled_for,
+                scheduled_due_at=scheduled_due_at,
+                jitter_seconds=applied_jitter_seconds,
             )
             if job is None:
                 continue
@@ -262,11 +277,17 @@ def scheduler_tick(
                 job.progress = {
                     "message": "Queued scheduled news scrape.",
                     "queue_backend": "rq",
+                    "scheduled_for": scheduled_for.isoformat(),
+                    "scheduled_due_at": scheduled_due_at.isoformat(),
+                    "jitter_seconds": applied_jitter_seconds,
                 }
             else:
                 job.progress = {
                     "message": "Scheduled news scrape row created; Redis queue unavailable.",
                     "queue_backend": "unavailable",
+                    "scheduled_for": scheduled_for.isoformat(),
+                    "scheduled_due_at": scheduled_due_at.isoformat(),
+                    "jitter_seconds": applied_jitter_seconds,
                 }
             enqueued_count += 1
         session.commit()
@@ -365,6 +386,8 @@ def run_news_scrape_job(
             triage_result: NewsTriageRunResult | None = None
             if triage_runner is not None:
                 triage_result = triage_runner(article_id)
+                if triage_result.skipped_reason == "cost_cap":
+                    stats.cost_cap_skipped_count += 1
                 if triage_result.relevant:
                     stats.triage_relevant_count += 1
             extraction_result: NewsExtractionRunResult | None = None
@@ -374,6 +397,10 @@ def run_news_scrape_job(
                 and extraction_runner is not None
             ):
                 extraction_result = extraction_runner(article_id)
+                if extraction_result.skipped_reason == "cost_cap":
+                    stats.cost_cap_skipped_count += 1
+                if extraction_result.reextraction_skipped_reason == "cost_cap":
+                    stats.cost_cap_skipped_count += 1
                 if (
                     extraction_result.parse_status == "ok"
                     or extraction_result.reextraction_parse_status == "ok"
@@ -1202,6 +1229,9 @@ def _finish_news_scrape_job(
         source_run.rows_updated = stats.fetched_count
         source_run.rows_unchanged = stats.existing_article_count
         source_run.new_matches = stats.integration_review_item_count
+        source_run.block_like_failure_count = stats.block_like_failure_count
+        source_run.transient_failure_count = stats.transient_failure_count
+        source_run.cost_cap_skipped_count = stats.cost_cap_skipped_count
         source_run.errors = stats.error_text
         if job.started_at is not None:
             source_run.duration_seconds = int((now - job.started_at).total_seconds())
@@ -1235,6 +1265,9 @@ def _fail_news_scrape_job(
             source_run.rows_inserted = stats.new_article_count
             source_run.rows_updated = stats.fetched_count
             source_run.rows_unchanged = stats.existing_article_count
+            source_run.block_like_failure_count = stats.block_like_failure_count
+            source_run.transient_failure_count = stats.transient_failure_count
+            source_run.cost_cap_skipped_count = stats.cost_cap_skipped_count
             source_run.errors = stats.error_text or str(error)
             source_run.error_text = str(error)
             if job is not None and job.started_at is not None:
@@ -1289,6 +1322,7 @@ def _news_scrape_progress_payload(
         "failed_fetch_count": stats.failed_fetch_count,
         "block_like_failure_count": stats.block_like_failure_count,
         "transient_failure_count": stats.transient_failure_count,
+        "cost_cap_skipped_count": stats.cost_cap_skipped_count,
         "triage_relevant_count": stats.triage_relevant_count,
         "extraction_ok_count": stats.extraction_ok_count,
         "integration_review_item_count": stats.integration_review_item_count,
@@ -1358,7 +1392,7 @@ def _consecutive_block_like_source_runs(session: Session, source_name: str) -> i
     )
     count = 0
     for row in rows:
-        if row.errors and "block_like_fetch_failure" in row.errors:
+        if row.block_like_failure_count > 0:
             count += 1
             continue
         break
@@ -1425,22 +1459,54 @@ def _scheduled_fire_time(
     return previous_fire.astimezone(UTC)
 
 
+def _schedule_jitter_seconds(source: NewsSource, *, settings: Settings) -> int:
+    config = source.config if isinstance(source.config, dict) else {}
+    configured = config.get("schedule_jitter_seconds")
+    if isinstance(configured, int) and configured >= 0:
+        return configured
+    return settings.news_scheduler_jitter_seconds
+
+
+def _scheduled_due_time(
+    *,
+    source_name: str,
+    scheduled_for: datetime,
+    max_jitter_seconds: int,
+) -> tuple[datetime, int]:
+    if max_jitter_seconds <= 0:
+        return scheduled_for, 0
+    normalized_scheduled_for = scheduled_for
+    if normalized_scheduled_for.tzinfo is None:
+        normalized_scheduled_for = normalized_scheduled_for.replace(tzinfo=UTC)
+    seed = f"{source_name}:{normalized_scheduled_for.astimezone(UTC).isoformat()}"
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    jitter_seconds = int.from_bytes(digest[:8], "big") % (max_jitter_seconds + 1)
+    return normalized_scheduled_for + timedelta(seconds=jitter_seconds), jitter_seconds
+
+
 def _create_news_scrape_job(
     session: Session,
     *,
     source: NewsSource,
     scheduled_for: datetime,
+    scheduled_due_at: datetime | None = None,
+    jitter_seconds: int = 0,
 ) -> ScrapeJob | None:
+    target_payload = {
+        "news_source_id": str(source.id),
+        "scheduled_for": scheduled_for.isoformat(),
+    }
+    if scheduled_due_at is not None:
+        target_payload["scheduled_due_at"] = scheduled_due_at.isoformat()
+    if jitter_seconds:
+        target_payload["jitter_seconds"] = jitter_seconds
     job = ScrapeJob(
         jurisdiction_id=source.jurisdiction_id,
         kind=ScrapeJobKind.NEWS_SCRAPE.value,
         source_name=source.slug,
         trigger_type=ScrapeTriggerType.SCHEDULED,
         status=ScrapeJobStatus.QUEUED,
-        target_payload={
-            "news_source_id": str(source.id),
-            "scheduled_for": scheduled_for.isoformat(),
-        },
+        target_payload=target_payload,
         progress={"message": "Scheduled news scrape created."},
     )
     try:

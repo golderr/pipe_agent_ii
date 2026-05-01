@@ -281,6 +281,17 @@ function NewsSourceHealthPanel({ sources }: { sources: CoverageNewsSourceHealth[
                 {number(source.discoveredCount ?? 0)} discovered, {number(source.fetchedCount ?? 0)} fetched,{" "}
                 {number(source.failedCount ?? 0)} failed
               </p>
+              {(source.costCapSkippedCount ?? 0) > 0 ? (
+                <p className="mt-1 text-amber-700">
+                  {number(source.costCapSkippedCount ?? 0)} cost-cap skipped
+                </p>
+              ) : null}
+              {(source.blockLikeFailureCount ?? 0) > 0 || (source.transientFailureCount ?? 0) > 0 ? (
+                <p className="mt-1 text-slate-500">
+                  {number(source.blockLikeFailureCount ?? 0)} block-like,{" "}
+                  {number(source.transientFailureCount ?? 0)} transient
+                </p>
+              ) : null}
               {source.lastAlertMessage ? (
                 <p className="mt-1 text-red-700">{source.lastAlertMessage}</p>
               ) : source.lastRunHadError ? (

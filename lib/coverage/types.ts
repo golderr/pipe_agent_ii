@@ -30,6 +30,9 @@ export type CoverageNewsSourceHealth = {
   discoveredCount: number | null;
   fetchedCount: number | null;
   failedCount: number | null;
+  blockLikeFailureCount: number | null;
+  transientFailureCount: number | null;
+  costCapSkippedCount: number | null;
   lastAlertKey: string | null;
   lastAlertSeverity: string | null;
   lastAlertMessage: string | null;

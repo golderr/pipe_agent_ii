@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.db.models import (
@@ -123,6 +123,227 @@ def test_scheduled_fire_time_respects_los_angeles_timezone() -> None:
     assert winter_fire == datetime(2026, 1, 15, 21, 0, tzinfo=UTC)
 
 
+def test_scheduled_due_time_is_deterministic_and_bounded() -> None:
+    scheduled_for = datetime(2026, 5, 1, 14, 30, tzinfo=UTC)
+
+    first_due, first_jitter = news_jobs._scheduled_due_time(
+        source_name="urbanize_la",
+        scheduled_for=scheduled_for,
+        max_jitter_seconds=300,
+    )
+    second_due, second_jitter = news_jobs._scheduled_due_time(
+        source_name="urbanize_la",
+        scheduled_for=scheduled_for,
+        max_jitter_seconds=300,
+    )
+
+    assert first_due == second_due
+    assert first_jitter == second_jitter
+    assert 0 <= first_jitter <= 300
+    assert first_due == scheduled_for + timedelta(seconds=first_jitter)
+
+
+def test_scheduler_tick_enqueues_due_news_scrape(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("croniter")
+    _ensure_news_scheduler_tables(postgres_session)
+    postgres_session.execute(update(NewsSource).values(active=False))
+    unique_id = uuid.uuid4().hex
+    source = NewsSource(
+        slug=f"scheduler-source-{unique_id}",
+        name="Scheduler Source",
+        base_url="https://example.com",
+        collector_class="PoliteNewsCollector",
+        active=True,
+        schedule_cron="0 13 * * *",
+        schedule_timezone="UTC",
+        config={"fetch_path": "polite", "schedule_jitter_seconds": 0},
+    )
+    postgres_session.add(source)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    queued: list[uuid.UUID] = []
+
+    def fake_enqueue(job_id: uuid.UUID, **_kwargs: object) -> bool:
+        queued.append(job_id)
+        return True
+
+    monkeypatch.setattr(news_jobs, "enqueue_news_job_execution", fake_enqueue)
+
+    enqueued_count = news_jobs.scheduler_tick(
+        session_factory=task_session_factory,
+        settings=Settings(app_env="test", news_scheduler_jitter_seconds=0),
+        now=datetime(2026, 5, 1, 13, 1, tzinfo=UTC),
+    )
+
+    assert enqueued_count == 1
+    job = postgres_session.execute(
+        select(ScrapeJob).where(ScrapeJob.source_name == source.slug)
+    ).scalar_one()
+    assert queued == [job.id]
+    assert job.kind == ScrapeJobKind.NEWS_SCRAPE.value
+    assert job.status == ScrapeJobStatus.QUEUED
+    assert job.target_payload == {
+        "news_source_id": str(source.id),
+        "scheduled_for": "2026-05-01T13:00:00+00:00",
+        "scheduled_due_at": "2026-05-01T13:00:00+00:00",
+    }
+    assert job.progress == {
+        "message": "Queued scheduled news scrape.",
+        "queue_backend": "rq",
+        "scheduled_for": "2026-05-01T13:00:00+00:00",
+        "scheduled_due_at": "2026-05-01T13:00:00+00:00",
+        "jitter_seconds": 0,
+    }
+
+
+def test_scheduler_tick_waits_until_jittered_due_time(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("croniter")
+    _ensure_news_scheduler_tables(postgres_session)
+    postgres_session.execute(update(NewsSource).values(active=False))
+    unique_id = uuid.uuid4().hex
+    source_slug = f"jitter-source-{unique_id}"
+    scheduled_for = datetime(2026, 5, 1, 13, 0, tzinfo=UTC)
+    due_at, jitter_seconds = news_jobs._scheduled_due_time(
+        source_name=source_slug,
+        scheduled_for=scheduled_for,
+        max_jitter_seconds=300,
+    )
+    while jitter_seconds == 0:
+        source_slug = f"{source_slug}x"
+        due_at, jitter_seconds = news_jobs._scheduled_due_time(
+            source_name=source_slug,
+            scheduled_for=scheduled_for,
+            max_jitter_seconds=300,
+        )
+    source = NewsSource(
+        slug=source_slug,
+        name="Jitter Source",
+        base_url="https://example.com",
+        collector_class="PoliteNewsCollector",
+        active=True,
+        schedule_cron="0 13 * * *",
+        schedule_timezone="UTC",
+        config={"fetch_path": "polite", "schedule_jitter_seconds": 300},
+    )
+    postgres_session.add(source)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(
+        news_jobs,
+        "enqueue_news_job_execution",
+        lambda *_args, **_kwargs: True,
+    )
+
+    early_count = news_jobs.scheduler_tick(
+        session_factory=task_session_factory,
+        settings=Settings(app_env="test", news_scheduler_jitter_seconds=300),
+        now=due_at - timedelta(seconds=1),
+    )
+    due_count = news_jobs.scheduler_tick(
+        session_factory=task_session_factory,
+        settings=Settings(app_env="test", news_scheduler_jitter_seconds=300),
+        now=due_at,
+    )
+
+    assert early_count == 0
+    assert due_count == 1
+    job = postgres_session.execute(
+        select(ScrapeJob).where(ScrapeJob.source_name == source.slug)
+    ).scalar_one()
+    assert job.target_payload == {
+        "news_source_id": str(source.id),
+        "scheduled_for": scheduled_for.isoformat(),
+        "scheduled_due_at": due_at.isoformat(),
+        "jitter_seconds": jitter_seconds,
+    }
+
+
+def test_scheduler_tick_skips_inactive_news_source(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("croniter")
+    _ensure_news_scheduler_tables(postgres_session)
+    postgres_session.execute(update(NewsSource).values(active=False))
+    source = NewsSource(
+        slug=f"inactive-source-{uuid.uuid4().hex}",
+        name="Inactive Source",
+        base_url="https://example.com",
+        collector_class="PoliteNewsCollector",
+        active=False,
+        schedule_cron="0 13 * * *",
+        schedule_timezone="UTC",
+        config={"fetch_path": "polite", "schedule_jitter_seconds": 0},
+    )
+    postgres_session.add(source)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(
+        news_jobs,
+        "enqueue_news_job_execution",
+        lambda *_args, **_kwargs: pytest.fail("Inactive source should not enqueue."),
+    )
+
+    enqueued_count = news_jobs.scheduler_tick(
+        session_factory=task_session_factory,
+        settings=Settings(app_env="test", news_scheduler_jitter_seconds=0),
+        now=datetime(2026, 5, 1, 13, 1, tzinfo=UTC),
+    )
+
+    assert enqueued_count == 0
+
+
+def test_consecutive_block_like_runs_use_structured_counter(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source_name = f"block-like-source-{uuid.uuid4().hex}"
+    older = SourceRun(
+        market="unscoped",
+        source_name=source_name,
+        collection_mode="incremental",
+        trigger_type=ScrapeTriggerType.SCHEDULED.value,
+        run_timestamp=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        records_pulled=1,
+        block_like_failure_count=1,
+    )
+    latest = SourceRun(
+        market="unscoped",
+        source_name=source_name,
+        collection_mode="incremental",
+        trigger_type=ScrapeTriggerType.SCHEDULED.value,
+        run_timestamp=datetime(2026, 5, 1, 13, 0, tzinfo=UTC),
+        records_pulled=1,
+        block_like_failure_count=0,
+        errors="diagnostic mentioned block_like_fetch_failure but was not block-like",
+    )
+    postgres_session.add_all([older, latest])
+    postgres_session.flush()
+
+    assert news_jobs._consecutive_block_like_source_runs(postgres_session, source_name) == 0
+
+
 def test_worker_settings_validate_positive_intervals() -> None:
     Settings(app_env="test", worker_health_port=0)
 
@@ -134,6 +355,8 @@ def test_worker_settings_validate_positive_intervals() -> None:
         Settings(app_env="test", news_scheduler_interval_seconds=0)
     with pytest.raises(ValidationError):
         Settings(app_env="test", news_scheduler_catchup_hours=0)
+    with pytest.raises(ValidationError):
+        Settings(app_env="test", news_scheduler_jitter_seconds=-1)
     with pytest.raises(ValidationError):
         Settings(app_env="test", worker_health_port=-1)
 
@@ -780,6 +1003,106 @@ def test_scheduled_news_scrape_discovers_fetches_and_runs_pipeline(
     assert source_run.rows_updated == 1
     assert source_run.rows_unchanged == 0
     assert source_run.new_matches == 1
+    assert source_run.block_like_failure_count == 0
+    assert source_run.transient_failure_count == 0
+    assert source_run.cost_cap_skipped_count == 0
+    assert source_run.errors is None
+
+
+def test_scheduled_news_scrape_counts_cost_cap_skips(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    source.config = {
+        **(source.config or {}),
+        "rate_limit_seconds": 0,
+        "transient_retry_attempts": 1,
+        "transient_retry_backoff_seconds": 0,
+    }
+    postgres_session.flush()
+    article_url = f"https://la.urbanize.city/post/cost-cap-{uuid.uuid4().hex}"
+    job = ScrapeJob(
+        jurisdiction_id=source.jurisdiction_id,
+        kind=ScrapeJobKind.NEWS_SCRAPE.value,
+        source_name=source.slug,
+        trigger_type=ScrapeTriggerType.SCHEDULED,
+        status=ScrapeJobStatus.QUEUED,
+        target_payload={
+            "news_source_id": str(source.id),
+            "scheduled_for": "2026-05-01T14:30:00+00:00",
+        },
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+
+    class FakeCollector:
+        def __init__(self, _loaded_source: NewsSource) -> None:
+            return None
+
+        def discover_incremental_urls(self, *, since: datetime | None = None):
+            return [
+                DiscoveredArticleUrl(
+                    url=article_url,
+                    discovered_via="rss",
+                    published_at=datetime(2026, 5, 1, 13, 10, tzinfo=UTC),
+                )
+            ]
+
+        def fetch_article(self, url: str) -> ArticleFetchResult:
+            return ArticleFetchResult(
+                fetch_status=NewsFetchStatus.FETCHED.value,
+                final_url=url,
+                http_status=200,
+                raw_html="<html><body>Article</body></html>",
+                raw_html_hash="rawhash",
+                body_text="Developer announced a 140-unit project in Los Angeles.",
+                body_text_hash="bodyhash",
+                title="Scheduled Urbanize cost cap test",
+                published_at=datetime(2026, 5, 1, 13, 10, tzinfo=UTC),
+                paywall_state="open",
+            )
+
+        def close(self) -> None:
+            return None
+
+    def cost_cap_triage_runner(article_id: uuid.UUID) -> NewsTriageRunResult:
+        return NewsTriageRunResult(
+            article_id=article_id,
+            extraction_id=None,
+            triage_status=NewsTriageStatus.PENDING.value,
+            relevant=None,
+            reason=None,
+            parse_status=None,
+            skipped_reason="cost_cap",
+        )
+
+    news_jobs.run_news_scrape_job(
+        job.id,
+        collector_factory=FakeCollector,
+        triage_runner=cost_cap_triage_runner,
+        extraction_runner=None,
+        integration_runner=None,
+    )
+
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    assert refreshed_job is not None
+    assert refreshed_job.status == ScrapeJobStatus.COMPLETED
+    assert refreshed_job.progress["cost_cap_skipped_count"] == 1
+    assert refreshed_job.progress["triage_relevant_count"] == 0
+    assert refreshed_job.progress["extraction_ok_count"] == 0
+    source_run = postgres_session.get(SourceRun, refreshed_job.source_run_id)
+    assert source_run is not None
+    assert source_run.cost_cap_skipped_count == 1
     assert source_run.errors is None
 
 
@@ -853,6 +1176,9 @@ def test_scheduled_news_scrape_auto_pauses_after_block_like_failure(
     assert refreshed_source.active is False
     source_run = postgres_session.get(SourceRun, refreshed_job.source_run_id)
     assert source_run is not None
+    assert source_run.block_like_failure_count == 1
+    assert source_run.transient_failure_count == 0
+    assert source_run.cost_cap_skipped_count == 0
     assert "block_like_fetch_failure" in (source_run.errors or "")
     alerts = postgres_session.execute(
         select(SystemAlert).where(
@@ -947,6 +1273,20 @@ def _ensure_news_scheduler_tables(postgres_session: Session) -> None:
     ]
     if missing:
         pytest.skip(f"Apply D.1 migrations before running scheduler tests: {missing}")
+    source_run_columns = {
+        column["name"] for column in inspector.get_columns("source_runs")
+    }
+    required_source_run_columns = {
+        "block_like_failure_count",
+        "transient_failure_count",
+        "cost_cap_skipped_count",
+    }
+    missing_source_run_columns = sorted(required_source_run_columns - source_run_columns)
+    if missing_source_run_columns:
+        pytest.skip(
+            "Apply migration 202605010026 before running scheduler tests: "
+            f"{missing_source_run_columns}"
+        )
 
 
 def _news_source(postgres_session: Session, slug: str) -> NewsSource:

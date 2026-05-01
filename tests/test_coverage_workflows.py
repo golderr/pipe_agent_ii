@@ -302,6 +302,9 @@ def test_list_news_source_health_reports_latest_run_and_alert(
         rows_inserted=3,
         rows_updated=2,
         rows_unchanged=1,
+        block_like_failure_count=1,
+        transient_failure_count=0,
+        cost_cap_skipped_count=2,
         errors="block_like_fetch_failure: article returned HTTP 429",
         finished_at=datetime(2026, 5, 1, 15, 0, tzinfo=UTC),
     )
@@ -338,6 +341,9 @@ def test_list_news_source_health_reports_latest_run_and_alert(
     assert item.discovered_count == 4
     assert item.fetched_count == 2
     assert item.failed_count == 2
+    assert item.block_like_failure_count == 1
+    assert item.transient_failure_count == 0
+    assert item.cost_cap_skipped_count == 2
     assert item.last_run_had_error is True
     assert item.last_alert_key == "news_source_auto_paused"
     assert item.last_alert_severity == "high"
@@ -514,4 +520,18 @@ def _ensure_coverage_tables(postgres_session: Session) -> None:
         pytest.skip(
             "Apply migration 202604290020 before running coverage tests: "
             f"{missing_columns}"
+        )
+    source_run_columns = {
+        column["name"] for column in inspector.get_columns("source_runs")
+    }
+    required_source_run_columns = {
+        "block_like_failure_count",
+        "transient_failure_count",
+        "cost_cap_skipped_count",
+    }
+    missing_source_run_columns = sorted(required_source_run_columns - source_run_columns)
+    if missing_source_run_columns:
+        pytest.skip(
+            "Apply migration 202605010026 before running coverage tests: "
+            f"{missing_source_run_columns}"
         )

@@ -274,6 +274,9 @@ class NewsSourceHealthResponse(BaseModel):
     discovered_count: int | None
     fetched_count: int | None
     failed_count: int | None
+    block_like_failure_count: int | None
+    transient_failure_count: int | None
+    cost_cap_skipped_count: int | None
     last_alert_key: str | None
     last_alert_severity: str | None
     last_alert_message: str | None

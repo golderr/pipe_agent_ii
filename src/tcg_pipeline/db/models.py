@@ -943,6 +943,24 @@ class SourceRun(Base):
     rows_inserted: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rows_updated: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rows_unchanged: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    block_like_failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    transient_failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    cost_cap_skipped_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     errors: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
