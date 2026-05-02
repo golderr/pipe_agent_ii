@@ -722,13 +722,12 @@ def _mark_prior_references_superseded(
     current_extraction_id: uuid.UUID,
     now: datetime,
 ) -> None:
-    if prior_extraction_id is None or prior_extraction_id == current_extraction_id:
-        return
+    _ = prior_extraction_id
     prior_references = (
         session.execute(
             select(NewsProjectReference).where(
                 NewsProjectReference.article_id == article_id,
-                NewsProjectReference.extraction_id == prior_extraction_id,
+                NewsProjectReference.extraction_id != current_extraction_id,
             )
         )
         .scalars()

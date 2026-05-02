@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -307,11 +308,14 @@ def _build_report(
             select(NewsSource).where(NewsSource.slug == source_slug)
         ).scalar_one()
         article_reports = []
+        article_ids = []
         for fixture, smoke_url in zip(fixture_rows, smoke_urls, strict=True):
             canonical = canonicalize_news_url(smoke_url, source_slug=source_slug)
             article = session.execute(
                 select(NewsArticle).where(NewsArticle.url_hash == canonical.url_hash)
             ).scalar_one_or_none()
+            if article is not None:
+                article_ids.append(article.id)
             article_reports.append(
                 _article_report(
                     session,
@@ -347,6 +351,13 @@ def _build_report(
             ),
             "source_slug": source_slug,
             "token": token,
+            "reference_breakdown": _reference_breakdown(session, article_ids),
+            "review_item_breakdown": _review_item_breakdown(
+                session,
+                article_ids=article_ids,
+                source_run_id=source_run.id if source_run else None,
+            ),
+            "extraction_call_breakdown": _extraction_call_breakdown(session, article_ids),
             "articles": article_reports,
         }
 
@@ -370,11 +381,28 @@ def _article_report(
     triage = _latest_extraction(session, article.id, "triage")
     extraction = _latest_extraction(session, article.id, "extraction")
     reextraction = _latest_extraction(session, article.id, "reextraction")
-    reference_count = session.execute(
-        select(func.count())
-        .select_from(NewsProjectReference)
-        .where(NewsProjectReference.article_id == article.id)
-    ).scalar_one()
+    references = (
+        session.execute(
+            select(NewsProjectReference)
+            .where(NewsProjectReference.article_id == article.id)
+            .order_by(
+                NewsProjectReference.extraction_id,
+                NewsProjectReference.reference_index,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    current_references = [
+        reference
+        for reference in references
+        if reference.extraction_id == article.current_extraction_id
+    ]
+    prior_references = [
+        reference
+        for reference in references
+        if reference.extraction_id != article.current_extraction_id
+    ]
     linked_reference_count = session.execute(
         select(func.count())
         .select_from(NewsProjectReference)
@@ -383,6 +411,18 @@ def _article_report(
             NewsProjectReference.review_item_id.is_not(None),
         )
     ).scalar_one()
+    review_item_ids = {
+        reference.review_item_id
+        for reference in references
+        if reference.review_item_id is not None
+    }
+    review_item_type_counts = Counter()
+    if review_item_ids:
+        review_items = session.execute(
+            select(ReviewItem).where(ReviewItem.id.in_(review_item_ids))
+        ).scalars()
+        for item in review_items:
+            review_item_type_counts[_enum_value(item.item_type)] += 1
     return {
         "slug": fixture["slug"],
         "source_url": fixture["url"],
@@ -407,12 +447,203 @@ def _article_report(
             else None
         ),
         "reextraction_parse_status": reextraction.parse_status if reextraction else None,
-        "reference_count": reference_count,
+        "reference_count": len(references),
+        "current_reference_count": len(current_references),
+        "prior_reference_count": len(prior_references),
         "linked_reference_count": linked_reference_count,
+        "match_status_counts": _counter_dict(
+            Counter(reference.match_status for reference in references)
+        ),
+        "current_match_status_counts": _counter_dict(
+            Counter(reference.match_status for reference in current_references)
+        ),
+        "prior_match_status_counts": _counter_dict(
+            Counter(reference.match_status for reference in prior_references)
+        ),
+        "review_item_type_counts": _counter_dict(review_item_type_counts),
+        "extraction_calls": _extraction_calls_for_article(session, article.id),
         "current_extraction_id": (
             str(article.current_extraction_id) if article.current_extraction_id else None
         ),
     }
+
+
+def _reference_breakdown(session, article_ids: list[uuid.UUID]) -> dict:
+    if not article_ids:
+        return {
+            "total": 0,
+            "current": 0,
+            "prior": 0,
+            "match_status_counts": {},
+            "current_match_status_counts": {},
+            "prior_match_status_counts": {},
+        }
+    articles = {
+        row.id: row.current_extraction_id
+        for row in session.execute(
+            select(NewsArticle.id, NewsArticle.current_extraction_id).where(
+                NewsArticle.id.in_(article_ids)
+            )
+        )
+    }
+    references = (
+        session.execute(
+            select(NewsProjectReference).where(
+                NewsProjectReference.article_id.in_(article_ids)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    current_references = [
+        reference
+        for reference in references
+        if reference.extraction_id == articles.get(reference.article_id)
+    ]
+    prior_references = [
+        reference
+        for reference in references
+        if reference.extraction_id != articles.get(reference.article_id)
+    ]
+    return {
+        "total": len(references),
+        "current": len(current_references),
+        "prior": len(prior_references),
+        "match_status_counts": _counter_dict(
+            Counter(reference.match_status for reference in references)
+        ),
+        "current_match_status_counts": _counter_dict(
+            Counter(reference.match_status for reference in current_references)
+        ),
+        "prior_match_status_counts": _counter_dict(
+            Counter(reference.match_status for reference in prior_references)
+        ),
+    }
+
+
+def _review_item_breakdown(
+    session,
+    *,
+    article_ids: list[uuid.UUID],
+    source_run_id: uuid.UUID | None,
+) -> dict:
+    if not article_ids and source_run_id is None:
+        return {"total": 0, "item_type_counts": {}, "status_counts": {}, "state_counts": {}}
+    review_item_ids = set()
+    if article_ids:
+        review_item_ids.update(
+            session.execute(
+                select(NewsProjectReference.review_item_id).where(
+                    NewsProjectReference.article_id.in_(article_ids),
+                    NewsProjectReference.review_item_id.is_not(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if source_run_id is not None:
+        review_item_ids.update(
+            session.execute(
+                select(ReviewItem.id).where(ReviewItem.source_run_id == source_run_id)
+            )
+            .scalars()
+            .all()
+        )
+    review_item_ids.discard(None)
+    if not review_item_ids:
+        return {"total": 0, "item_type_counts": {}, "status_counts": {}, "state_counts": {}}
+    review_items = (
+        session.execute(select(ReviewItem).where(ReviewItem.id.in_(review_item_ids)))
+        .scalars()
+        .all()
+    )
+    return {
+        "total": len(review_items),
+        "item_type_counts": _counter_dict(
+            Counter(_enum_value(item.item_type) for item in review_items)
+        ),
+        "status_counts": _counter_dict(
+            Counter(_enum_value(item.status) for item in review_items)
+        ),
+        "state_counts": _counter_dict(Counter(item.state for item in review_items)),
+    }
+
+
+def _extraction_call_breakdown(session, article_ids: list[uuid.UUID]) -> dict:
+    if not article_ids:
+        return {
+            "total_calls": 0,
+            "pass_counts": {},
+            "triggered_by_counts": {},
+            "total_cost_usd": "0",
+            "input_tokens_uncached": 0,
+            "input_tokens_cache_creation": 0,
+            "input_tokens_cached": 0,
+            "output_tokens": 0,
+        }
+    extractions = (
+        session.execute(
+            select(NewsExtraction).where(NewsExtraction.article_id.in_(article_ids))
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "total_calls": len(extractions),
+        "pass_counts": _counter_dict(Counter(extraction.pass_name for extraction in extractions)),
+        "triggered_by_counts": _counter_dict(
+            Counter(extraction.triggered_by for extraction in extractions)
+        ),
+        "total_cost_usd": str(sum((extraction.cost_usd or 0) for extraction in extractions)),
+        "input_tokens_uncached": sum(
+            extraction.input_tokens_uncached or 0 for extraction in extractions
+        ),
+        "input_tokens_cache_creation": sum(
+            extraction.input_tokens_cache_creation or 0 for extraction in extractions
+        ),
+        "input_tokens_cached": sum(
+            extraction.input_tokens_cached or 0 for extraction in extractions
+        ),
+        "output_tokens": sum(extraction.output_tokens or 0 for extraction in extractions),
+    }
+
+
+def _extraction_calls_for_article(session, article_id: uuid.UUID) -> list[dict]:
+    extractions = (
+        session.execute(
+            select(NewsExtraction)
+            .where(NewsExtraction.article_id == article_id)
+            .order_by(NewsExtraction.created_at, NewsExtraction.id)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(extraction.id),
+            "pass": extraction.pass_name,
+            "triggered_by": extraction.triggered_by,
+            "parse_status": extraction.parse_status,
+            "model": extraction.model,
+            "cost_usd": str(extraction.cost_usd) if extraction.cost_usd is not None else None,
+            "input_tokens_uncached": extraction.input_tokens_uncached,
+            "input_tokens_cache_creation": extraction.input_tokens_cache_creation,
+            "input_tokens_cached": extraction.input_tokens_cached,
+            "output_tokens": extraction.output_tokens,
+        }
+        for extraction in extractions
+    ]
+
+
+def _counter_dict(counter: Counter) -> dict:
+    return {
+        str(key): value
+        for key, value in sorted(counter.items(), key=lambda item: str(item[0]))
+    }
+
+
+def _enum_value(value) -> str:
+    return value.value if hasattr(value, "value") else str(value)
 
 
 def _latest_extraction(session, article_id: uuid.UUID, pass_name: str) -> NewsExtraction | None:

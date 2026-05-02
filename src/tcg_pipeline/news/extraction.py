@@ -77,6 +77,11 @@ PASS3A_REFERENCE_FIELD_MAP = {
     "candidate_address": "candidate_address",
 }
 MAX_PASS3A_CONTEXT_ITEMS = 20
+PASS3A_FIELD_WINDOW_PADDING = 40
+PASS3A_UNIT_TOLERANCE = 5
+PASS3A_UNIT_FIELDS = frozenset(
+    {"total_units", "affordable_units", "market_rate_units"}
+)
 ADDRESS_CITY_BY_SCOPE_SLUG = {
     "los_angeles": "Los Angeles",
     "city_of_los_angeles": "Los Angeles",
@@ -939,23 +944,67 @@ def _signals_for_reference(
     reference: dict[str, Any],
     reference_count: int,
 ) -> list[dict[str, Any]]:
-    if reference_count == 1:
-        return signals
-    windows = _reference_offset_windows(reference)
-    if not windows:
-        return []
+    all_windows = _reference_offset_windows(reference)
+    if not all_windows:
+        return signals if reference_count == 1 else []
+
     selected: list[dict[str, Any]] = []
     for signal in signals:
-        start = _int_or_none(signal.get("offset_start"))
-        end = _int_or_none(signal.get("offset_end"))
-        if start is None or end is None:
+        fields = _signal_passage_fields(signal)
+        windows = _reference_offset_windows(reference, fields=fields)
+        if not windows:
             continue
-        if any(start <= window_end and end >= window_start for window_start, window_end in windows):
+        if _signal_overlaps_windows(signal, windows):
             selected.append(signal)
     return selected
 
 
-def _reference_offset_windows(reference: dict[str, Any]) -> list[tuple[int, int]]:
+def _signal_passage_fields(signal: dict[str, Any]) -> set[str]:
+    extractor = signal.get("extractor")
+    if extractor == "unit_count":
+        return {"candidate_unit_total"}
+    if extractor == "status_phrase":
+        metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
+        if metadata.get("signal_kind") == "pipeline_status":
+            return {"candidate_status_signal"}
+        return set()
+    if extractor == "delivery_phrase":
+        return {"candidate_delivery_year_text", "candidate_delivery_year_normalized"}
+    if extractor == "address":
+        return {"candidate_address"}
+    if extractor == "affordable_split_phrase":
+        structural = signal.get("canonical")
+        if not isinstance(structural, dict):
+            return set()
+        kind = str(structural.get("kind") or "")
+        if kind in {"affordable", "low_income", "workforce", "moderate_income"}:
+            return {"candidate_unit_affordable"}
+        if kind == "market_rate":
+            return {"candidate_unit_market_rate"}
+        return set()
+    if extractor == "developer_dict":
+        return {"candidate_developer"}
+    if extractor == "project_dict":
+        return {"candidate_name", "registry_project_id"}
+    return set()
+
+
+def _signal_overlaps_windows(
+    signal: dict[str, Any],
+    windows: list[tuple[int, int]],
+) -> bool:
+    start = _int_or_none(signal.get("offset_start"))
+    end = _int_or_none(signal.get("offset_end"))
+    if start is None or end is None:
+        return False
+    return any(start <= window_end and end >= window_start for window_start, window_end in windows)
+
+
+def _reference_offset_windows(
+    reference: dict[str, Any],
+    *,
+    fields: set[str] | None = None,
+) -> list[tuple[int, int]]:
     excerpts = reference.get("passage_excerpts") or []
     windows: list[tuple[int, int]] = []
     if not isinstance(excerpts, list):
@@ -963,11 +1012,18 @@ def _reference_offset_windows(reference: dict[str, Any]) -> list[tuple[int, int]
     for excerpt in excerpts:
         if not isinstance(excerpt, dict):
             continue
+        if fields is not None and excerpt.get("field") not in fields:
+            continue
         start = _int_or_none(excerpt.get("offset_start"))
         end = _int_or_none(excerpt.get("offset_end"))
         if start is None or end is None:
             continue
-        windows.append((max(start - 200, 0), end + 200))
+        windows.append(
+            (
+                max(start - PASS3A_FIELD_WINDOW_PADDING, 0),
+                end + PASS3A_FIELD_WINDOW_PADDING,
+            )
+        )
     return windows
 
 
@@ -1016,6 +1072,13 @@ def _structural_signal_conflict(
             state=address_context.state,
             market=address_context.market_slug,
         )
+        if _addresses_equivalent(
+            signal,
+            extracted_address,
+            normalized.canonical_address,
+            address_context=address_context,
+        ):
+            return None
         return _value_conflict(
             "candidate_address",
             signal,
@@ -1071,6 +1134,80 @@ def _structural_signal_conflict(
     return None
 
 
+def _addresses_equivalent(
+    signal: dict[str, Any],
+    extracted_address: str,
+    extracted_canonical_address: str | None,
+    *,
+    address_context: AddressConflictContext,
+) -> bool:
+    raw_match = signal.get("raw_match")
+    if isinstance(raw_match, str) and _contains_normalized_text(extracted_address, raw_match):
+        return True
+    structural = signal.get("canonical")
+    structural_value = (
+        structural.get("canonical_address") if isinstance(structural, dict) else None
+    )
+    normalized_structural = None
+    if isinstance(raw_match, str) and raw_match.strip():
+        normalized_structural = normalize_address(
+            raw_match,
+            city=address_context.city,
+            state=address_context.state,
+            market=address_context.market_slug,
+        )
+    if (
+        normalized_structural is not None
+        and normalized_structural.canonical_address is not None
+        and extracted_canonical_address is not None
+        and _normalized_compare_value(normalized_structural.canonical_address)
+        == _normalized_compare_value(extracted_canonical_address)
+    ):
+        return True
+    if normalized_structural is not None:
+        extracted = normalize_address(
+            extracted_address,
+            city=address_context.city,
+            state=address_context.state,
+            market=address_context.market_slug,
+        )
+        structural_signature = _address_signature(normalized_structural)
+        extracted_signature = _address_signature(extracted)
+        if (
+            structural_signature is not None
+            and extracted_signature is not None
+            and structural_signature == extracted_signature
+        ):
+            return True
+    return (
+        isinstance(structural_value, str)
+        and extracted_canonical_address is not None
+        and _normalized_compare_value(structural_value)
+        == _normalized_compare_value(extracted_canonical_address)
+    )
+
+
+def _contains_normalized_text(haystack: str, needle: str) -> bool:
+    return _compact_text(needle) in _compact_text(haystack)
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _address_signature(value: Any) -> tuple[Any, ...] | None:
+    if value.house_number_start is None or value.street_name is None:
+        return None
+    return (
+        value.house_number_start,
+        value.house_number_end,
+        value.street_predirectional,
+        value.street_name,
+        value.street_suffix,
+        value.street_postdirectional,
+    )
+
+
 def _address_conflict_context(article: NewsArticle) -> AddressConflictContext:
     source = article.source
     market_slug = source.market.slug if source is not None and source.market is not None else None
@@ -1107,9 +1244,7 @@ def _value_conflict(
     resolved_extracted = extracted_candidate if extracted_value is None else extracted_value
     if resolved_structural is None or resolved_extracted is None:
         return None
-    if _normalized_compare_value(resolved_structural) == _normalized_compare_value(
-        extracted_candidate
-    ):
+    if _values_equivalent(field_name, resolved_structural, resolved_extracted):
         return None
     return {
         "reference_index": reference_index,
@@ -1127,6 +1262,17 @@ def _normalized_compare_value(value: Any) -> str:
     if isinstance(value, str):
         return value.strip().casefold()
     return str(value)
+
+
+def _values_equivalent(field_name: str, structural_value: Any, extracted_value: Any) -> bool:
+    if field_name in PASS3A_UNIT_FIELDS:
+        structural_int = _int_or_none(structural_value)
+        extracted_int = _int_or_none(extracted_value)
+        if structural_int is not None and extracted_int is not None:
+            return abs(structural_int - extracted_int) <= PASS3A_UNIT_TOLERANCE
+    return _normalized_compare_value(structural_value) == _normalized_compare_value(
+        extracted_value
+    )
 
 
 def _int_or_none(value: Any) -> int | None:

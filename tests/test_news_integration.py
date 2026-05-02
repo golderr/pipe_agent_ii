@@ -450,6 +450,96 @@ def test_news_integration_supersedes_stale_article_evidence_after_reextraction(
     } == {NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value}
 
 
+def test_news_integration_marks_all_non_current_references_superseded(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    project = _project(
+        source,
+        canonical_address=_canonical("1300 Current Street, Los Angeles, CA 90012"),
+        project_name="Current News Tower",
+        developer="Atlas Development",
+        total_units=75,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    initial_extraction, initial_reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Initial News Tower",
+                candidate_address="1100 Initial Street, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=55,
+            )
+        ],
+    )
+    pass3a_extraction, pass3a_reference = _add_extraction(
+        postgres_session,
+        article=article,
+        pass_name=NewsExtractionPass.REEXTRACTION.value,
+        triggered_by="pass1_pass2_conflict",
+        supersedes_extraction_id=initial_extraction.id,
+        references=[
+            _reference_payload(
+                candidate_name="Intermediate News Tower",
+                candidate_address="1200 Intermediate Street, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=65,
+            )
+        ],
+    )
+    final_extraction, final_reference = _add_extraction(
+        postgres_session,
+        article=article,
+        pass_name=NewsExtractionPass.REEXTRACTION.value,
+        triggered_by="pass2_new_candidate",
+        supersedes_extraction_id=pass3a_extraction.id,
+        references=[
+            _reference_payload(
+                candidate_name="Current News Tower",
+                candidate_address="1300 Current Street, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=75,
+            )
+        ],
+    )
+    article.current_extraction_id = final_extraction.id
+    article.current_extraction_version = 3
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    task_session_factory = _task_session_factory(postgres_session)
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 30, 13, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    postgres_session.expire_all()
+    initial_reference = postgres_session.get(NewsProjectReference, initial_reference.id)
+    pass3a_reference = postgres_session.get(NewsProjectReference, pass3a_reference.id)
+    final_reference = postgres_session.get(NewsProjectReference, final_reference.id)
+    assert initial_reference is not None
+    assert pass3a_reference is not None
+    assert final_reference is not None
+    assert (
+        initial_reference.match_status
+        == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
+    )
+    assert (
+        pass3a_reference.match_status
+        == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
+    )
+    assert final_reference.match_status == NewsMatchStatus.CONFIRMED.value
+
+
 def test_force_project_id_is_honored_for_single_reference_and_reported_for_multi(
     postgres_session: Session,
 ) -> None:

@@ -60,6 +60,7 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
     assert urbanize_source["jurisdiction_id"] is None
     assert urbanize_source["config"]["fetch_path"] == "polite"
     assert urbanize_source["config"]["hosts"] == ["la.urbanize.city"]
+    assert urbanize_source["config"]["backfill_window_days"] == 56
     assert urbanize_source["config"]["source_strategy_doc"] == (
         "docs/sources/news/urbanize_la.md"
     )

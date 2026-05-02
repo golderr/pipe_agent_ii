@@ -76,7 +76,7 @@ markets. This is intentional:
 - Santa Monica articles may match the Santa Monica market as it comes online.
 - Orange County or other non-modeled articles may become discarded references or
   new-candidate/graveyard signal.
-- D.B dry-run cost should use the full 12-month sitemap count, not an LA-filtered
+- D.B dry-run cost should use the configured source window, not an LA-filtered
   subset.
 
 The unscoped matcher path in D.4 is load-bearing for this source.
@@ -105,7 +105,7 @@ Validation article IDs in the development DB:
 
 - Urbanize HTML is friendly to the existing Pass 0 stack: metadata title, author, publication date, body text, and open/paywall state persisted cleanly.
 - RSS descriptions include full-ish body HTML and tags; D.2a still fetches canonical article pages so body extraction and hash behavior stay consistent across paste/scheduled/backfill paths.
-- Sitemap is large enough for a 12-month backfill but small enough to process politely in one dry-run pass.
+- Sitemap is large enough for configurable backfill windows but small enough to process politely in one dry-run pass.
 - D.2a-prep implemented the first Pass 1 tightening slice before high-volume backfill:
   - capture comma-formatted unit counts such as `2,250 residential units`
   - scan title/headline metadata for title-only addresses such as `2101 W. 8th Street`
@@ -135,6 +135,13 @@ scheduled scraping is enabled in D.6:
 - Repeat-run cleanup: `python scripts/run_d6_urbanize_smoke.py --allow-non-staging --cleanup-token <token>` deletes smoke articles, jobs, source runs, review items, and article evidence for a prior token. The runner refuses production environments even with `--allow-non-staging`.
 - Finding: the first run with `NEWS_EXTRACT_MAX_TOKENS=2500` truncated the multi-site Santa Monica article. The default and `.env.example` were raised to `5000`; staging/production worker env vars should use the same value before cron is enabled.
 
+2026-05-01 staging smoke follow-up:
+
+- The first staging smoke produced 13 Opus calls for 5 hand-picked relevant articles because Pass 3a fired on every article and Pass 3b fired on 3. Before enabling cron, D.6 tightens Pass 3a structural-conflict detection and reruns the smoke.
+- Urbanize LA backfill now uses `news_sources.config.backfill_window_days = 56` (8 weeks). This is an LA-specific mature-market window; future geographies can choose longer per-source windows during onboarding when they need more history to bootstrap project awareness.
+- Expected D.B cost after tightening is roughly `$80-110` for the 8-week slice; reconfirm after the next staging smoke before requesting Nate's approval.
+- Post-tightening smoke `d6-smoke-staging-20260501b` reduced Pass 3a to 1 trigger and Pass 3b to 1 trigger across the 4 articles that reached extraction. The fifth article was skipped by the daily cost cap after the day's earlier smoke spend, so D.6 still needs one clean 5/5 rerun after cap reset or an approved temporary cap bump.
+
 ## Light Reconnaissance Of Deferred Sources
 
 LA YIMBY:
@@ -160,6 +167,7 @@ The Real Deal LA:
 - `urbanize_la -> news_article` is present in `LOGICAL_SOURCE_TYPE_BY_SOURCE_NAME`.
 - Host routing for `la.urbanize.city` comes from `news_sources.config.hosts` with a short in-process API cache.
 - Initial cron candidate is seeded as `30 7 * * *` in `America/Los_Angeles`; D.6 may add jitter.
+- Backfill horizon is configured as `backfill_window_days = 56`; the D.B backfill CLI should read this value and default to 56 days when a source leaves it unset.
 - Sanitized Urbanize validation fixtures and LA YIMBY-like RSS/article samples live under `tests/fixtures/news/`.
 
 ## Open Issues For D.6

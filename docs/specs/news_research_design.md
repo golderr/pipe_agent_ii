@@ -48,8 +48,9 @@ Active Phase D source posture:
   replace it with source-specific `if market_slug == ...` maps.
 - `bizjournals_la` remains mapped to `news_article`, but is inactive and
   unscheduled until D.late.C ships paid-source capability.
-- D.B prices the full Urbanize 12-month URL set observed in D.2v (988 URLs with
-  `lastmod >= 2025-05-01`), not an LA-filtered subset.
+- D.B prices the configured Urbanize LA backfill window
+  (`news_sources.config.backfill_window_days = 56`, roughly 150 URLs at current
+  cadence), not an LA-filtered subset.
 
 D.2a/D.6 gates added by this revision:
 
@@ -961,7 +962,7 @@ How each Phase D ingest path uses these slugs:
 | Scheduled Urbanize scrape | `urbanize_la` | `news_article` |
 | Paste-a-link, Urbanize URL after D.2a host routing | `urbanize_la` (publisher detected from URL host) | `news_article` |
 | Paste-a-link, unknown publisher | `news_paste_a_link` | `news_article` |
-| 12-month Urbanize backfill | `news_backfill` or `urbanize_la` run context, with article source `urbanize_la` | `news_article` |
+| 8-week Urbanize LA backfill | `news_backfill` or `urbanize_la` run context, with article source `urbanize_la` | `news_article` |
 | Re-extraction (prompt-version sweep, conflict-triggered) | `news_reextraction` | `news_article` |
 
 The result: orphan evidence written by any news ingest path can be linked on accept of any news-source-run review item, because all of them resolve to the same logical type. The publisher-specific attribution survives in `news_articles.news_source_id` and the source_run's runtime slug.
@@ -1037,6 +1038,7 @@ Urbanize LA is the only live Phase D scheduled source:
 - Fetch path: `polite`
 - Scope: market-unscoped (`market_id = NULL`, `jurisdiction_id = NULL`)
 - Initial cron candidate: `30 7 * * *` in `America/Los_Angeles`
+- LA backfill window: `config.backfill_window_days = 56`
 
 The source is intentionally unscoped. The matcher decides relevance across live
 markets; Orange County/Santa Monica/non-modeled articles may become discarded or
@@ -2036,9 +2038,11 @@ Process restarts (Render redeploys, OOM kills) are tolerated: the scheduler re-e
 
 ### 12.7 Backfill mode
 
-`tcg-pipeline news backfill --source urbanize_la --since <12mo>` runs a 12-month Urbanize backfill. Backfill:
+`tcg-pipeline news backfill --source urbanize_la` runs an Urbanize backfill using
+`news_sources.config.backfill_window_days` (56 days for LA unless explicitly
+overridden). Backfill:
 
-1. Calls `PoliteNewsCollector.discover_urls(since=...)` and gets the URL list from the configured sitemap/archive path. D.2v observed 988 Urbanize URLs with `lastmod >= 2025-05-01`; because `urbanize_la` is market-unscoped, D.B prices the full count, not an LA-filtered subset.
+1. Calls `PoliteNewsCollector.discover_urls(since=...)` and gets the URL list from the configured sitemap/archive path. The LA D.B dry-run prices the 8-week slice (roughly 150 URLs at current Urbanize cadence); because `urbanize_la` is market-unscoped, D.B prices the full configured-window count, not an LA-filtered subset.
 2. Chunks the URL list into groups of 25 and inserts one `news_backfill_chunk` `scrape_jobs` row per chunk.
 3. The worker drains them through the normal pipeline.
 4. Cost-capped — if we hit the cap, queued chunks stay queued until the cap resets at midnight PT or the researcher bumps it.
@@ -2365,20 +2369,22 @@ glossary size.
 This is well under the $25 warn cap. The cap exists to catch:
 
 - Runaway loops (a bug that retries extraction).
-- Backfill spikes (12-month Urbanize backfill starts from the 988 URLs observed in D.2v).
+- Backfill spikes (Urbanize LA D.B uses the configured 8-week window, roughly 150 URLs at current cadence).
 - Future expansion to multiple sources.
 
 ### 17.3 Backfill cost (Urbanize D.B)
 
-D.2v observed 988 Urbanize URLs with `lastmod >= 2025-05-01`. Because
-`urbanize_la` is market-unscoped, the D.B dry-run prices the full URL set rather
-than filtering to LA-labeled articles before fetch/triage.
+D.B uses `news_sources.config.backfill_window_days` to choose the source-specific
+window. Urbanize LA is configured to 56 days (8 weeks), roughly 150 URLs at the
+current cadence observed during D.2v. Because `urbanize_la` is market-unscoped,
+the D.B dry-run prices the full configured-window URL set rather than filtering
+to LA-labeled articles before fetch/triage.
 
-For 988 URLs: triage all is roughly ~$5. If 50-60% pass triage, Pass 2 touches
-~500-590 articles; at cached-batch rates that is roughly ~$100-$120, with Pass 3
-adding another ~$20-$25 if 20% of extracted articles re-extract. The dry-run
-must report ranges for relevance, projected LLM cost, cache-hit assumptions, and
-runtime instead of a single optimistic estimate.
+After D.6 Pass 3a tightening, the expected LA D.B range is roughly `$80-110`.
+The dry-run must report ranges for relevance, projected LLM cost, cache-hit
+assumptions, and runtime instead of a single optimistic estimate; reconfirm the
+range with Nate after the D.6 smoke rerun validates Pass 3a fire rate and cache
+token behavior.
 
 This may need a temporary cap bump above the default $35 hard cap or a multi-day
 backfill window. Researcher kicks off the backfill in the morning; it completes
@@ -2470,8 +2476,9 @@ All `/research/*` routes use the privileged FastAPI DB session, validated by Sup
 tcg-pipeline news scrape --source urbanize_la [--since YYYY-MM-DD] [--limit N]
     Run a scrape now (manually triggered). Writes scrape_jobs rows; Worker drains.
 
-tcg-pipeline news backfill --source urbanize_la --since YYYY-MM-DD
-    Bulk backfill helper. D.B uses a 12-month Urbanize horizon.
+tcg-pipeline news backfill --source urbanize_la [--since YYYY-MM-DD]
+    Bulk backfill helper. D.B uses news_sources.config.backfill_window_days
+    when --since is omitted.
 
 tcg-pipeline news ingest-url <url> [--reextract] [--force-project <uuid>]
     Same as POST /research/articles, but from the CLI.
@@ -2702,13 +2709,13 @@ v1 listed D.W as "Render Worker scaffold." That's wrong — C.tail.1 already shi
 | **D.4-resolver** | Implement §21f recent-article delivery-date priority in the resolver (`delivery_year.py` `_select_explicit_delivery_observation`). Add resolver-side filter `WHERE evidence.superseded_at IS NULL` so re-extraction supersession works. | 1 day | D.4 |
 | **D.5** | Review-queue rendering of news context. `news_context` payload extension. Confidence chip. Structural-disagreement chip. Verify the existing `render_news_article_snippet` works against the data Phase D writes. | 2 days | D.4 |
 | **D.7b** | Paste-a-link UI in Next.js. Article admin view (admin-only via `/research/articles/{id}`). | 2 days | D.5 |
-| **D.2-docs** | Revise this design for the Urbanize-first polite collector pivot, 12-month Urbanize backfill, source-doc discipline, deferred advanced fetch, and D-late source expansion. | 0.5 day | D.2v |
+| **D.2-docs** | Revise this design for the Urbanize-first polite collector pivot, per-source backfill windows, source-doc discipline, deferred advanced fetch, and D-late source expansion. | 0.5 day | D.2v |
 | **D.2a-prep** | Pass 1 tightening from D.2v: comma-formatted unit counts, title/headline address scan, completion-date phrase variants. Capture sanitized Urbanize/LA YIMBY fixtures. | 1 day | D.2-docs |
 | **D.2a** | Generic polite NewsCollector + Urbanize LA pilot: config-driven RSS/sitemap discovery, robots/rate-limit/Retry-After/conditional GET, host routing, source docs, seed unscoped `urbanize_la`, and disable/unschedule `bizjournals_la`. Repeat five-URL validation through host routing. | 2-3 days | D.2-docs |
 | **D.6** | Scheduled Urbanize scrapes via `news_sources.schedule_cron` and the in-process scheduler tick. Before enabling cron, rerun the five D.2v URLs in staging with an Anthropic key and verify Haiku triage plus Opus extraction/integration output. | 1 day | D.2a, D.2b |
 | **D.M** | Monitoring: SMTP email dispatcher; `system_alerts` reader for the Coverage banner; news ops admin tile; cost-cap bump UI. | 3 days | D.6 |
 | **D.G** | Graveyard UI + manual relink endpoint. `news_admin_actions` writes for audit. | 2 days | D.5 |
-| **D.B** | 12-month Urbanize backfill. Dry-run the full 988-URL D.2v-sized set first, report relevance/cost/runtime ranges, get approval, then enqueue under source pause/rate-limit/cost-cap controls. | 1 day live + monitoring | D.6, D.M, D.2a-prep |
+| **D.B** | 8-week Urbanize LA backfill, with window length configurable per source/geography. Dry-run the configured source window first, report relevance/cost/runtime ranges, get approval, then enqueue under source pause/rate-limit/cost-cap controls. | 1 day live + monitoring | D.6, D.M, D.2a-prep |
 
 Total ballpark: ~4 weeks for a focused engineer. Phase D is bigger than any single Phase C step.
 
@@ -2730,7 +2737,7 @@ ROADMAP.md is authoritative for status. The active alignment after D.2-docs:
 - D.2a implements the generic polite collector and unscoped `urbanize_la` seed.
 - D.2b adds the `fetch_path` routing/interface and hard-failure posture for `advanced`.
 - D.6 enables scheduled Urbanize scrapes only after the staging Anthropic-key smoke test.
-- D.B runs a 12-month Urbanize backfill dry-run over the full unscoped URL set.
+- D.B runs an 8-week Urbanize LA backfill dry-run over the full unscoped configured-window URL set.
 - D.late.E1/E2/C/ADV hold LA YIMBY, The Real Deal, paid-source/BizJournals, and advanced-fetch expansion.
 
 ---

@@ -176,6 +176,168 @@ def test_decide_pass3a_reextraction_detects_structural_conflict(
     assert decision.context["conflicts"][0]["extracted_value"] == 250
 
 
+def test_decide_pass3a_reextraction_ignores_equivalent_address_format(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "address",
+                "raw_match": "501 E. 5th Street",
+                "offset_start": 20,
+                "offset_end": 37,
+                "canonical": {
+                    "canonical_address": "501 EAST 5TH STREET CA",
+                    "street_number": "501",
+                    "street_name": "5TH",
+                    "suffix": "STREET",
+                    "city": None,
+                    "zip": None,
+                },
+                "confidence": 0.8,
+                "metadata": {"parser": "usaddress", "source": "title"},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(
+            candidate_address="501 E. 5th Street",
+            passage_excerpts=[
+                {
+                    "field": "candidate_address",
+                    "value": "501 E. 5th Street",
+                    "passage": "The project rises at 501 E. 5th Street.",
+                    "offset_start": 20,
+                    "offset_end": 37,
+                }
+            ],
+        ),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add(extraction)
+    postgres_session.flush()
+
+    decision = decide_pass3a_reextraction(article, extraction)
+
+    assert decision is None
+
+
+def test_decide_pass3a_reextraction_uses_unit_tolerance(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "unit_count",
+                "raw_match": "142-unit",
+                "offset_start": 36,
+                "offset_end": 44,
+                "canonical": 142,
+                "confidence": 0.95,
+                "metadata": {"label": "unit"},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(candidate_unit_total=140),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add(extraction)
+    postgres_session.flush()
+
+    decision = decide_pass3a_reextraction(article, extraction)
+
+    assert decision is None
+
+
+def test_decide_pass3a_reextraction_uses_field_specific_windows(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "unit_count",
+                "raw_match": "95-unit",
+                "offset_start": 10,
+                "offset_end": 17,
+                "canonical": 95,
+                "confidence": 0.95,
+                "metadata": {"label": "unit"},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(
+            candidate_unit_total=140,
+            passage_excerpts=[
+                {
+                    "field": "candidate_name",
+                    "value": "Helio",
+                    "passage": "A nearby 95-unit project is unrelated to Helio.",
+                    "offset_start": 0,
+                    "offset_end": 40,
+                },
+                {
+                    "field": "candidate_unit_total",
+                    "value": 140,
+                    "passage": "Helio will include 140 units.",
+                    "offset_start": 120,
+                    "offset_end": 150,
+                },
+            ],
+        ),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add(extraction)
+    postgres_session.flush()
+
+    decision = decide_pass3a_reextraction(article, extraction)
+
+    assert decision is None
+
+
 def test_decide_pass3a_reextraction_detects_project_dict_conflict(
     postgres_session: Session,
 ) -> None:
@@ -827,17 +989,35 @@ def _set_cost_cap(
 def _payload(
     *,
     candidate_signal_flags: dict[str, bool] | None = None,
+    candidate_address: str = "1234 Sunset Boulevard",
     candidate_unit_total: int = 140,
     candidate_confidence: str = "high",
+    passage_excerpts: list[dict] | None = None,
     registry_project_id: str | None = None,
 ) -> dict:
+    resolved_passage_excerpts = passage_excerpts or [
+        {
+            "field": "candidate_name",
+            "value": "Helio",
+            "passage": "Atlas Development broke ground on Helio",
+            "offset_start": 0,
+            "offset_end": 40,
+        },
+        {
+            "field": "candidate_unit_total",
+            "value": 140,
+            "passage": "The developer broke ground on a 140-unit project.",
+            "offset_start": 34,
+            "offset_end": 42,
+        },
+    ]
     return {
         "relevance": "confirmed",
         "rejected_reason": None,
         "project_references": [
             {
                 "candidate_name": "Helio",
-                "candidate_address": "1234 Sunset Boulevard",
+                "candidate_address": candidate_address,
                 "candidate_developer": "Atlas Development",
                 "candidate_unit_total": candidate_unit_total,
                 "candidate_unit_affordable": 14,
@@ -858,15 +1038,7 @@ def _payload(
                 "candidate_lat": None,
                 "candidate_lng": None,
                 "candidate_confidence": candidate_confidence,
-                "passage_excerpts": [
-                    {
-                        "field": "candidate_unit_total",
-                        "value": 140,
-                        "passage": "The developer broke ground on a 140-unit project.",
-                        "offset_start": 34,
-                        "offset_end": 42,
-                    }
-                ],
+                "passage_excerpts": resolved_passage_excerpts,
                 "registry_developer_id": None,
                 "registry_project_id": registry_project_id,
             }

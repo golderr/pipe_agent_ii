@@ -62,6 +62,7 @@ def upgrade() -> None:
                 "robots_url": "https://la.urbanize.city/robots.txt",
                 "robots_cache_ttl_seconds": 86400,
                 "rate_limit_seconds": 2,
+                "backfill_window_days": 56,
                 "source_strategy_doc": "docs/sources/news/urbanize_la.md",
                 "user_agent": "Mozilla/5.0 (compatible; TCGPipelineTracker/0.1; +https://tcg-pipeline.vercel.app)"
             }}'::jsonb,
