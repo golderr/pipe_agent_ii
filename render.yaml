@@ -1,0 +1,175 @@
+# Render Blueprint — tcg-pipeline FastAPI + RQ worker + Key Value
+# https://render.com/docs/blueprint-spec
+#
+# After committing this file:
+#   1. Render dashboard → New + → Blueprint → connect the pipe_agent_ii repo.
+#   2. Render reads this file and prompts for every `sync: false` value once.
+#      Paste them from the local .env (DATABASE_URL, SUPABASE_ANON_KEY,
+#      ALLOWED_EMAILS, GEOCODIO_API_KEY, ESRI_API_KEY, SOCRATA_APP_TOKEN,
+#      ANTHROPIC_API_KEY).
+#   3. After the services come up, copy the api service URL and set
+#      NEXT_PUBLIC_API_BASE_URL on Vercel; redeploy.
+#   4. The keyvalue REDIS_URL is wired automatically via fromService below.
+
+services:
+  # ---- FastAPI write-path service ----
+  - type: web
+    name: tcg-pipeline-api
+    runtime: python
+    region: ohio          # co-located with Supabase aws-1-us-east-2
+    plan: starter
+    rootDir: .
+    buildCommand: pip install -e .
+    startCommand: uvicorn tcg_pipeline.api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SQL_ECHO
+        value: "false"
+      # --- Database ---
+      - key: DATABASE_URL
+        sync: false        # Supabase session-pooler URL incl. password
+      - key: SUPABASE_URL
+        value: https://qqnlbfncqwqkvsdufjwa.supabase.co
+      - key: SUPABASE_PROJECT_REF
+        value: qqnlbfncqwqkvsdufjwa
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      # --- Auth / CORS ---
+      - key: ALLOWED_EMAILS
+        sync: false        # comma-separated list, mirror of Vercel value
+      - key: API_CORS_ORIGINS
+        value: https://tcg-pipeline.vercel.app
+      - key: API_AUTH_AUDIENCE
+        value: authenticated
+      - key: API_REQUIRED_ROLE
+        value: authenticated
+      - key: API_JWKS_CACHE_TTL_SECONDS
+        value: "600"
+      # --- Geocoding (C.g project creation + re-geocode) ---
+      - key: GEOCODIO_API_KEY
+        sync: false
+      - key: GEOCODIO_BASE_URL
+        value: https://api.geocod.io/v1.9
+      - key: ESRI_API_KEY
+        sync: false
+      - key: ESRI_GEOCODE_BASE_URL
+        value: https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer
+      - key: GEOCODING_TIMEOUT_SECONDS
+        value: "8"
+      # --- Open data + LLM ---
+      - key: SOCRATA_APP_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: NEWS_TRIAGE_MODEL
+        value: claude-haiku-4-5-20251001
+      - key: NEWS_TRIAGE_MAX_TOKENS
+        value: "300"
+      - key: NEWS_EXTRACT_MODEL
+        value: claude-opus-4-7
+      - key: NEWS_EXTRACT_MAX_TOKENS
+        value: "2500"
+      # --- Queue ---
+      - key: REDIS_URL
+        fromService:
+          name: tcg-pipeline-redis
+          type: keyvalue
+          property: connectionString
+      - key: SCRAPE_JOB_QUEUE_NAME
+        value: scrape_jobs
+      - key: SCRAPE_JOB_TIMEOUT_SECONDS
+        value: "900"
+      - key: SCRAPE_JOB_RESULT_TTL_SECONDS
+        value: "86400"
+      - key: SCRAPE_JOB_FAILURE_TTL_SECONDS
+        value: "604800"
+
+  # ---- Durable RQ worker (one instance; also hosts the news scheduler) ----
+  # Keep instance count at 1 while NEWS_SCHEDULER_LEADER=true here. If you
+  # scale beyond 1, set leader=true on exactly one instance and false on the
+  # rest, or split the scheduler into a separate single-instance service.
+  - type: worker
+    name: tcg-pipeline-worker
+    runtime: python
+    region: ohio
+    plan: starter
+    rootDir: .
+    buildCommand: pip install -e . && playwright install chromium
+    startCommand: tcg-pipeline worker
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SQL_ECHO
+        value: "false"
+      # --- Database ---
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        value: https://qqnlbfncqwqkvsdufjwa.supabase.co
+      - key: SUPABASE_PROJECT_REF
+        value: qqnlbfncqwqkvsdufjwa
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: ALLOWED_EMAILS
+        sync: false
+      # --- Open data + LLM (worker handles news Pass 2a/2b) ---
+      - key: SOCRATA_APP_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: NEWS_TRIAGE_MODEL
+        value: claude-haiku-4-5-20251001
+      - key: NEWS_TRIAGE_MAX_TOKENS
+        value: "300"
+      - key: NEWS_EXTRACT_MODEL
+        value: claude-opus-4-7
+      - key: NEWS_EXTRACT_MAX_TOKENS
+        value: "2500"
+      # --- Worker identity / heartbeat / scheduler ---
+      - key: WORKER_NAME
+        value: tcg-pipeline-worker-prod
+      - key: WORKER_HEARTBEAT_INTERVAL_SECONDS
+        value: "30"
+      - key: WORKER_HEALTH_PORT
+        value: "8081"
+      - key: WORKER_HEALTH_MAX_AGE_SECONDS
+        value: "300"
+      - key: NEWS_SCHEDULER_LEADER
+        value: "true"
+      - key: NEWS_SCHEDULER_INTERVAL_SECONDS
+        value: "60"
+      - key: NEWS_SCHEDULER_CATCHUP_HOURS
+        value: "24"
+      # --- Queue ---
+      - key: REDIS_URL
+        fromService:
+          name: tcg-pipeline-redis
+          type: keyvalue
+          property: connectionString
+      - key: SCRAPE_JOB_QUEUE_NAME
+        value: scrape_jobs
+      - key: SCRAPE_JOB_TIMEOUT_SECONDS
+        value: "900"
+      - key: SCRAPE_JOB_RESULT_TTL_SECONDS
+        value: "86400"
+      - key: SCRAPE_JOB_FAILURE_TTL_SECONDS
+        value: "604800"
+
+  # ---- Redis-compatible queue + cache ----
+  - type: keyvalue
+    name: tcg-pipeline-redis
+    region: ohio
+    plan: starter
+    ipAllowList: []        # private network only; no public access
