@@ -13,6 +13,9 @@ out/
 .vercel/
 *.tsbuildinfo
 
+.claude/
+logs/
+
 data/output/*
 !data/output/.gitkeep
 
