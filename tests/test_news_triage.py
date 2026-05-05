@@ -167,6 +167,7 @@ def test_persist_triage_response_writes_extraction_article_status_and_cost(
     assert extraction is not None
     assert extraction.pass_name == NewsExtractionPass.TRIAGE.value
     assert extraction.prompt_id == "triage_v1"
+    assert extraction.model_provider == "anthropic"
     assert extraction.parse_status == NewsExtractionParseStatus.OK.value
     assert extraction.output_json["relevant"] is True
     cost = postgres_session.execute(

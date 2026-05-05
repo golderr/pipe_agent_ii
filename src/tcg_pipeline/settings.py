@@ -54,10 +54,17 @@ class Settings(BaseSettings):
     news_scheduler_catchup_hours: int = Field(default=24, ge=1)
     news_scheduler_jitter_seconds: int = Field(default=300, ge=0)
     anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com/v1"
+    ai_gateway_api_key: str | None = None
+    ai_gateway_base_url: str = "https://ai-gateway.vercel.sh/v1"
     news_triage_model: str = "claude-haiku-4-5-20251001"
+    news_triage_provider: str = "anthropic"
     news_triage_max_tokens: int = Field(default=300, ge=1)
     news_extract_model: str = "claude-opus-4-7"
+    news_extract_provider: str = "anthropic"
     news_extract_max_tokens: int = Field(default=5000, ge=1)
+    news_llm_timeout_seconds: float = Field(default=90.0, ge=1)
     agent_enabled_for_news: bool = True
     agent_enabled_for_permits: bool = True
     news_use_legacy_pass3: bool = False

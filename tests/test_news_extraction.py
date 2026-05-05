@@ -482,6 +482,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     assert extraction is not None
     assert extraction.pass_name == NewsExtractionPass.EXTRACTION.value
     assert extraction.prompt_id == "extract_v1"
+    assert extraction.model_provider == "anthropic"
     assert extraction.parse_status == NewsExtractionParseStatus.OK.value
     reference = postgres_session.execute(
         select(NewsProjectReference).where(
