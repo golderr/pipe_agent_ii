@@ -1637,6 +1637,14 @@ class AgentRun(Base):
             name="triggered_by_nonempty_array",
         ),
         CheckConstraint(
+            "jsonb_typeof(evidence_consulted) = 'array'",
+            name="evidence_consulted_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(tool_calls_summary) = 'array'",
+            name="tool_calls_summary_array",
+        ),
+        CheckConstraint(
             "outcome IN ("
             "'completed', "
             "'escalated', "
@@ -1686,7 +1694,14 @@ class AgentRun(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     intake_source_type: Mapped[str] = mapped_column(Text, nullable=False)
-    intake_record_id: Mapped[str] = mapped_column(Text, nullable=False)
+    intake_record_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment=(
+            "Source-specific intake identifier. For news, this is the stringified "
+            "news_articles.id."
+        ),
+    )
     intake_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("news_extractions.id", ondelete="SET NULL"),
@@ -1720,8 +1735,18 @@ class AgentRun(Base):
     cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     reasoning_trace: Mapped[str | None] = mapped_column(Text, nullable=True)
-    evidence_consulted: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
-    tool_calls_summary: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    evidence_consulted: Mapped[list[dict]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    tool_calls_summary: Mapped[list[dict]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
     matcher_original_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     agent_revised_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1730,7 +1755,7 @@ class AgentRun(Base):
     tool_calls_count: Mapped[int] = mapped_column(Integer, nullable=False)
     wallclock_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

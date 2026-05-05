@@ -118,9 +118,17 @@ def test_agent_run_audit_tables_are_declared() -> None:
     assert "ix_agent_runs_created_at" in agent_run_indexes
     assert "ix_agent_run_review_items_review_item" in link_indexes
     assert "ck_agent_runs_triggered_by_nonempty_array" in constraint_names
+    assert "ck_agent_runs_evidence_consulted_array" in constraint_names
+    assert "ck_agent_runs_tool_calls_summary_array" in constraint_names
     assert "ck_agent_runs_outcome" in constraint_names
     assert "ck_agent_runs_nonnegative_counters" in constraint_names
     assert "ck_agent_runs_failed_outcome_error_text" in constraint_names
+    assert AgentRun.__table__.columns["evidence_consulted"].nullable is False
+    assert AgentRun.__table__.columns["tool_calls_summary"].nullable is False
+    assert AgentRun.__table__.columns["completed_at"].nullable is False
+    assert AgentRun.__table__.columns["evidence_consulted"].server_default is not None
+    assert AgentRun.__table__.columns["tool_calls_summary"].server_default is not None
+    assert "news_articles.id" in AgentRun.__table__.columns["intake_record_id"].comment
     assert {member.value for member in AgentRunOutcome} == {
         "completed",
         "escalated",

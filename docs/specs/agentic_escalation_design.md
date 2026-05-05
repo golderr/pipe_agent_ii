@@ -704,7 +704,7 @@ CREATE TABLE agent_runs (
 
     -- Identity / linkage
     intake_source_type            TEXT NOT NULL,           -- "news_article", "ladbs_permit", "costar", "pipedream", future...
-    intake_record_id              TEXT NOT NULL,           -- source-specific identifier as string
+    intake_record_id              TEXT NOT NULL,           -- source-specific identifier as string; for news, stringified news_articles.id
     intake_extraction_id          UUID REFERENCES news_extractions(id) ON DELETE SET NULL,  -- nullable; news-only today
     project_id                    UUID REFERENCES projects(id) ON DELETE SET NULL,  -- the project this run reasoned about, if any
     source_run_id                 UUID REFERENCES source_runs(id) ON DELETE SET NULL,  -- which source_run produced the intake
@@ -728,8 +728,8 @@ CREATE TABLE agent_runs (
 
     -- Decision content
     reasoning_trace               TEXT,                    -- ≤500 chars target, surface in UI
-    evidence_consulted            JSONB,                   -- list of {source_type, record_id, role}
-    tool_calls_summary            JSONB,                   -- list of {tool, args_summary, result_summary, latency_ms, output_token_count}
+    evidence_consulted            JSONB NOT NULL DEFAULT '[]'::jsonb, -- list of {source_type, record_id, role}
+    tool_calls_summary            JSONB NOT NULL DEFAULT '[]'::jsonb, -- list of {tool, args_summary, result_summary, latency_ms, output_token_count}
     matcher_original_verdict      JSONB,                   -- deterministic matcher's verdict at run start
     agent_revised_verdict         JSONB,                   -- agent's final decision (Q6 type 1/2/3, or "no_change", or "escalated")
 
@@ -742,9 +742,17 @@ CREATE TABLE agent_runs (
 
     -- Lifecycle timestamps
     started_at                    TIMESTAMPTZ NOT NULL,    -- when the runner began this run
-    completed_at                  TIMESTAMPTZ,             -- nullable; populated only on terminal outcome (any of completed/escalated/failed_*/killed_by_switch)
+    completed_at                  TIMESTAMPTZ NOT NULL,    -- terminal-row timestamp; every current outcome is terminal
     created_at                    TIMESTAMPTZ NOT NULL DEFAULT now()  -- row insertion time; equals started_at in the common path
 );
+
+ALTER TABLE agent_runs
+  ADD CONSTRAINT ck_agent_runs_triggered_by_nonempty_array
+  CHECK (jsonb_typeof(triggered_by) = 'array' AND jsonb_array_length(triggered_by) > 0),
+  ADD CONSTRAINT ck_agent_runs_evidence_consulted_array
+  CHECK (jsonb_typeof(evidence_consulted) = 'array'),
+  ADD CONSTRAINT ck_agent_runs_tool_calls_summary_array
+  CHECK (jsonb_typeof(tool_calls_summary) = 'array');
 
 CREATE INDEX ix_agent_runs_intake ON agent_runs (intake_source_type, intake_record_id);
 CREATE INDEX ix_agent_runs_project ON agent_runs (project_id) WHERE project_id IS NOT NULL;
@@ -773,7 +781,7 @@ CREATE INDEX ix_agent_run_review_items_review_item ON agent_run_review_items (re
 - `tool_calls_count` — quick cost-anomaly detection ("agent ran 14 tools on one article").
 - `error_text` — failure-mode triage without needing log scraping.
 
-The key shape `(intake_source_type, intake_record_id)` is source-agnostic by design. News, permits, CoStar, Pipedream, and any future source share the same table.
+The key shape `(intake_source_type, intake_record_id)` is source-agnostic by design. News, permits, CoStar, Pipedream, and any future source share the same table. For news, the AGENT.2 convention is `intake_record_id = str(news_articles.id)`; runners should not substitute extraction IDs or URL hashes.
 
 Legacy reextractions (Q16) get synthetic rows in `news_extractions` per today's schema; the `agent_runs` table simply has no rows for them. UI renderer treats absence of an `agent_runs` row as "legacy or default extraction" and falls back to today's render.
 
@@ -1138,7 +1146,7 @@ Cost-cap config lives in `cost_caps` (per §5.8 split). Spend rollup lives in `l
 8. Multi-provider abstraction in `news/llm.py` (Anthropic + OpenAI/Vercel AI Gateway) — required for GPT-5.4 in the A/B.
 
 ### AGENT.2 migrations
-1. `CREATE TABLE agent_runs (...)` per §5.6 full observability schema. Implemented in repo as `202605050029` with the authoritative `agent_run_review_items` join table; not yet production-applied.
+1. `CREATE TABLE agent_runs (...)` per §5.6 full observability schema. Implemented in repo as `202605050029` with the authoritative `agent_run_review_items` join table. Follow-up `202605050030` tightens `evidence_consulted` / `tool_calls_summary` to required JSON arrays, requires `completed_at`, and documents the news `intake_record_id` convention. Neither AGENT.2 migration is production-applied yet.
 2. New `pass` enum value `extract_retry` (output-quality retry path).
 3. Backfill synthetic `reasoning_trace` for legacy `pass='reextraction'` rows (Q16).
 4. Move Pass 3a/3b code from `news/extraction.py` to `news/extraction_legacy.py`; remove from active news ingestion code path; keep importable per §5.8.
@@ -1374,6 +1382,13 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Added `tcg-pipeline news index-articles` in dry-run/apply form and wired the `news_backfill_chunk` worker task to the same implementation.
   - Follow-up hardening: unchanged active chunks are skipped before reservation/API calls, and the whole-article chunk is documented as broad retrieval context rather than per-claim acceptance.
   - Remaining validation: apply the AGENT.1 migration to a dev/staging database and smoke `index-articles --source-slug urbanize_la` before AGENT.2 retrieval tools consume the index.
+
+- **2026-05-05 (revision 23) — AGENT.2 agent-run audit schema tightened.**
+  - Follow-up migration `202605050030` makes `agent_runs.evidence_consulted` and `agent_runs.tool_calls_summary` `NOT NULL DEFAULT '[]'::jsonb` with JSON-array CHECK constraints, so observability arrays are enforced by the database rather than runner discipline.
+  - `agent_runs.completed_at` is now `NOT NULL` because every current outcome enum value is terminal; runners insert terminal audit rows after completion/failure/kill-switch exit.
+  - `agent_runs.intake_record_id` now documents the news convention explicitly: for news runs, use the stringified `news_articles.id`.
+  - Added DB-backed schema contract tests for valid insert/join behavior, required non-empty `triggered_by`, failed-outcome `error_text`, nonnegative counters, JSON-array observability fields, and `ON DELETE SET NULL` audit preservation.
+  - Production remains applied only through AGENT.1 (`202605040028`) until the AGENT.2 runner/cutover checkpoint.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
