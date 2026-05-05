@@ -5,15 +5,21 @@ from decimal import Decimal
 
 import httpx
 
+from tcg_pipeline.db.models import NewsExtractionParseStatus
+from tcg_pipeline.news.extraction import parse_extraction_response
 from tcg_pipeline.news.llm import (
+    LLM_PROVIDER_OPENAI,
     LLM_PROVIDER_VERCEL_AI_GATEWAY,
     OpenAIResponsesJSONClient,
     calculate_llm_cost_usd,
     create_anthropic_message,
     openai_stop_reason,
     openai_usage,
+    pricing_assumption_for_model,
     pricing_for_model,
+    provider_api_key,
 )
+from tcg_pipeline.settings import Settings
 
 
 class TemperatureDeprecatedError(Exception):
@@ -188,6 +194,17 @@ def test_openai_usage_maps_cached_tokens() -> None:
     assert usage.output_tokens == 10
 
 
+def test_gateway_provider_requires_gateway_key() -> None:
+    settings = Settings(
+        app_env="test",
+        openai_api_key="openai-key",
+        ai_gateway_api_key=None,
+    )
+
+    assert provider_api_key(settings, LLM_PROVIDER_OPENAI) == "openai-key"
+    assert provider_api_key(settings, LLM_PROVIDER_VERCEL_AI_GATEWAY) is None
+
+
 def test_openai_stop_reason_maps_incomplete_and_refusal() -> None:
     assert openai_stop_reason(
         {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
@@ -211,3 +228,63 @@ def test_pricing_supports_openai_gateway_model_suffix() -> None:
     )
 
     assert cost == Decimal("0.004000")
+    assert pricing_assumption_for_model("openai/gpt-5.4") is not None
+
+
+def test_pricing_supports_agent_harness_anthropic_aliases() -> None:
+    assert pricing_for_model("anthropic/claude-opus-4-7") == pricing_for_model(
+        "claude-opus-4-7"
+    )
+    assert pricing_for_model("anthropic/claude-sonnet-4-6") == pricing_for_model(
+        "claude-sonnet-4-6"
+    )
+    sonnet_cost = calculate_llm_cost_usd(
+        "anthropic/claude-sonnet-4-6",
+        input_tokens_uncached=1000,
+        input_tokens_cache_creation=0,
+        input_tokens_cached=0,
+        output_tokens=100,
+    )
+
+    assert sonnet_cost == Decimal("0.004500")
+
+
+def test_openai_extraction_json_schema_drift_classifies_as_schema_invalid() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.4",
+                "status": "completed",
+                "output_text": (
+                    '{"relevance": "confirmed", "project_references": '
+                    '[{"candidate_name": 123}], "diagnostic": {}}'
+                ),
+                "usage": {"input_tokens": 100, "output_tokens": 20},
+            },
+        )
+
+    client = OpenAIResponsesJSONClient(
+        api_key="test-key",
+        model="openai/gpt-5.4",
+        provider=LLM_PROVIDER_VERCEL_AI_GATEWAY,
+        base_url="https://ai-gateway.vercel.sh/v1",
+        max_output_tokens=5000,
+        temperature=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    response = client.create_json_response(
+        system_text="Extract project references.",
+        user_text="Atlas Development broke ground on Helio.",
+        schema={"type": "object"},
+        schema_name="news_project_extraction",
+    )
+    parsed = parse_extraction_response(
+        response.payload,
+        raw_text=response.text,
+        active_signal_flags=set(),
+    )
+
+    assert parsed.parse_status == NewsExtractionParseStatus.SCHEMA_INVALID.value
+    assert parsed.parse_error_text is not None

@@ -3,7 +3,7 @@
 > **Status:** Draft — supersedes the standalone `agentic_pipeline_proposal.md` for purposes of build planning.
 > **Scope:** Project-attribution decision layer for any structured intake. Replaces Pass 3a/3b deterministic re-extraction with an Opus-class agent loop, swaps default extraction model, and adds retrieval infrastructure. The initial sprint ships news and permit consumers; CoStar and Pipedream are deferred follow-ons that plug into the same architecture.
 > **Authoring context:** Reconciles the original proposal against the actual codebase (verified against [news/extraction.py](../../src/tcg_pipeline/news/extraction.py), [news/integration.py](../../src/tcg_pipeline/news/integration.py), [matching/news_matcher.py](../../src/tcg_pipeline/matching/news_matcher.py), [matching/matcher.py](../../src/tcg_pipeline/matching/matcher.py), [db/models.py](../../src/tcg_pipeline/db/models.py), and the 2026-05-02 D.6 staging smoke result), and updates with researcher answers to the 17 clarifying questions.
-> **Last updated:** 2026-05-04
+> **Last updated:** 2026-05-05
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -361,12 +361,15 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 
 **Configuration.**
 - `news_extract_model` setting (already exists — [settings.py:59](../../src/tcg_pipeline/settings.py)).
-- `MODEL_PRICING_USD_PER_MILLION` extended to include candidate models. Today only Haiku 4.5 and Opus 4.7 are present.
-- If GPT-5.4 is selected, requires either a multi-provider abstraction in [news/llm.py](../../src/tcg_pipeline/news/llm.py) or routing through Vercel AI Gateway.
+- `news_extract_provider` setting chooses `anthropic`, `openai`, or `vercel_ai_gateway`; Anthropic remains the production default.
+- `MODEL_PRICING_USD_PER_MILLION` covers the AGENT.1 harness candidates: Haiku 4.5 triage, Opus 4.7, Sonnet 4.6, and GPT-5.4. Alias support covers native IDs and Gateway-style provider prefixes (for example `anthropic/claude-sonnet-4-6`, `openai/gpt-5.4`).
+- Vercel AI Gateway requires `AI_GATEWAY_API_KEY`. It must not fall back to `OPENAI_API_KEY`; the keys are distinct and falling back would mask configuration errors as 401s during the harness.
+- Pricing assumptions are machine-readable for harness output. Current explicit assumption: GPT-5.4 cached-input tokens are priced at full input rate until an explicit cached-input rate is confirmed.
+- First-harness routing convention: run Claude candidates through the native Anthropic client and GPT-5.4 through the OpenAI-compatible provider path. Run a separate Gateway connectivity smoke before relying on Gateway-routed Claude model IDs; if it passes, an all-Gateway comparison can be added as an auxiliary run.
 
 **A/B harness — end-to-end, not extraction-JSON-only (revised 2026-05-04).** Senior-developer feedback called out that the product impact is attribution + review workload, not just per-field JSON correctness. The harness measures the full pipeline outcome per candidate model.
 
-- New CLI command: `tcg-pipeline news ab-extract --models claude-opus-4-7,claude-sonnet-4-6,gpt-5.4 --fixture tests/fixtures/news/urbanize_la/pass1_validation_articles.json`.
+- New CLI command: `tcg-pipeline news ab-extract --candidates anthropic:claude-opus-4-7,anthropic:claude-sonnet-4-6,openai:gpt-5.4 --fixture tests/fixtures/news/urbanize_la/pass1_validation_articles.json`.
 - Runs all three models against the same articles with the new (slim) cached system prompt — no glossary, just template + signal flags.
 - Per-model metrics captured for each article:
   - **Parse outcomes:** parse_status distribution (`ok` / `parse_error` / `schema_invalid` / `refused` / `truncated`).
@@ -1007,14 +1010,14 @@ Per-article steady state, projected (validate against Stage 1 A/B):
 
 **With Opus 4.7 as default (status-quo model, agent-on-hard-cases architecture):**
 - Triage: ~$0.002.
-- Default extraction (Opus 4.7, cache-warm): ~$0.30.
+- Default extraction (Opus 4.7, cache-warm): measured by Stage 1. Current Anthropic list pricing is $5/MTok input, $6.25/MTok 5m cache write, $0.50/MTok cache hit, and $25/MTok output; older D.6 projections used the prior $15/$75 tier and therefore overstate this line.
 - Output-quality retry: ~$0.10 amortized.
 - Agent run (same as above): ~$0.10 amortized at 17.5% fire rate.
-- Average per article: ~$0.50. 8-week LA: ~$75.
-- Still cheaper than status quo ($80–110) because Pass 3a/3b at status-quo fire rate is more expensive than the agent's bounded-budget runs.
+- Average per article: Stage 1 harness output is authoritative. Expect lower than the earlier ~$0.50 / ~$75 projection if token counts resemble D.6, because current Opus 4.7 list pricing is lower than the prior estimate.
+- Still cheaper than status quo ($80–110) if Pass 3a/3b at status-quo fire rate is replaced by bounded agent runs on a fraction of articles.
 
 **With GPT-5.4 as default:**
-- Pricing TBD; depends on cross-provider integration choice (direct OpenAI vs Vercel AI Gateway).
+- Pricing implemented for A/B accounting at $2.50/MTok input and $15/MTok output. Cached input is currently priced conservatively at the full input rate in `MODEL_PRICING_ASSUMPTIONS` until an explicit cached-input rate is confirmed.
 - Agent runs continue on Opus 4.7 regardless of default model.
 - Stage 1 A/B harness measures.
 
@@ -1022,8 +1025,8 @@ Per-article steady state, projected (validate against Stage 1 A/B):
 - Default model choice (Stage 1 — biggest single lever).
 - Agent trigger calibration (Stage 2 — fire rate is half the cost equation).
 - Per-run cap on agent calls (Stage 2 — bounds worst case).
-- Glossary slicing (deferred D.B sub-decision; once retrieval ships, may become moot).
-- Prompt-cache discipline (already optimized; first-call-of-day cache write is the dominant single cost).
+- Glossary removal (AGENT.1 option 3; removes the dominant cached-system-prompt cost rather than slicing it).
+- Prompt-cache discipline (still retained, but much less important once the glossary is removed).
 - Batch API for scheduled extractions (deferred per §0.1; ~50% off scheduled-extraction line item if/when adopted).
 
 ### Cap enforcement
@@ -1234,6 +1237,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 ## 13. Revision History
 
 - **2026-05-04 — Initial draft.** Reconciles the original `agentic_pipeline_proposal.md` against actual codebase state (verified extraction.py, integration.py, news_matcher.py, db/models.py, settings.py, costs.py, structural.py, prompts.py, evidence.py, collect.py, resolution/engine.py, source_adapters/ladbs.py). Incorporates researcher answers to the 17 clarifying questions. Adds two top-of-file callouts: Batch API deferred, model-choice deferred.
+
+- **2026-05-05 (revision 12) — AGENT.1 provider/pricing hardening.**
+  - **Gateway auth:** Vercel AI Gateway requires `AI_GATEWAY_API_KEY`; no fallback to `OPENAI_API_KEY`. This avoids confusing 401s during the A/B harness.
+  - **Pricing readiness:** `MODEL_PRICING_USD_PER_MILLION` now covers Opus 4.7, Sonnet 4.6, GPT-5.4, and Haiku 4.5, with provider-prefix aliases for harness/Gateway IDs. Opus 4.7 pricing updated to current Anthropic list pricing. GPT-5.4 cached-input cost is recorded as a conservative full-input-rate assumption for harness output.
+  - **Harness routing convention:** first A/B harness runs Claude candidates through native Anthropic and GPT-5.4 through the OpenAI-compatible path. Gateway-routed Claude IDs require a separate connectivity smoke before use as the primary comparison path.
+  - **Operational cleanup:** successful LLM calls clear stale provider-specific missing-key alerts for the relevant component. Added extraction-shaped OpenAI-compatible schema-invalid coverage before the harness.
 
 - **2026-05-04 (revision 11) — `cost_cap_overrides` constraint + migration field mapping.**
   - **Strict CHECK on setter columns (Item 1).** Constraint tightened from `set_by_user_id IS NOT NULL OR set_by_actor IS NOT NULL` (at-least-one) to `(set_by_user_id IS NOT NULL) <> (set_by_actor IS NOT NULL)` (exactly-one). Audit clarity: there is one authoritative setter per override row; ambiguity (both populated) is not allowed. Comments updated to match.

@@ -11,6 +11,7 @@ import httpx
 
 DEFAULT_TRIAGE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_EXTRACTION_MODEL = "claude-opus-4-7"
+DEFAULT_SONNET_EXTRACTION_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENAI_EXTRACTION_MODEL = "gpt-5.4"
 LLM_PROVIDER_ANTHROPIC = "anthropic"
 LLM_PROVIDER_OPENAI = "openai"
@@ -31,20 +32,35 @@ MODEL_PRICING_USD_PER_MILLION = {
         "output": Decimal("5.00"),
     },
     DEFAULT_EXTRACTION_MODEL: {
-        "input": Decimal("15.00"),
-        "input_cache_creation": Decimal("18.75"),
-        "input_cache_read": Decimal("1.50"),
-        "output": Decimal("75.00"),
+        "input": Decimal("5.00"),
+        "input_cache_creation": Decimal("6.25"),
+        "input_cache_read": Decimal("0.50"),
+        "output": Decimal("25.00"),
+    },
+    DEFAULT_SONNET_EXTRACTION_MODEL: {
+        "input": Decimal("3.00"),
+        "input_cache_creation": Decimal("3.75"),
+        "input_cache_read": Decimal("0.30"),
+        "output": Decimal("15.00"),
     },
     DEFAULT_OPENAI_EXTRACTION_MODEL: {
         "input": Decimal("2.50"),
-        # OpenAI's GPT-5.4 model page currently publishes input/output prices.
-        # Until a cached-input price is explicit, price cached tokens conservatively
-        # as normal input for internal A/B accounting.
         "input_cache_creation": Decimal("2.50"),
         "input_cache_read": Decimal("2.50"),
         "output": Decimal("15.00"),
     },
+}
+MODEL_PRICING_ALIASES = {
+    "anthropic/claude-opus-4-7": DEFAULT_EXTRACTION_MODEL,
+    "anthropic/claude-sonnet-4-6": DEFAULT_SONNET_EXTRACTION_MODEL,
+    "claude-opus-4.7": DEFAULT_EXTRACTION_MODEL,
+    "claude-sonnet-4.6": DEFAULT_SONNET_EXTRACTION_MODEL,
+}
+MODEL_PRICING_ASSUMPTIONS = {
+    DEFAULT_OPENAI_EXTRACTION_MODEL: (
+        "GPT-5.4 cached-input tokens are priced at the full input rate for "
+        "internal A/B accounting until an explicit cached-input rate is confirmed."
+    ),
 }
 
 
@@ -152,6 +168,10 @@ def pricing_for_model(model: str) -> dict[str, Decimal]:
     return pricing
 
 
+def pricing_assumption_for_model(model: str) -> str | None:
+    return MODEL_PRICING_ASSUMPTIONS.get(_pricing_model_key(model))
+
+
 def anthropic_usage(usage: Any) -> LLMUsage:
     cache_read = int(getattr(usage, "cache_read_input_tokens", None) or 0)
     cache_creation = int(getattr(usage, "cache_creation_input_tokens", None) or 0)
@@ -232,11 +252,7 @@ def provider_api_key(settings: Any, provider: str) -> str | None:
     if normalized == LLM_PROVIDER_OPENAI:
         return getattr(settings, "openai_api_key", None)
     if normalized == LLM_PROVIDER_VERCEL_AI_GATEWAY:
-        return getattr(settings, "ai_gateway_api_key", None) or getattr(
-            settings,
-            "openai_api_key",
-            None,
-        )
+        return getattr(settings, "ai_gateway_api_key", None)
     return None
 
 
@@ -359,7 +375,11 @@ def _openai_json_response_payload(
 def _pricing_model_key(model: str) -> str:
     if model in MODEL_PRICING_USD_PER_MILLION:
         return model
+    if model in MODEL_PRICING_ALIASES:
+        return MODEL_PRICING_ALIASES[model]
     suffix = model.rsplit("/", maxsplit=1)[-1]
+    if suffix in MODEL_PRICING_ALIASES:
+        return MODEL_PRICING_ALIASES[suffix]
     return suffix
 
 

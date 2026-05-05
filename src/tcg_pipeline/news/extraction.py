@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol
 
 import anthropic
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -786,6 +786,7 @@ def persist_extraction_response(
         reserved_cost_usd=reserved_cost_usd,
         now=current,
     )
+    _clear_missing_api_key_alerts(session, now=current)
     article = session.execute(
         select(NewsArticle).where(NewsArticle.id == article_id).with_for_update()
     ).scalar_one_or_none()
@@ -1559,6 +1560,28 @@ def _missing_api_key_alert_key(provider: str) -> str:
     if provider == LLM_PROVIDER_VERCEL_AI_GATEWAY:
         return "news_ai_gateway_api_key_missing"
     return "news_llm_api_key_missing"
+
+
+def _clear_missing_api_key_alerts(session: Session, *, now: datetime) -> None:
+    session.execute(
+        update(SystemAlert)
+        .where(
+            SystemAlert.alert_key.in_(
+                [
+                    _missing_api_key_alert_key(LLM_PROVIDER_ANTHROPIC),
+                    _missing_api_key_alert_key(LLM_PROVIDER_OPENAI),
+                    _missing_api_key_alert_key(LLM_PROVIDER_VERCEL_AI_GATEWAY),
+                    "news_llm_api_key_missing",
+                ]
+            ),
+            SystemAlert.scope == {"component": "news_extraction"},
+            SystemAlert.cleared_at.is_(None),
+        )
+        .values(
+            cleared_at=now,
+            cleared_reason="news_extraction_llm_call_succeeded",
+        )
+    )
 
 
 def _provider_label(provider: str) -> str:

@@ -146,6 +146,17 @@ def test_persist_triage_response_writes_extraction_article_status_and_cost(
         latency_ms=123,
         stop_reason="end_turn",
     )
+    stale_alert = SystemAlert(
+        alert_key="news_openai_api_key_missing",
+        severity="warning",
+        scope={"component": "news_triage"},
+        message="OPENAI_API_KEY is not configured; news triage is skipped.",
+        detail={"skipped_reason": "no_api_key", "provider": "openai"},
+        raised_at=datetime(2026, 4, 29, 11, 0, tzinfo=UTC),
+        last_seen_at=datetime(2026, 4, 29, 11, 0, tzinfo=UTC),
+    )
+    postgres_session.add(stale_alert)
+    postgres_session.flush()
 
     result = persist_triage_response(
         postgres_session,
@@ -170,6 +181,10 @@ def test_persist_triage_response_writes_extraction_article_status_and_cost(
     assert extraction.model_provider == "anthropic"
     assert extraction.parse_status == NewsExtractionParseStatus.OK.value
     assert extraction.output_json["relevant"] is True
+    cleared_alert = postgres_session.get(SystemAlert, stale_alert.id)
+    assert cleared_alert is not None
+    assert cleared_alert.cleared_at == datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    assert cleared_alert.cleared_reason == "news_triage_llm_call_succeeded"
     cost = postgres_session.execute(
         select(LLMCostUsage).where(
             LLMCostUsage.bucket == "news",

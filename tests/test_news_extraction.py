@@ -460,6 +460,17 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
         latency_ms=1234,
         stop_reason="tool_use",
     )
+    stale_alert = SystemAlert(
+        alert_key="news_ai_gateway_api_key_missing",
+        severity="warning",
+        scope={"component": "news_extraction"},
+        message="AI_GATEWAY_API_KEY is not configured; news extraction is skipped.",
+        detail={"skipped_reason": "no_api_key", "provider": "vercel_ai_gateway"},
+        raised_at=datetime(2026, 4, 29, 11, 0, tzinfo=UTC),
+        last_seen_at=datetime(2026, 4, 29, 11, 0, tzinfo=UTC),
+    )
+    postgres_session.add(stale_alert)
+    postgres_session.flush()
 
     result = persist_extraction_response(
         postgres_session,
@@ -494,6 +505,10 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     assert reference.candidate_signal_flags == {"groundbreaking_announced": True}
     assert reference.candidate_delivery_year_normalized == date(2027, 11, 1)
     assert reference.match_status == "pending"
+    cleared_alert = postgres_session.get(SystemAlert, stale_alert.id)
+    assert cleared_alert is not None
+    assert cleared_alert.cleared_at == datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    assert cleared_alert.cleared_reason == "news_extraction_llm_call_succeeded"
     cost = postgres_session.execute(
         select(LLMCostUsage).where(
             LLMCostUsage.bucket == "news",
@@ -508,7 +523,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     assert cost.input_tokens_cache_creation == 100
     assert cost.input_tokens_cached == 200
     assert cost.output_tokens == 50
-    assert Decimal(cost.spent_usd) == Decimal("0.020925")
+    assert Decimal(cost.spent_usd) == Decimal("0.006975")
 
 
 def test_run_news_extraction_for_article_reserves_calls_client_and_true_ups(
