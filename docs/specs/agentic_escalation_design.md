@@ -213,7 +213,7 @@ The three roadmap items below are dependency-tracking units within the sprint, n
 **AGENT.2 — Agent on news.**
 - **Pre-build deliverable (Claude Code-owned):** §5.5.0/§5.5.1 contradiction-detection impact assessment, written to `docs/specs/ci_contradiction_impact_assessment.md`. Researcher reads before any C.i code is touched. Concise. `⚠ HUMAN REVIEW` markers on uncertain rows.
 - Agent runner, tools, evidence-schema additions, output-quality retry path.
-- Shared status interpretation layer: source-profile-owned mapping from observed source facts/language to TCG `pipeline_status` evidence. News uses an LLM only for unstructured/ambiguous article language; deterministic source signals stay deterministic.
+- Shared semantic field interpretation layer: source-profile-owned mapping from observed source facts/language to TCG evidence fields. Initial scope covers `pipeline_status`, `product_type`, `age_restriction`, `date_delivery`, and unit buckets once `workforce_units` exists. News uses an LLM only for unstructured/ambiguous article language; deterministic source signals stay deterministic.
 - Replace Pass 3a (a)+(b) and Pass 3b with agent loop.
 - Move contradiction detection earlier (per Q5).
 - Cutover migration backfills legacy reextractions (per Q16).
@@ -222,7 +222,7 @@ The three roadmap items below are dependency-tracking units within the sprint, n
 
 **AGENT.3 — Agent on permits.**
 - Cross-stream tools, permit-specific failure-mode prompts.
-- Wire permits into the same status interpretation interface with deterministic LADBS status-evidence rules first; LLM/agent interpretation is reserved for ambiguous permit descriptions, conflicting source signals, or cross-stream exceptions.
+- Wire permits into the same semantic interpretation interface with deterministic LADBS/source-profile rules first; LLM/agent interpretation is reserved for ambiguous permit descriptions, conflicting source signals, or cross-stream exceptions.
 - LADBS adapter integration through agent on calibrated trigger set (Q9 — `new_candidate`, large unit changes, product-type changes only).
 - Scoped permit cost cap: `cost_caps` row for `bucket='permits'` with `daily_warn_usd: $50`, `daily_hard_usd: $75` per §5.8.
 - Runtime kill switch `agent_enabled_for_permits` (per §5.8). Default `true` at launch.
@@ -396,35 +396,43 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 - Today's `_cacheable_system_blocks` ([extraction.py:210-219](../../src/tcg_pipeline/news/extraction.py)) emits `cache_control: ephemeral` per system block. With the glossary removed, the cache write becomes ~1k tokens instead of ~103k. Cache writes effectively become free; cache hits become near-free. The cache infrastructure stays in place but its cost contribution is negligible after this change.
 - Cross-provider note: GPT-5.4 has different cache semantics than Anthropic's prompt cache. Now that the cache write is small, cache-discount asymmetry between providers matters much less.
 
-### 5.1.1 Status interpretation layer (Stage 2 / shared)
+### 5.1.1 Semantic field interpretation layer (Stage 2 / shared)
 
-AGENT.2 adds a shared status interpretation layer so TCG status semantics are not buried permanently inside the general news extractor. The layer converts observed source facts/language into canonical `pipeline_status` evidence with a reason code, confidence, source anchors, and a `requires_review` flag.
+AGENT.2 adds a shared semantic field interpretation layer so TCG field semantics are not buried permanently inside the general news extractor. The layer converts observed source facts/language into canonical evidence fields with reason codes, confidence, source anchors, and `requires_review` flags. Initial interpreters: `pipeline_status`, `product_type`, `age_restriction`, and `date_delivery`; unit-bucket interpretation participates once `workforce_units` exists as a canonical field.
 
 **Interface sketch.**
 ```python
-def interpret_status(
-    observation: StatusObservation,
+def interpret_semantic_field(
+    observation: SemanticFieldObservation,
     *,
     profile: SourceProfile,
+    field_name: str,
     project_context: ProjectContext | None = None,
-) -> StatusInterpretation:
+) -> SemanticFieldInterpretation:
     ...
 ```
 
-`StatusObservation` is source-shaped but normalized enough to be shared: observed text or structured source facts, source type, article/reference identifiers when applicable, offsets/snippets, status evidence type if already known, and optional current project status. `StatusInterpretation` returns `tcg_status`, `confidence`, `reason_code`, `evidence_type`, `supporting_excerpt`/structured anchor, and `requires_review`.
+`SemanticFieldObservation` is source-shaped but normalized enough to be shared: observed text or structured source facts, source type, article/reference identifiers when applicable, offsets/snippets, source-native field names if already known, and optional current project field values. `SemanticFieldInterpretation` returns the canonical field value, confidence, reason code, evidence type or interpretation type, supporting excerpt/structured anchor, and `requires_review`.
 
-Each source profile owns a `StatusInterpreterProfile` declaring the deterministic rule table, whether the LLM fallback is allowed, which capability/model config key the fallback uses, and the maximum context shape for that source. This keeps the runner generic while making source-specific status semantics explicit and testable.
+Each source profile owns `SemanticInterpreterProfile` entries declaring the deterministic rule tables, whether LLM fallback is allowed, which capability/model config key the fallback uses, and the maximum context shape for that source. This keeps the runner generic while making source-specific field semantics explicit and testable.
+
+**Initial field scope.**
+- **`pipeline_status`:** maps article/permit language to TCG status. Example: conference-level idea/first mention → `Conceptual`; concrete application/planning/design-review activity → `Proposed`/`Pending` per TCG definitions; permit issuance → `Approved`; recent substantive inspection → `Under Construction`; CofO → `Complete`.
+- **`product_type`:** maps language such as apartment, condo, townhome, single-family, micro/co-living, and care-based senior living. "55+ apartments" remains `Apartment`; assisted living / memory care / skilled nursing / CCRC should not be collapsed silently into ordinary apartments.
+- **`age_restriction`:** maps 55+, 62+, senior, active-adult, student, university housing, and non-age-restricted language independently from product type.
+- **`date_delivery`:** interprets projected timing language into normalized dates with explicit reason codes. Example: "end of 2026" → a documented normalized midpoint/date convention such as `2026-12-15`; "mid-2027" and "Q3 2027" use similarly documented conventions. The raw text stays anchored so reviewers can see the projection source.
+- **Unit buckets:** once `workforce_units` is added, interpret total/affordable/workforce/market-rate counts as distinct components. Workforce units are not affordable units and are not market-rate units.
 
 **News behavior.**
 - Default `extract_v2` continues to emit `candidate_status_signal` during AGENT.1 so the A/B harness can spot-grade status quality without adding another moving part.
-- In AGENT.2, news references run through the status interpreter before writing `pipeline_status` evidence. For straightforward phrases, the interpreter can use deterministic phrase/rubric rules. For article language that is semantic or ambiguous ("floated the idea", "plans are taking shape", "work appears underway"), the profile may invoke a compact LLM prompt whose cached system context is only the TCG status rubric.
-- The interpreter sees only the relevant reference text/snippets and structural leads, not a batched list of full articles. This preserves per-project attribution for multi-project articles and keeps audit anchors precise.
+- In AGENT.2, news references run through semantic interpreters before writing canonical evidence for the scoped fields above. For straightforward phrases, interpreters can use deterministic phrase/rubric rules. For article language that is semantic or ambiguous ("floated the idea", "plans are taking shape", "work appears underway", "senior living community", "completion by the end of 2026"), the profile may invoke a compact LLM prompt whose cached system context is only the relevant TCG field rubric.
+- The interpreters see only the relevant reference text/snippets and structural leads, not a batched list of full articles. This preserves per-project attribution for multi-project articles and keeps audit anchors precise.
 
 **Permit behavior.**
-- Permits use deterministic mapping first: application/filing events map to early-stage statuses per source-profile rules, building permit issuance maps to `Approved`, recent substantive inspection maps to `Under Construction`, and CofO maps to `Complete`.
-- LLM/agent status interpretation is reserved for ambiguous permit descriptions, conflicting source signals, or cross-stream exceptions. Structured permit rows should not pay LLM cost for cases the rule table can map reliably.
+- Permits use deterministic mapping first: application/filing events map to early-stage statuses per source-profile rules, building permit issuance maps to `Approved`, recent substantive inspection maps to `Under Construction`, CofO maps to `Complete`, and structured permit/source fields map product/unit fields when reliable.
+- LLM/agent interpretation is reserved for ambiguous permit descriptions, conflicting source signals, or cross-stream exceptions. Structured permit rows should not pay LLM cost for cases the rule table can map reliably.
 
-**A/B scope.** The AGENT.1 model A/B remains a default-extraction test. Its spot-grade must explicitly include status correctness, but the separate status interpreter is evaluated in AGENT.2 with a focused fixture once extraction-model choice is settled. Do not default this layer to Opus 4.7 without measurement; it is a narrow classification/explanation task and may be suitable for the selected extraction model or a cheaper model.
+**A/B scope.** The AGENT.1 model A/B remains a default-extraction test. Its spot-grade must explicitly include semantic field correctness for status, product type, age restriction, delivery date projection, and unit bucket extraction, but the separate semantic interpreters are evaluated in AGENT.2 with focused fixtures once extraction-model choice is settled. Do not default this layer to Opus 4.7 without measurement; these are narrow classification/explanation tasks and may be suitable for the selected extraction model or a cheaper model.
 
 ### 5.2 Output-quality retry path (Stage 2)
 
@@ -932,7 +940,7 @@ class SourceProfile:
     system_prompt_path: Path                 # path to source-specific system prompt template
     cost_cap_bucket: str                     # which cost_caps bucket charges this profile's runs (e.g., "news", "permits")
     kill_switch_setting: str                 # which Settings flag gates execution
-    status_interpreter: StatusInterpreterProfile
+    semantic_interpreters: dict[str, SemanticInterpreterProfile]
     user_prompt_renderer: Callable           # builds the per-run user message from IntakeRecord.payload
 ```
 
@@ -941,7 +949,7 @@ class SourceProfile:
 **News profile (built in AGENT.2).**
 - Triggers: 6 conditions per §1 step 6 (Pass 1↔2 conflict, low confidence, new_candidate, possible multi-candidate, multiple distinct mentions, material contradiction). Material contradiction = `>10%` unit delta, status regression, or developer mismatch vs current state.
 - Allowed tools: all core tools + news-specific tools (`search_articles_by_project`, `search_articles_similar`).
-- Status interpreter: hybrid deterministic + compact LLM path per §5.1.1. It runs per project reference, not per full-article batch, and writes canonical `pipeline_status` evidence only when the observed article text supports a TCG status.
+- Semantic interpreters: hybrid deterministic + compact LLM path per §5.1.1 for status, product type, age restriction, delivery date projection, and unit buckets once `workforce_units` exists. They run per project reference, not per full-article batch, and write canonical evidence only when the observed article text supports the field.
 - Prompt path: `prompts/agent/news_v1/system.md`.
 - Cap bucket: `news` (existing daily cap row).
 - Kill switch: `agent_enabled_for_news`.
@@ -949,7 +957,7 @@ class SourceProfile:
 **Permit profile (built in AGENT.3).**
 - Triggers: narrow Q9 set — `new_candidate` on `create_new_candidates: true` LADBS sources, `>10%` unit-count change vs current state, product-type change vs current state.
 - Allowed tools: all core tools + permit-specific tools (`get_permits_for_parcel`, `get_permits_for_project`, `get_articles_about_parcel_or_address`, `get_permits_for_parcel_or_address`).
-- Status interpreter: deterministic LADBS status-evidence mapping first; LLM/agent path only for ambiguous permit descriptions, conflicting signals, or cross-stream exceptions.
+- Semantic interpreters: deterministic LADBS/source-profile mapping first; LLM/agent path only for ambiguous permit descriptions, conflicting signals, or cross-stream exceptions.
 - Prompt path: `prompts/agent/permit_v1/system.md`.
 - Cap bucket: `permits` (new daily cap row, `$50` warn / `$75` hard).
 - Kill switch: `agent_enabled_for_permits`.
@@ -1141,7 +1149,7 @@ The existing ROADMAP.md should be updated as follows. Concrete edits to apply wh
 - **D.late.AGENT.2 — Agent on news.**
   - **Pre-build deliverable (Claude Code-owned, researcher-reviewed):** Contradiction-detection impact assessment per §5.5.0/§5.5.1, written to `docs/specs/ci_contradiction_impact_assessment.md`. Researcher reads before any C.i code is touched. Concise, marked with `⚠ HUMAN REVIEW` flags on uncertain rows.
   - Build agent runner, tools, evidence-schema additions.
-  - Build shared status interpretation layer (§5.1.1) and wire news references through it before writing `pipeline_status` evidence. AGENT.1 A/B spot-grades status quality, but the separate interpreter ships in AGENT.2.
+  - Build shared semantic field interpretation layer (§5.1.1) and wire news references through it before writing canonical evidence for status, product type, age restriction, delivery date projection, and unit buckets once `workforce_units` exists. AGENT.1 A/B spot-grades semantic field quality, but the separate interpreters ship in AGENT.2.
   - Replace Pass 3a (a)+(b) and Pass 3b with agent loop.
   - Build output-quality retry path for parse/refused/truncated.
   - Move contradiction detection earlier (per Q5). No feature flag; impact assessment is the mitigation.
@@ -1155,7 +1163,7 @@ The existing ROADMAP.md should be updated as follows. Concrete edits to apply wh
 
 - **D.late.AGENT.3 — Agent on permits.**
   - Add cross-stream tools and permit-specific failure-mode prompts.
-  - Wire permits into the shared status interpretation layer with deterministic source-profile rules first; reserve LLM/agent status interpretation for ambiguous permit descriptions, conflicting signals, or cross-stream exceptions.
+  - Wire permits into the shared semantic interpretation layer with deterministic source-profile rules first; reserve LLM/agent interpretation for ambiguous permit descriptions, conflicting signals, or cross-stream exceptions.
   - Wire LADBS adapter integration through agent loop on calibrated trigger set (new_candidate, >10% unit change, product-type change).
   - Validates: cross-stream tools improve attribution.
   - **Scoped permit cost cap** (per §5.8): `cost_caps` row for `bucket='permits'` with `daily_warn_usd: $50`, `daily_hard_usd: $75` initially, independent of news bucket.
@@ -1305,10 +1313,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Because `candidate_status_signal` becomes TCG `pipeline_status` evidence in the news integrator, `extract_v2` now includes the TCG status rubric. A conference comment or first mention of an idea maps to `Conceptual`; `Proposed` requires stated application/planning/design-review activity or another concrete proposal beyond an idea.
   - The prompt now treats structural signals as evidence leads that must be checked against nearby article text, especially for ambiguous status words such as "proposed", "plans", and "planning".
 
-- **2026-05-05 (revision 18) — Shared status interpretation layer added to AGENT.2/3 scope.**
-  - AGENT.2 now explicitly builds a shared status interpretation layer (§5.1.1) before writing TCG `pipeline_status` evidence from news references. The AGENT.1 A/B harness still measures default extraction only, but its spot-grade should include status correctness.
-  - News status interpretation is source-profile-owned and hybrid: deterministic rules for straightforward phrases/signals, compact LLM interpretation only for unstructured or ambiguous article language.
-  - AGENT.3 wires permits into the same interface with deterministic LADBS/source-profile rules first. LLM/agent status interpretation is reserved for ambiguous permit descriptions, conflicting signals, or cross-stream exceptions.
+- **2026-05-05 (revision 18) — Shared semantic interpretation layer added to AGENT.2/3 scope.**
+  - AGENT.2 now explicitly builds a shared semantic field interpretation layer (§5.1.1) before writing TCG evidence from news references. The AGENT.1 A/B harness still measures default extraction only, but its spot-grade should include semantic correctness for status, product type, age restriction, delivery date projection, and unit buckets.
+  - News semantic interpretation is source-profile-owned and hybrid: deterministic rules for straightforward phrases/signals, compact LLM interpretation only for unstructured or ambiguous article language.
+  - Initial semantic fields: `pipeline_status`, `product_type`, `age_restriction`, `date_delivery`, and unit buckets once `workforce_units` exists. Delivery-date projection examples such as "end of 2026" get documented normalization conventions and keep the raw text anchored.
+  - AGENT.3 wires permits into the same interface with deterministic LADBS/source-profile rules first. LLM/agent interpretation is reserved for ambiguous permit descriptions, conflicting signals, or cross-stream exceptions.
+  - Workforce units are tracked as a planned canonical unit bucket in ROADMAP E.6; interpreters must not silently collapse workforce units into affordable or market-rate counts before that field lands.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
