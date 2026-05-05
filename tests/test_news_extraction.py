@@ -482,6 +482,12 @@ def test_render_extraction_prompt_omits_registry_glossary(
     assert "Use Conceptual for first mentions, conference comments, ideas" in (
         rendered_prompt.system_text
     )
+    assert "Do not compute market-rate units by subtracting affordable units" in (
+        rendered_prompt.system_text
+    )
+    assert "Do not normalize seasons, quarters, month-only, year-only" in (
+        rendered_prompt.system_text
+    )
     assert "Permits alone are not Under Construction" in rendered_prompt.system_text
     required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
     assert "registry_developer_id" not in required
