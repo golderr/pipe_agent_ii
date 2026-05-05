@@ -486,6 +486,8 @@ def run_agent_for_intake(
     matcher_results: list[MatchResult],         # deterministic matcher output (source-shaped, normalized to a base type)
     trigger_reasons: list[AgentTrigger],        # which trigger(s) fired
     profile: SourceProfile,                     # declares allowed tools, prompt template, cap bucket, kill switch
+    client: AgentClient | None = None,          # dependency-injected LLM/tool-loop client
+    produced_review_item_ids: list[uuid.UUID] | None = None,
     settings: Settings | None = None,
     session_factory: sessionmaker | None = None,
     now: datetime | None = None,
@@ -501,6 +503,8 @@ class IntakeRecord:
 ```
 
 The runner is the same code regardless of source. What varies is the `SourceProfile`: which tools the agent can call, which system prompt frames the task, which cost-cap bucket the run charges, which kill switch gates execution.
+
+**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the inert source-agnostic runner skeleton and profile registry. The runner validates triggers/source type, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. It does not yet include the real Anthropic tool-loop client or production news integration wiring.
 
 **Runner loop (pseudocode).**
 ```
@@ -994,6 +998,8 @@ class SourceProfile:
 - Cap bucket: `news` (existing daily cap row).
 - Kill switch: `agent_enabled_for_news`.
 
+Implementation path: `tcg_pipeline.agents.profiles.NEWS_AGENT_PROFILE`. Capability key: `agent.news_v1`. Current prompt scaffold path: `src/tcg_pipeline/agents/prompts/news_v1/system.md`.
+
 **Permit profile (built in AGENT.3).**
 - Triggers: narrow Q9 set — `new_candidate` on `create_new_candidates: true` LADBS sources, `>10%` unit-count change vs current state, product-type change vs current state.
 - Allowed tools: all core tools + permit-specific tools (`get_permits_for_parcel`, `get_permits_for_project`, `get_articles_about_parcel_or_address`, `get_permits_for_parcel_or_address`).
@@ -1389,6 +1395,13 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - `agent_runs.intake_record_id` now documents the news convention explicitly: for news runs, use the stringified `news_articles.id`.
   - Added DB-backed schema contract tests for valid insert/join behavior, required non-empty `triggered_by`, failed-outcome `error_text`, nonnegative counters, JSON-array observability fields, and `ON DELETE SET NULL` audit preservation.
   - Production remains applied only through AGENT.1 (`202605040028`) until the AGENT.2 runner/cutover checkpoint.
+
+- **2026-05-05 (revision 24) — AGENT.2 runner/profile skeleton implemented.**
+  - Added `tcg_pipeline.agents` with source-agnostic `IntakeRecord`, `AgentTrigger`, `SourceProfile`, `NEWS_AGENT_PROFILE`, and `run_agent_for_intake`.
+  - The runner is dependency-injected: real LLM/tool-loop execution is still deferred, but the audit/cost shell is live in code and tested with fake clients.
+  - Implemented terminal `agent_runs` persistence for kill-switch, daily-budget rejection, client failure, and successful injected-client paths, including `agent_run_review_items` linkage and `llm_cost_usage` rows under `agent.news_v1`.
+  - Added `news_v1` system-prompt scaffold emphasizing no outside knowledge, source/tool anchoring, bounded tool summaries, and final structured output.
+  - Production news ingestion remains unchanged until the real AGENT.2 client/tools and cutover wiring land.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
