@@ -486,6 +486,9 @@ def test_render_extraction_prompt_omits_registry_glossary(
     required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
     assert "registry_developer_id" not in required
     assert "registry_project_id" not in required
+    diagnostic_properties = rendered_prompt.schema["properties"]["diagnostic"]["properties"]
+    assert "items" in diagnostic_properties["structural_disagreements"]
+    assert "items" in diagnostic_properties["uncertain_offsets"]
 
 
 def test_extract_v1_remains_legacy_glossary_prompt() -> None:

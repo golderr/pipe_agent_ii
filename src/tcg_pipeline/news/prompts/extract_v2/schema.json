@@ -173,10 +173,17 @@
       "additionalProperties": true,
       "properties": {
         "structural_disagreements": {
-          "type": "array"
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
         },
         "uncertain_offsets": {
-          "type": "array"
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
         },
         "model_notes": {
           "type": ["string", "null"]
