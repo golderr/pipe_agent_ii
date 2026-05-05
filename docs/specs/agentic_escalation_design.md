@@ -353,6 +353,8 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 - Today's `render_news_glossary` in [news/prompts.py:219-260](../../src/tcg_pipeline/news/prompts.py) emits the full developer registry + market-filtered project list as a cached system block (~103k tokens at LA scale; ~50k+ projects unscoped at 25-market scale, which exceeds context).
 - Stage 1 removes this from the default-extraction prompt entirely. Implemented 2026-05-05: `render_extraction_prompt` now emits only (a) the system template (`extract_v2/system.md`, small), (b) the signal flag registry (small).
 - Default extraction emits raw `candidate_name` and `candidate_developer` text without `registry_developer_id` / `registry_project_id` hints. `extract_v2/schema.json` keeps those fields available for parser compatibility but no longer requires them.
+- Default extraction is evidence-only: `extract_v2/system.md` explicitly bans outside knowledge, web knowledge, memory, and guessing. Missing names, addresses, developers, counts, dates, statuses, coordinates, and identifiers stay null unless directly observed in the provided article text or structural signals.
+- `candidate_status_signal` is treated downstream as TCG `pipeline_status` evidence, so `extract_v2` now includes a concise TCG status rubric. A conference comment or first mention of an idea is `Conceptual`; `Proposed` requires stated application/planning/design-review activity or another concrete proposal beyond an idea. The prompt also tells the model to verify ambiguous structural status phrases against nearby article text rather than copying the structural canonical value blindly.
 - `extract_v1` is retained as the legacy glossary prompt so historical rows tagged `extract_v1` keep one meaning. Legacy `reextract_v1` keeps its glossary block until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`; the A/B harness must call the default `extract_v2` path, not either legacy path.
 - The deterministic matcher continues to use its existing fuzzy registry matching (developer canonicalization via `canonicalize_developer_name`, project name fuzzy via rapidfuzz).
 - Registry knowledge moves to the agent's tool layer (`get_developer_projects`, `search_articles_similar`, `get_nearby_projects`) — accessed on demand when the agent fires, not preloaded into every extraction.
@@ -1260,6 +1262,11 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - CLI startup prints the redacted DB target plus fixture article count, candidate count, and planned LLM call count before any provider call.
   - Harness preflights each provider/model before the article loop so wrong model IDs, missing keys, or Gateway configuration failures do not turn into repeated per-article `api_error` rows.
   - Report metadata now states that harness spend bypasses cost-cap accounting and does not write `llm_cost_usage`; provider cache semantics are also called out as not perfectly apples-to-apples.
+
+- **2026-05-05 (revision 17) — Extract v2 evidence/status guardrails.**
+  - `extract_v2/system.md` now explicitly bans outside knowledge, web knowledge, memory, assumptions, and guessing missing values.
+  - Because `candidate_status_signal` becomes TCG `pipeline_status` evidence in the news integrator, `extract_v2` now includes the TCG status rubric. A conference comment or first mention of an idea maps to `Conceptual`; `Proposed` requires stated application/planning/design-review activity or another concrete proposal beyond an idea.
+  - The prompt now treats structural signals as evidence leads that must be checked against nearby article text, especially for ambiguous status words such as "proposed", "plans", and "planning".
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

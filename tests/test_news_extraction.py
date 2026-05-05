@@ -476,6 +476,13 @@ def test_render_extraction_prompt_omits_registry_glossary(
     assert "Do not infer registry_developer_id or registry_project_id" in (
         rendered_prompt.system_text
     )
+    assert "Do not use outside knowledge, web knowledge, memory, or assumptions" in (
+        rendered_prompt.system_text
+    )
+    assert "Use Conceptual for first mentions, conference comments, ideas" in (
+        rendered_prompt.system_text
+    )
+    assert "Permits alone are not Under Construction" in rendered_prompt.system_text
     required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
     assert "registry_developer_id" not in required
     assert "registry_project_id" not in required

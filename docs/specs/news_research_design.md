@@ -1184,6 +1184,7 @@ Extractors:
    - `"approved by city council"`, `"won approval"`, `"received approval"`, `"city approved"`, `"ENV cleared"` → `pipeline_status: Approved`.
    - `"filed plans"`, `"submitted application"`, `"filed for entitlement"`, `"applied to"` → `pipeline_status: Pending`.
    - `"proposed"`, `"plans"`, `"plans for"`, `"is planning"` → `pipeline_status: Proposed`.
+   - **AGENT.1 note:** active default extraction (`extract_v2`) treats these structural status matches as evidence leads, not binding status translations. The LLM must apply the TCG status rubric against nearby article text; a first mention or conference-level idea is `Conceptual`, while `Proposed` requires stated application/planning/design-review activity or another concrete proposal beyond an idea.
    - `"shelved"`, `"on hold"`, `"paused"`, `"delayed indefinitely"`, `"stalled"` → `signal_flag: stalled_indicator`.
    - `"lawsuit"`, `"sued"`, `"plaintiff"`, `"complaint filed"` → `signal_flag: lawsuit_filed`.
    - `"appeal filed"`, `"under appeal"`, `"appealed the decision"` → `signal_flag: appeal_filed`.
