@@ -221,24 +221,46 @@ def test_pricing_supports_openai_gateway_model_suffix() -> None:
     assert pricing_for_model("openai/gpt-5.4") == pricing_for_model("gpt-5.4")
     assert pricing_for_model("gpt-5.4-2026-03-05") == pricing_for_model("gpt-5.4")
     assert pricing_for_model("openai/gpt-5.4-2026-03-05") == pricing_for_model("gpt-5.4")
+    assert pricing_for_model("openai/gpt-5.5") == pricing_for_model("gpt-5.5")
+    assert pricing_for_model("gpt-5.5-2026-04-23") == pricing_for_model("gpt-5.5")
+    assert pricing_for_model("openai/gpt-5.5-2026-04-23") == pricing_for_model("gpt-5.5")
     cost = calculate_llm_cost_usd(
         "openai/gpt-5.4",
         input_tokens_uncached=1000,
         input_tokens_cache_creation=0,
-        input_tokens_cached=0,
+        input_tokens_cached=1000,
+        output_tokens=100,
+    )
+    gpt55_cost = calculate_llm_cost_usd(
+        "openai/gpt-5.5",
+        input_tokens_uncached=1000,
+        input_tokens_cache_creation=0,
+        input_tokens_cached=1000,
         output_tokens=100,
     )
 
-    assert cost == Decimal("0.004000")
+    assert cost == Decimal("0.004250")
+    assert gpt55_cost == Decimal("0.008500")
     assert pricing_assumption_for_model("openai/gpt-5.4") is not None
+    assert pricing_assumption_for_model("openai/gpt-5.5") is not None
 
 
 def test_pricing_supports_agent_harness_anthropic_aliases() -> None:
     assert pricing_for_model("anthropic/claude-opus-4-7") == pricing_for_model(
         "claude-opus-4-7"
     )
+    assert pricing_for_model("anthropic/claude-opus-4-6") == pricing_for_model(
+        "claude-opus-4-6"
+    )
     assert pricing_for_model("anthropic/claude-sonnet-4-6") == pricing_for_model(
         "claude-sonnet-4-6"
+    )
+    opus46_cost = calculate_llm_cost_usd(
+        "anthropic/claude-opus-4-6",
+        input_tokens_uncached=1000,
+        input_tokens_cache_creation=0,
+        input_tokens_cached=0,
+        output_tokens=100,
     )
     sonnet_cost = calculate_llm_cost_usd(
         "anthropic/claude-sonnet-4-6",
@@ -248,6 +270,7 @@ def test_pricing_supports_agent_harness_anthropic_aliases() -> None:
         output_tokens=100,
     )
 
+    assert opus46_cost == Decimal("0.007500")
     assert sonnet_cost == Decimal("0.004500")
 
 

@@ -367,9 +367,9 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 **Configuration.**
 - `news_extract_model` setting (already exists — [settings.py:59](../../src/tcg_pipeline/settings.py)).
 - `news_extract_provider` setting chooses `anthropic`, `openai`, or `vercel_ai_gateway`; Anthropic remains the production default.
-- `MODEL_PRICING_USD_PER_MILLION` covers the AGENT.1 harness candidates: Haiku 4.5 triage, Opus 4.7, Sonnet 4.6, and GPT-5.4. Alias support covers native IDs and Gateway-style provider prefixes (for example `anthropic/claude-sonnet-4-6`, `openai/gpt-5.4`).
+- `MODEL_PRICING_USD_PER_MILLION` covers the AGENT.1 harness candidates: Haiku 4.5 triage, Opus 4.7, Opus 4.6, Sonnet 4.6, GPT-5.5, and GPT-5.4. Alias support covers native IDs and Gateway-style provider prefixes (for example `anthropic/claude-sonnet-4-6`, `openai/gpt-5.4`).
 - Vercel AI Gateway requires `AI_GATEWAY_API_KEY`. It must not fall back to `OPENAI_API_KEY`; the keys are distinct and falling back would mask configuration errors as 401s during the harness.
-- Pricing assumptions are machine-readable for harness output. Current explicit assumption: GPT-5.4 cached-input tokens are priced at full input rate until an explicit cached-input rate is confirmed.
+- Pricing assumptions are machine-readable for harness output. Current explicit assumption: OpenAI Responses usage should report cache-creation tokens as zero; if non-zero cache-creation usage is ever passed into internal accounting, it is priced at the full input rate. Cached input uses current OpenAI list pricing.
 - Current routing policy until explicitly revised: use direct provider APIs for all built/current AGENT work. Run Claude candidates through native Anthropic and GPT-5.4 through native OpenAI. Vercel AI Gateway remains a deferred operational option for centralized routing/monitoring; before enabling it, run a sweep of all LLM call sites, configs, pricing aliases, cost attribution, alerts, and deployment env vars to confirm Gateway routing is intentional and no direct-provider assumptions remain. A separate Gateway connectivity smoke may be added later as an auxiliary run, not the primary A/B.
 
 **A/B harness — end-to-end, not extraction-JSON-only (revised 2026-05-04).** Senior-developer feedback called out that the product impact is attribution + review workload, not just per-field JSON correctness. The harness measures the full pipeline outcome per candidate model.
@@ -1332,7 +1332,7 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 
 - **2026-05-05 (revision 12) — AGENT.1 provider/pricing hardening.**
   - **Gateway auth:** Vercel AI Gateway requires `AI_GATEWAY_API_KEY`; no fallback to `OPENAI_API_KEY`. This avoids confusing 401s during the A/B harness.
-  - **Pricing readiness:** `MODEL_PRICING_USD_PER_MILLION` now covers Opus 4.7, Sonnet 4.6, GPT-5.4, and Haiku 4.5, with provider-prefix aliases for harness/Gateway IDs. Opus 4.7 pricing updated to current Anthropic list pricing. GPT-5.4 cached-input cost is recorded as a conservative full-input-rate assumption for harness output.
+  - **Pricing readiness:** `MODEL_PRICING_USD_PER_MILLION` now covers Opus 4.7, Opus 4.6, Sonnet 4.6, GPT-5.5, GPT-5.4, and Haiku 4.5, with provider-prefix aliases for harness/Gateway IDs. Opus 4.7/4.6 pricing uses current Anthropic list pricing. GPT-5.5/GPT-5.4 cached-input cost uses current OpenAI list pricing; the remaining OpenAI accounting assumption is only that Responses usage reports cache-creation tokens as zero.
   - **Harness routing convention:** first A/B harness runs Claude candidates through native Anthropic and GPT-5.4 through native OpenAI. Gateway-routed model IDs require a separate sweep/activation decision before use.
   - **Operational cleanup:** successful LLM calls clear stale provider-specific missing-key alerts for the relevant component. Added extraction-shaped OpenAI-compatible schema-invalid coverage before the harness.
 

@@ -11,8 +11,10 @@ import httpx
 
 DEFAULT_TRIAGE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_EXTRACTION_MODEL = "claude-opus-4-7"
+DEFAULT_OPUS_46_EXTRACTION_MODEL = "claude-opus-4-6"
 DEFAULT_SONNET_EXTRACTION_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENAI_EXTRACTION_MODEL = "gpt-5.4"
+DEFAULT_OPENAI_55_EXTRACTION_MODEL = "gpt-5.5"
 LLM_PROVIDER_ANTHROPIC = "anthropic"
 LLM_PROVIDER_OPENAI = "openai"
 LLM_PROVIDER_VERCEL_AI_GATEWAY = "vercel_ai_gateway"
@@ -37,6 +39,12 @@ MODEL_PRICING_USD_PER_MILLION = {
         "input_cache_read": Decimal("0.50"),
         "output": Decimal("25.00"),
     },
+    DEFAULT_OPUS_46_EXTRACTION_MODEL: {
+        "input": Decimal("5.00"),
+        "input_cache_creation": Decimal("6.25"),
+        "input_cache_read": Decimal("0.50"),
+        "output": Decimal("25.00"),
+    },
     DEFAULT_SONNET_EXTRACTION_MODEL: {
         "input": Decimal("3.00"),
         "input_cache_creation": Decimal("3.75"),
@@ -46,21 +54,36 @@ MODEL_PRICING_USD_PER_MILLION = {
     DEFAULT_OPENAI_EXTRACTION_MODEL: {
         "input": Decimal("2.50"),
         "input_cache_creation": Decimal("2.50"),
-        "input_cache_read": Decimal("2.50"),
+        "input_cache_read": Decimal("0.25"),
         "output": Decimal("15.00"),
+    },
+    DEFAULT_OPENAI_55_EXTRACTION_MODEL: {
+        "input": Decimal("5.00"),
+        "input_cache_creation": Decimal("5.00"),
+        "input_cache_read": Decimal("0.50"),
+        "output": Decimal("30.00"),
     },
 }
 MODEL_PRICING_ALIASES = {
     "anthropic/claude-opus-4-7": DEFAULT_EXTRACTION_MODEL,
+    "anthropic/claude-opus-4-6": DEFAULT_OPUS_46_EXTRACTION_MODEL,
     "anthropic/claude-sonnet-4-6": DEFAULT_SONNET_EXTRACTION_MODEL,
     "claude-opus-4.7": DEFAULT_EXTRACTION_MODEL,
+    "claude-opus-4.6": DEFAULT_OPUS_46_EXTRACTION_MODEL,
     "claude-sonnet-4.6": DEFAULT_SONNET_EXTRACTION_MODEL,
     "gpt-5.4-2026-03-05": DEFAULT_OPENAI_EXTRACTION_MODEL,
+    "gpt-5.5-2026-04-23": DEFAULT_OPENAI_55_EXTRACTION_MODEL,
 }
 MODEL_PRICING_ASSUMPTIONS = {
     DEFAULT_OPENAI_EXTRACTION_MODEL: (
-        "GPT-5.4 cached-input tokens are priced at the full input rate for "
-        "internal A/B accounting until an explicit cached-input rate is confirmed."
+        "OpenAI Responses usage is expected to report cache-creation tokens as 0; "
+        "if non-zero cache-creation usage is passed, internal accounting prices it "
+        "at the full input rate."
+    ),
+    DEFAULT_OPENAI_55_EXTRACTION_MODEL: (
+        "OpenAI Responses usage is expected to report cache-creation tokens as 0; "
+        "if non-zero cache-creation usage is passed, internal accounting prices it "
+        "at the full input rate."
     ),
 }
 
