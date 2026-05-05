@@ -49,6 +49,8 @@ from tcg_pipeline.utils.logging import configure_logging
 from tcg_pipeline.workers.scrape_jobs import run_worker
 
 app = typer.Typer(help="TCG pipeline tracker CLI.")
+news_app = typer.Typer(help="News research and extraction utilities.")
+app.add_typer(news_app, name="news")
 COLLECTION_MODE_OPTION = typer.Option(
     CollectionMode.FULL,
     help="Collection mode: full backfill or incremental from the last source-run cursor.",
@@ -90,6 +92,68 @@ def worker(
 ) -> None:
     """Run the durable scrape-job worker."""
     run_worker(queue_name=queue_name, burst=burst)
+
+
+@news_app.command("ab-extract")
+def news_ab_extract(
+    fixture: Annotated[
+        Path,
+        typer.Option(
+            help="JSON fixture of article objects to run through each extraction candidate.",
+        ),
+    ] = Path("tests/fixtures/news/urbanize_la/pass1_validation_articles.json"),
+    candidates: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Comma-separated '<provider>:<model>' candidates, e.g. "
+                "'anthropic:claude-opus-4-7,anthropic:claude-sonnet-4-6,openai:gpt-5.4'."
+            ),
+        ),
+    ] = (
+        "anthropic:claude-opus-4-7,"
+        "anthropic:claude-sonnet-4-6,"
+        "openai:gpt-5.4"
+    ),
+    source_slug: Annotated[
+        str,
+        typer.Option(help="News source slug used for source scope and matcher defaults."),
+    ] = "urbanize_la",
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Optional report path. Defaults to data/output/news/ab_extract_*.json."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional maximum number of fixture articles to run."),
+    ] = None,
+) -> None:
+    """Run the AGENT.1 default-extraction A/B harness."""
+    from tcg_pipeline.news.ab_harness import run_extraction_ab_harness
+
+    try:
+        report = run_extraction_ab_harness(
+            fixture_path=fixture,
+            candidates=candidates,
+            source_slug=source_slug,
+            output_path=output,
+            limit=limit,
+        )
+    except (RuntimeError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Report: {report['output_path']}")
+    for summary in report["candidate_summaries"]:
+        typer.echo(
+            "  "
+            f"{summary['candidate']} | "
+            f"articles={summary['articles']} | "
+            f"parse={summary['parse_status_counts']} | "
+            f"refs={summary['references']} | "
+            f"agent_rate={summary['agent_trigger_rate']} | "
+            f"cost=${summary['total_cost_usd']}"
+        )
 
 
 @app.command()

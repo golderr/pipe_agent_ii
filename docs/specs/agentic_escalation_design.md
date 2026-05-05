@@ -370,18 +370,20 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 
 **A/B harness — end-to-end, not extraction-JSON-only (revised 2026-05-04).** Senior-developer feedback called out that the product impact is attribution + review workload, not just per-field JSON correctness. The harness measures the full pipeline outcome per candidate model.
 
-- New CLI command: `tcg-pipeline news ab-extract --candidates anthropic:claude-opus-4-7,anthropic:claude-sonnet-4-6,openai:gpt-5.4 --fixture tests/fixtures/news/urbanize_la/pass1_validation_articles.json`.
+- CLI command implemented 2026-05-05: `tcg-pipeline news ab-extract --candidates anthropic:claude-opus-4-7,anthropic:claude-sonnet-4-6,openai:gpt-5.4 --fixture tests/fixtures/news/urbanize_la/pass1_validation_articles.json`.
 - Runs all three models against the same articles with the new (slim) cached system prompt — no glossary, just template + signal flags.
+- Uses active `extract_v2` through `render_extraction_prompt`, then parses with the production extraction parser.
+- Runs deterministic matcher projections directly, and projects review-item counts by invoking the existing news integration code inside a rollback-only transaction. The harness report is therefore non-mutating: temporary `news_articles`, `news_extractions`, `news_project_references`, `source_runs`, `evidence`, and `review_items` rows are rolled back after each projection.
 - Per-model metrics captured for each article:
   - **Parse outcomes:** parse_status distribution (`ok` / `parse_error` / `schema_invalid` / `refused` / `truncated`).
   - **Reference counts:** how many `project_references` does each model emit per article. Outliers in either direction indicate over- or under-extraction.
   - **Matcher outcome distribution:** how many references resolve to `confirmed` / `possible` / `new_candidate` / `discarded` after the deterministic matcher runs on each model's output.
-  - **Agent trigger rate:** with the agent layer wired, how many references would fire the agent under each model's output.
-  - **Review item counts:** how many `STATUS_CHANGE` / `OVERRIDE_CONTRADICTION` / `NEW_CANDIDATE` / `POSSIBLE_MATCH` items each model produces per article (proxy for reviewer workload).
-  - **All-in cost per article:** triage + default extraction + (projected) agent runs. Not just per-call cost.
+  - **Agent trigger rate:** pre-AGENT.2 proxy for how many articles would fire the agent under each model's output: current Pass 3a structural/low-confidence reasons plus `pass2_new_candidate` matcher outcomes. Parse/schema/refusal/truncation outcomes are reported separately as output-quality retry candidates, not agent triggers.
+  - **Review item counts:** projected `STATUS_CHANGE`, `NEW_CANDIDATE`, and `POSSIBLE_MATCH` counts from the rollback integration pass. `OVERRIDE_CONTRADICTION` remains AGENT.2-specific and is not projected by the AGENT.1 harness scaffold.
+  - **Cost per article:** scaffold records the measured default-extraction call cost from provider usage. The final AGENT.2 comparison extends this to all-in cost once agent-run pricing exists: triage + default extraction + projected agent runs.
   - **Latency:** end-to-end per article wallclock.
   - **Payload quality (researcher spot-grade):** for each model on each article, researcher rates the extraction output 1-5 on (a) factual correctness, (b) completeness, (c) field-attribution fidelity (e.g., "did the model put the developer in the right field?"). Sample size: 5 articles × 3 models = 15 graded outputs. Manageable.
-- Output: a single summary report comparing the three models across all metrics, plus a recommendation paragraph the researcher reviews before deciding.
+- Output: a single JSON summary report under `data/output/news/ab_extract_*.json` by default. Each article result includes empty `payload_quality_spot_grade.score` / `notes` fields for researcher grading before deciding.
 - Researcher picks default model from the data. No hard cost gate. Cost is one of seven dimensions, not the gating one.
 
 **Prompt cache validation.**
@@ -1051,7 +1053,7 @@ Cost-cap config lives in `cost_caps` (per §5.8 split). Spend rollup lives in `l
 4. `CREATE TABLE news_reference_auto_applied (...)` per §5.7 auto-applied gate.
 5. Cost-cap schema split per §5.8: create `cost_caps` (config), `cost_cap_overrides` (time-bounded bumps), `llm_cost_usage` (rollup with `call_count` carried forward and reservation-row sentinel semantics preserved). Migrate `news_extraction_costs` rows into `llm_cost_usage` with `bucket='news'`. Copy any active `news_cost_caps` override into `cost_cap_overrides`. Drop `news_extraction_costs` and `news_cost_caps`.
 6. Embedding pipeline scripts + first per-reference-accepted backfill.
-7. A/B harness CLI command (artifact: produces a comparison report covering parse outcomes, reference counts, matcher outcome distribution, agent trigger rate, review item counts, all-in cost, payload quality) — ends with researcher decision memo.
+7. A/B harness CLI command (artifact: produces a comparison report covering parse outcomes, reference counts, matcher outcome distribution, agent trigger proxy rate, projected review item counts, measured extraction cost, and payload quality spot-grade fields; AGENT.2 extends this to all-in cost once agent-run pricing exists) — ends with researcher decision memo.
 8. Multi-provider abstraction in `news/llm.py` (Anthropic + OpenAI/Vercel AI Gateway) — required for GPT-5.4 in the A/B.
 
 ### AGENT.2 migrations
@@ -1245,6 +1247,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - `extract_v1` is restored as the legacy glossary prompt/schema so historical rows tagged `extract_v1` keep one meaning for cost and quality reconciliation.
   - Developer/project dictionary Pass 3a structural-conflict triggers are effectively silent for active `extract_v2` because default extraction no longer emits registry hints. This is intentional interim behavior until AGENT.2 moves those cases into the agent layer; the A/B harness should measure agent-trigger proxies and reviewer workload with that gap visible.
 
+- **2026-05-05 (revision 15) — AGENT.1 A/B harness scaffold implemented.**
+  - Added `tcg-pipeline news ab-extract` with candidate syntax `<provider>:<model>` and default candidates Opus 4.7, Sonnet 4.6, and GPT-5.4.
+  - Harness uses active `extract_v2`, production parser/schema validation, production matcher, and rollback-only integration projection for review-item counts.
+  - Report output includes parse status counts, reference counts, matcher status/match-type counts, agent-trigger proxy reasons, projected review-item counts, measured extraction cost, latency, token usage, pricing assumptions, and blank researcher spot-grade fields.
+  - The integration projection intentionally rolls back temporary article/extraction/reference/evidence/review/source-run rows, so the harness can run against staging or production-like databases without polluting operational data.
+
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
   - Senior review identified that changing `extract_v1` in place would make pre-cutover and post-cutover `news_extractions.prompt_id = 'extract_v1'` rows mean two different prompts. Revision 14 resolves that by restoring `extract_v1` as legacy and promoting the slim prompt as `extract_v2`.
@@ -1295,7 +1303,7 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Pass 3a/3b code preserved as `extraction_legacy.py` for one release cycle. New emergency settings flag `news_use_legacy_pass3` re-routes news through the imported legacy code if AGENT.2 has a regression that default-only mode can't paper over. Cleaner architectural cutover; safety net retained.
   - Cost cap table generalized from news-named (`news_cost_caps`) to `cost_caps(bucket, ...)` with one row per source bucket. AGENT.1 migrates today's data as `bucket='news'` rows. Future buckets (`permits`, `costar`, `pipedream`) plug in without schema changes.
   - `agent_runs` schema expanded with full observability: provider, model, profile_version, prompt_version, triggered_by-as-list, token-count breakdown, latency, source_run_id, scrape_job_id, error_text, tool_calls_count, wallclock_seconds. If sprint moves fast, observability is the safety mechanism — every field populated for every run.
-  - A/B harness (§5.1) reframed from extraction-JSON-only to end-to-end metrics: parse outcomes, reference counts, matcher outcome distribution, agent trigger rate, review item counts, all-in cost per article, payload quality (researcher spot-grade). Adds ~half-day to AGENT.1 scope.
+  - A/B harness (§5.1) reframed from extraction-JSON-only to product-impact metrics: parse outcomes, reference counts, matcher outcome distribution, agent trigger proxy rate, projected review item counts, measured extraction cost now and all-in cost after AGENT.2 agent pricing exists, payload quality (researcher spot-grade). Adds ~half-day to AGENT.1 scope.
   - New §5.4.1 tool output budgets. Hard token caps per tool with truncated/total-results contract. Prevents tool returns from consuming the per-run cost budget.
   - §5.7 per-reference indexing contract tightened: indexed iff `review_item.state='committed'` AND latest decision `action='accept'` (or auto-applied via separate audit-row gate). Edge cases for multi-reference articles and re-extraction supersession enumerated. New table `news_reference_auto_applied` and column `gate_source` on `news_article_chunks`.
 
