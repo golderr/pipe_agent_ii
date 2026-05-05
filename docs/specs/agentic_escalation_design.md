@@ -801,6 +801,8 @@ A reference enters the embedding index iff **any** of the following gates fires:
 
 **References that never enter the index:** rejected via `keep_old` or `custom`, deferred, never reached committed state, or matched as `discarded` by the matcher.
 
+**Edge case - whole-article retrieval context.** The indexer emits one whole-article chunk when at least one reference in the article passes a gate. This chunk is broad retrieval context only: it does not mean every reference or every claim in that article was accepted, and AGENT.2 retrieval tools must still report the per-reference gate source alongside the whole-article hit.
+
 **Edge case — multi-reference articles.** When an article produces N references, each reference is gated independently. References A and B from the same article can be indexed even if reference C is rejected. The chunk schema keys on `(article_id, reference_index)` to support this.
 
 **Edge case — re-extraction supersession.** When a re-extraction supersedes an earlier extraction's references (via `news_extractions.supersedes_extraction_id`), the prior references' indexed chunks are marked stale (`embedded_at` cleared, `superseded_at` set on the chunk row). The current extraction's references go through the gate fresh. Stale chunks are NOT returned by `search_articles_similar`.
@@ -817,6 +819,7 @@ Pipeline:
 - Triggered on re-extraction to supersede prior chunks.
 - Chunking strategy: per-reference chunks (the body offsets cited in `passage_excerpts`) plus one whole-article chunk for general retrieval (only indexed if the article has at least one accepted reference).
 - Embedding model: direct OpenAI `text-embedding-3-small` at 1536 dimensions for AGENT.1. Cost accounting prices input tokens at `$0.02 / 1M`; alternatives such as Voyage/Cohere are deferred model-registry options and require a vector-dimension migration/sweep.
+- Idempotence: `--apply` filters out active chunks with identical `(article_id, reference_index, model, chunk_text)` before reserving cost or calling the embedding API. Re-running unchanged inputs should report skipped unchanged chunks and spend `$0`.
 - Re-embed on embedding-model upgrade or on prompt-version bumps that materially change downstream agent reasoning (rare).
 
 **Backfill.** AGENT.1 populates the index from existing `news_project_references` whose review items are already committed-accept. The current production set is small (D.6 staging smoke = 5 articles, 9 references; expected D.B 8-week LA backfill = ~150 articles, ~300-500 references). Backfill runs through `tcg-pipeline news index-articles` (plan-only by default, `--apply` to spend/write) or the durable `news_backfill_chunk` worker job.
@@ -1366,6 +1369,7 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Selected direct OpenAI `text-embedding-3-small` for AGENT.1 article embeddings, matching the `vector(1536)` schema.
   - Added `news/embeddings.py`: accepted-reference gate queries, per-reference/whole-article chunk building, OpenAI embeddings client, active-chunk supersession, and `llm_cost_usage` reservation/true-up.
   - Added `tcg-pipeline news index-articles` in dry-run/apply form and wired the `news_backfill_chunk` worker task to the same implementation.
+  - Follow-up hardening: unchanged active chunks are skipped before reservation/API calls, and the whole-article chunk is documented as broad retrieval context rather than per-claim acceptance.
   - Remaining validation: apply the AGENT.1 migration to a dev/staging database and smoke `index-articles --source-slug urbanize_la` before AGENT.2 retrieval tools consume the index.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**

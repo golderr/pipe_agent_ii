@@ -189,7 +189,13 @@ def news_index_articles(
     ] = None,
     limit: Annotated[
         int | None,
-        typer.Option(min=1, help="Maximum accepted references to plan or index."),
+        typer.Option(
+            min=1,
+            help=(
+                "Maximum accepted references to plan or index. Each reference can produce "
+                "one reference chunk plus one whole-article chunk per article."
+            ),
+        ),
     ] = None,
     apply: Annotated[
         bool,
@@ -220,6 +226,7 @@ def news_index_articles(
     typer.echo(f"  Whole-article chunks: {result.planned_whole_article_chunk_count}")
     if result.apply:
         typer.echo(f"Indexed chunks: {result.indexed_chunk_count}")
+        typer.echo(f"Skipped unchanged chunks: {result.skipped_unchanged_chunk_count}")
         typer.echo(f"Superseded active chunks: {result.superseded_chunk_count}")
         typer.echo(f"Embedding calls: {result.embedding_call_count}")
         typer.echo(f"Embedding input tokens: {result.input_tokens}")

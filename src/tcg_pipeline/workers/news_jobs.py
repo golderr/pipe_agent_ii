@@ -299,6 +299,7 @@ def run_news_backfill_chunk_job(
             "planned_reference_chunk_count": result.planned_reference_chunk_count,
             "planned_whole_article_chunk_count": result.planned_whole_article_chunk_count,
             "indexed_chunk_count": result.indexed_chunk_count,
+            "skipped_unchanged_chunk_count": result.skipped_unchanged_chunk_count,
             "superseded_chunk_count": result.superseded_chunk_count,
             "embedding_call_count": result.embedding_call_count,
             "input_tokens": result.input_tokens,

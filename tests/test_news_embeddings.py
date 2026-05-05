@@ -8,18 +8,20 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import inspect, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, inspect, select
+from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
 from tcg_pipeline.cli import app
 from tcg_pipeline.db.models import (
+    LLMCostUsage,
     NewsArticle,
     NewsArticleChunk,
     NewsExtraction,
     NewsExtractionPass,
     NewsFetchStatus,
     NewsProjectReference,
+    NewsReferenceAutoApplied,
     NewsSource,
     NewsTriageStatus,
     Priority,
@@ -33,6 +35,7 @@ from tcg_pipeline.news import embeddings
 from tcg_pipeline.news.embeddings import (
     GATE_AUTO_APPLIED_CORROBORATING,
     GATE_REVIEW_ACCEPT,
+    EmbeddingResponse,
     GatedNewsReference,
     NewsArticleChunkIndexResult,
     NewsArticleChunkSpec,
@@ -41,7 +44,9 @@ from tcg_pipeline.news.embeddings import (
     calculate_embedding_cost_usd,
     load_gated_news_references,
     persist_news_article_chunk_embeddings,
+    run_news_article_chunk_indexing,
 )
+from tcg_pipeline.settings import get_settings
 
 runner = CliRunner()
 
@@ -138,51 +143,7 @@ def test_load_gated_news_references_uses_latest_committed_accept(
     postgres_session: Session,
 ) -> None:
     _ensure_agent1_tables(postgres_session)
-    source = _urbanize_source(postgres_session)
-    article = _article(source)
-    postgres_session.add(article)
-    postgres_session.flush()
-    extraction = _extraction(article)
-    postgres_session.add(extraction)
-    postgres_session.flush()
-    article.current_extraction_id = extraction.id
-    review_item = ReviewItem(
-        item_type=ReviewItemType.NEW_CANDIDATE,
-        status=ReviewItemStatus.ACCEPTED,
-        state="committed",
-        priority=Priority.MEDIUM,
-    )
-    postgres_session.add(review_item)
-    postgres_session.flush()
-    reference = NewsProjectReference(
-        article_id=article.id,
-        extraction_id=extraction.id,
-        reference_index=0,
-        candidate_name="Accepted Tower",
-        candidate_confidence="high",
-        passage_excerpts=[
-            {
-                "field": "candidate_name",
-                "value": "Accepted Tower",
-                "passage": "Accepted Tower was proposed.",
-                "offset_start": 0,
-                "offset_end": 28,
-            }
-        ],
-        review_item_id=review_item.id,
-    )
-    postgres_session.add(reference)
-    postgres_session.add(
-        ReviewDecision(
-            review_item_id=review_item.id,
-            action=ReviewDecisionAction.ACCEPT,
-            actor="researcher@example.com",
-            state="committed",
-            decision_type="accept_new",
-            committed_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
-        )
-    )
-    postgres_session.flush()
+    source, article, _extraction_row, reference = _accepted_reference_fixture(postgres_session)
 
     references = load_gated_news_references(postgres_session, source_slug=source.slug)
 
@@ -192,6 +153,111 @@ def test_load_gated_news_references_uses_latest_committed_accept(
     gated = next(item for item in references if item.article_id == article.id)
     assert gated.gate_source == GATE_REVIEW_ACCEPT
     assert gated.candidate_name == "Accepted Tower"
+
+
+def test_load_gated_news_references_includes_auto_applied_and_prefers_review_accept(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent1_tables(postgres_session)
+    source = _urbanize_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = _extraction(article)
+    postgres_session.add(extraction)
+    postgres_session.flush()
+    article.current_extraction_id = extraction.id
+    auto_reference = _reference(
+        article=article,
+        extraction=extraction,
+        reference_index=0,
+        candidate_name="Auto Tower",
+    )
+    _accepted_reference = _reference(
+        article=article,
+        extraction=extraction,
+        reference_index=1,
+        candidate_name="Accepted Tower",
+        review_item_id=_committed_accept_review_item(postgres_session).id,
+    )
+    postgres_session.add_all([auto_reference, _accepted_reference])
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            NewsReferenceAutoApplied(
+                article_id=article.id,
+                reference_index=auto_reference.reference_index,
+                gate=GATE_AUTO_APPLIED_CORROBORATING,
+            ),
+            NewsReferenceAutoApplied(
+                article_id=article.id,
+                reference_index=_accepted_reference.reference_index,
+                gate=GATE_AUTO_APPLIED_CORROBORATING,
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    references = load_gated_news_references(postgres_session, article_id=article.id)
+    gate_by_index = {reference.reference_index: reference.gate_source for reference in references}
+
+    assert gate_by_index == {
+        0: GATE_AUTO_APPLIED_CORROBORATING,
+        1: GATE_REVIEW_ACCEPT,
+    }
+
+
+def test_run_news_article_chunk_indexing_skips_unchanged_chunks_on_rerun(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent1_tables(postgres_session)
+    _source, article, _extraction_row, _reference = _accepted_reference_fixture(postgres_session)
+    session_factory = _task_session_factory(postgres_session)
+    settings = get_settings().model_copy(
+        update={
+            "news_embedding_batch_size": 4,
+            "news_embedding_max_chars": 2_000,
+        }
+    )
+    first_client = _StubEmbeddingClient()
+    usage_before = _article_embedding_call_count(postgres_session)
+
+    first_result = run_news_article_chunk_indexing(
+        session_factory=session_factory,
+        settings=settings,
+        client=first_client,
+        article_id=article.id,
+        apply=True,
+        now=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+    )
+
+    postgres_session.expire_all()
+    assert first_result.planned_chunk_count == 2
+    assert first_result.indexed_chunk_count == 2
+    assert first_result.skipped_unchanged_chunk_count == 0
+    assert first_result.embedding_call_count == 1
+    assert len(first_client.text_batches) == 1
+    assert _active_chunk_count(postgres_session, article.id) == 2
+    assert _article_embedding_call_count(postgres_session) == usage_before + 1
+
+    second_client = _StubEmbeddingClient()
+    second_result = run_news_article_chunk_indexing(
+        session_factory=session_factory,
+        settings=settings,
+        client=second_client,
+        article_id=article.id,
+        apply=True,
+        now=datetime(2026, 5, 5, 12, 5, tzinfo=UTC),
+    )
+
+    postgres_session.expire_all()
+    assert second_result.planned_chunk_count == 2
+    assert second_result.indexed_chunk_count == 0
+    assert second_result.skipped_unchanged_chunk_count == 2
+    assert second_result.embedding_call_count == 0
+    assert second_client.text_batches == []
+    assert _active_chunk_count(postgres_session, article.id) == 2
+    assert _article_embedding_call_count(postgres_session) == usage_before + 1
 
 
 def test_persist_news_article_chunk_embeddings_supersedes_active_chunks(
@@ -247,11 +313,13 @@ def test_news_index_articles_cli_invokes_indexer(monkeypatch: pytest.MonkeyPatch
     def fake_run_news_article_chunk_indexing(**kwargs):  # type: ignore[no-untyped-def]
         calls.update(kwargs)
         return NewsArticleChunkIndexResult(
-            apply=False,
+            apply=True,
             gated_reference_count=2,
             planned_chunk_count=3,
             planned_reference_chunk_count=2,
             planned_whole_article_chunk_count=1,
+            indexed_chunk_count=1,
+            skipped_unchanged_chunk_count=2,
         )
 
     monkeypatch.setattr(
@@ -269,15 +337,35 @@ def test_news_index_articles_cli_invokes_indexer(monkeypatch: pytest.MonkeyPatch
             "urbanize_la",
             "--limit",
             "2",
+            "--apply",
         ],
     )
 
     assert result.exit_code == 0, result.output
     assert calls["source_slug"] == "urbanize_la"
     assert calls["limit"] == 2
-    assert calls["apply"] is False
+    assert calls["apply"] is True
     assert "Gated references: 2" in result.output
     assert "Whole-article chunks: 1" in result.output
+    assert "Skipped unchanged chunks: 2" in result.output
+
+
+class _StubEmbeddingClient:
+    model = "text-embedding-3-small"
+    provider = "openai"
+
+    def __init__(self) -> None:
+        self.text_batches: list[list[str]] = []
+
+    def embed_texts(self, texts):  # type: ignore[no-untyped-def]
+        self.text_batches.append(list(texts))
+        return EmbeddingResponse(
+            embeddings=tuple([[0.1] * 1536 for _text in texts]),
+            model=self.model,
+            provider=self.provider,
+            input_tokens=10 * len(texts),
+            latency_ms=25,
+        )
 
 
 def _gated_reference(
@@ -327,6 +415,80 @@ def _gated_reference(
     )
 
 
+def _accepted_reference_fixture(
+    postgres_session: Session,
+) -> tuple[NewsSource, NewsArticle, NewsExtraction, NewsProjectReference]:
+    source = _urbanize_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = _extraction(article)
+    postgres_session.add(extraction)
+    postgres_session.flush()
+    article.current_extraction_id = extraction.id
+    review_item = _committed_accept_review_item(postgres_session)
+    reference = _reference(
+        article=article,
+        extraction=extraction,
+        reference_index=0,
+        candidate_name="Accepted Tower",
+        review_item_id=review_item.id,
+    )
+    postgres_session.add(reference)
+    postgres_session.flush()
+    return source, article, extraction, reference
+
+
+def _committed_accept_review_item(postgres_session: Session) -> ReviewItem:
+    review_item = ReviewItem(
+        item_type=ReviewItemType.NEW_CANDIDATE,
+        status=ReviewItemStatus.ACCEPTED,
+        state="committed",
+        priority=Priority.MEDIUM,
+    )
+    postgres_session.add(review_item)
+    postgres_session.flush()
+    postgres_session.add(
+        ReviewDecision(
+            review_item_id=review_item.id,
+            action=ReviewDecisionAction.ACCEPT,
+            actor="researcher@example.com",
+            state="committed",
+            decision_type="accept_new",
+            committed_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        )
+    )
+    postgres_session.flush()
+    return review_item
+
+
+def _reference(
+    *,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    reference_index: int,
+    candidate_name: str,
+    review_item_id: uuid.UUID | None = None,
+) -> NewsProjectReference:
+    return NewsProjectReference(
+        article_id=article.id,
+        extraction_id=extraction.id,
+        reference_index=reference_index,
+        candidate_name=candidate_name,
+        candidate_confidence="high",
+        passage_excerpts=[
+            {
+                "field": "candidate_name",
+                "value": candidate_name,
+                "passage": f"{candidate_name} was proposed.",
+                "offset_start": 0,
+                "offset_end": len(f"{candidate_name} was proposed."),
+            }
+        ],
+        review_item_id=review_item_id,
+    )
+
+
 def _ensure_agent1_tables(postgres_session: Session) -> None:
     inspector = inspect(postgres_session.bind)
     required_tables = {
@@ -338,6 +500,8 @@ def _ensure_agent1_tables(postgres_session: Session) -> None:
         "news_reference_auto_applied",
         "review_items",
         "review_decisions",
+        "cost_caps",
+        "llm_cost_usage",
     }
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
@@ -381,3 +545,39 @@ def _extraction(article: NewsArticle) -> NewsExtraction:
         output_json={"project_references": []},
     )
 
+
+def _task_session_factory(postgres_session: Session) -> sessionmaker[Session]:
+    return sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+
+def _active_chunk_count(postgres_session: Session, article_id: uuid.UUID) -> int:
+    return (
+        postgres_session.scalar(
+            select(func.count())
+            .select_from(NewsArticleChunk)
+            .where(
+                NewsArticleChunk.article_id == article_id,
+                NewsArticleChunk.superseded_at.is_(None),
+            )
+        )
+        or 0
+    )
+
+
+def _article_embedding_call_count(postgres_session: Session) -> int:
+    return (
+        postgres_session.scalar(
+            select(func.coalesce(func.sum(LLMCostUsage.call_count), 0)).where(
+                LLMCostUsage.bucket == "news",
+                LLMCostUsage.capability == "article_embedding",
+                LLMCostUsage.provider == "openai",
+                LLMCostUsage.model == "text-embedding-3-small",
+            )
+        )
+        or 0
+    )

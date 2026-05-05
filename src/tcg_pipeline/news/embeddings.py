@@ -171,6 +171,7 @@ class NewsArticleChunkIndexResult:
     planned_reference_chunk_count: int
     planned_whole_article_chunk_count: int
     indexed_chunk_count: int = 0
+    skipped_unchanged_chunk_count: int = 0
     superseded_chunk_count: int = 0
     embedding_call_count: int = 0
     input_tokens: int = 0
@@ -246,6 +247,16 @@ def run_news_article_chunk_indexing(
         return result
 
     embedding_client = client or build_news_embedding_client(resolved_settings)
+    with resolved_session_factory() as session:
+        chunk_specs = filter_unchanged_active_chunk_specs(
+            session,
+            chunk_specs=chunk_specs,
+            model=embedding_client.model,
+        )
+    result.skipped_unchanged_chunk_count = result.planned_chunk_count - len(chunk_specs)
+    if not chunk_specs:
+        return result
+
     for batch in _batched(chunk_specs, resolved_settings.news_embedding_batch_size):
         texts = [spec.chunk_text for spec in batch]
         reserved_cost_usd = calculate_embedding_cost_usd(
@@ -486,6 +497,24 @@ def persist_news_article_chunk_embeddings(
         )
     session.flush()
     return superseded_count
+
+
+def filter_unchanged_active_chunk_specs(
+    session: Session,
+    *,
+    chunk_specs: Sequence[NewsArticleChunkSpec],
+    model: str,
+) -> tuple[NewsArticleChunkSpec, ...]:
+    active_chunk_texts = _active_chunk_text_by_key(
+        session,
+        chunk_specs=chunk_specs,
+        model=model,
+    )
+    return tuple(
+        spec
+        for spec in chunk_specs
+        if active_chunk_texts.get(_chunk_key(spec)) != spec.chunk_text
+    )
 
 
 def calculate_embedding_cost_usd(model: str, *, input_tokens: int) -> Decimal:
@@ -732,6 +761,45 @@ def _supersede_active_chunks(
         statement = statement.where(NewsArticleChunk.reference_index == reference_index)
     result = session.execute(statement.values(superseded_at=now))
     return int(result.rowcount or 0)
+
+
+def _active_chunk_text_by_key(
+    session: Session,
+    *,
+    chunk_specs: Sequence[NewsArticleChunkSpec],
+    model: str,
+) -> dict[tuple[uuid.UUID, int | None], str]:
+    article_ids = {spec.article_id for spec in chunk_specs}
+    if not article_ids:
+        return {}
+    rows = (
+        session.execute(
+            select(NewsArticleChunk)
+            .where(
+                NewsArticleChunk.article_id.in_(article_ids),
+                NewsArticleChunk.model == model,
+                NewsArticleChunk.superseded_at.is_(None),
+            )
+            .order_by(
+                NewsArticleChunk.embedded_at.desc().nullslast(),
+                NewsArticleChunk.created_at.desc(),
+                NewsArticleChunk.id.desc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    active: dict[tuple[uuid.UUID, int | None], str] = {}
+    requested_keys = {_chunk_key(spec) for spec in chunk_specs}
+    for chunk in rows:
+        key = (chunk.article_id, chunk.reference_index)
+        if key in requested_keys and key not in active:
+            active[key] = chunk.chunk_text
+    return active
+
+
+def _chunk_key(spec: NewsArticleChunkSpec) -> tuple[uuid.UUID, int | None]:
+    return (spec.article_id, spec.reference_index)
 
 
 def _openai_embedding_response(
