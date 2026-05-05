@@ -1234,7 +1234,7 @@ This is opt-in and slow-burn. We do not expand the registry automatically.
 
 ## 8. Component 3 — Pass 2 / Pass 3 (LLM Extraction)
 
-> **AGENT.1 amendment (2026-05-05):** The default extraction path is now slimmed for the AGENT.1 A/B harness. `render_extraction_prompt` no longer injects the developer/project glossary; `extract_v1` receives only the system template plus signal-flag registry as cacheable system blocks, emits raw `candidate_name` / `candidate_developer` values, and no longer requires `registry_developer_id` / `registry_project_id` in its schema. The older three-block glossary description below remains accurate only for legacy `reextract_v1` until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`. Provider/model details in this section are superseded by `agentic_escalation_design.md` §5.1 for AGENT.1+ work.
+> **AGENT.1 amendment (2026-05-05):** The default extraction path is now slimmed for the AGENT.1 A/B harness. `render_extraction_prompt` no longer injects the developer/project glossary; active `extract_v2` receives only the system template plus signal-flag registry as cacheable system blocks, emits raw `candidate_name` / `candidate_developer` values, and no longer requires `registry_developer_id` / `registry_project_id` in its schema. `extract_v1` is retained as the legacy glossary prompt so historical rows have a stable audit meaning. The older three-block glossary description below remains accurate only for legacy `extract_v1` and `reextract_v1` until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`. Provider/model details in this section are superseded by `agentic_escalation_design.md` §5.1 for AGENT.1+ work.
 
 ### 8.1 Models and providers
 
@@ -2574,6 +2574,10 @@ prompts/
     system.md
     user.md
     schema.json
+  extract_v2/
+    system.md
+    user.md
+    schema.json
   reextract_v1/
     system.md
     user.md
@@ -2587,7 +2591,7 @@ Each version is immutable once promoted. New versions go in new directories.
 ```yaml
 active:
   triage: triage_v1
-  extract: extract_v1
+  extract: extract_v2
   reextract: reextract_v1
 ```
 

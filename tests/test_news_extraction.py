@@ -35,6 +35,7 @@ from tcg_pipeline.news.extraction import (
 )
 from tcg_pipeline.news.llm import LLMUsage
 from tcg_pipeline.news.prompts import (
+    load_prompt,
     render_extraction_prompt,
     render_news_glossary,
     render_reextraction_prompt,
@@ -342,9 +343,12 @@ def test_decide_pass3a_reextraction_uses_field_specific_windows(
     assert decision is None
 
 
-def test_decide_pass3a_reextraction_detects_project_dict_conflict(
+def test_decide_pass3a_reextraction_detects_legacy_project_dict_hint_conflict(
     postgres_session: Session,
 ) -> None:
+    # The active extract_v2 prompt no longer asks the LLM for registry hints.
+    # This remains coverage for legacy rows and external/paste-a-link payloads
+    # that still provide a registry_project_id hint.
     _ensure_news_extraction_tables(postgres_session)
     source = _news_source(postgres_session)
     structural_project_id = uuid.uuid4()
@@ -464,6 +468,7 @@ def test_render_extraction_prompt_omits_registry_glossary(
 
     rendered_prompt = render_extraction_prompt(postgres_session, article)
 
+    assert rendered_prompt.prompt_id == "extract_v2"
     assert len(rendered_prompt.system_blocks) == 2
     assert "Glossary:" not in rendered_prompt.system_text
     assert active_project.project_name not in rendered_prompt.system_text
@@ -474,6 +479,15 @@ def test_render_extraction_prompt_omits_registry_glossary(
     required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
     assert "registry_developer_id" not in required
     assert "registry_project_id" not in required
+
+
+def test_extract_v1_remains_legacy_glossary_prompt() -> None:
+    prompt = load_prompt("extract_v1")
+    required = prompt.schema["properties"]["project_references"]["items"]["required"]
+
+    assert "A glossary of known developers and projects with IDs" in prompt.system_template
+    assert "registry_developer_id" in required
+    assert "registry_project_id" in required
 
 
 def test_render_reextraction_prompt_keeps_legacy_registry_glossary(
@@ -574,7 +588,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     extraction = postgres_session.get(NewsExtraction, result.extraction_id)
     assert extraction is not None
     assert extraction.pass_name == NewsExtractionPass.EXTRACTION.value
-    assert extraction.prompt_id == "extract_v1"
+    assert extraction.prompt_id == "extract_v2"
     assert extraction.model_provider == "anthropic"
     assert extraction.parse_status == NewsExtractionParseStatus.OK.value
     reference = postgres_session.execute(
@@ -708,7 +722,7 @@ def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
         def extract(self, prompt):  # type: ignore[no-untyped-def]
             self.calls += 1
             if self.calls == 1:
-                assert prompt.prompt_id == "extract_v1"
+                assert prompt.prompt_id == "extract_v2"
                 assert "Glossary:" not in prompt.system_text
                 assert len(prompt.system_blocks) == 2
                 payload = _payload(candidate_unit_total=250)

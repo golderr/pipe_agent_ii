@@ -351,9 +351,9 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 
 **Glossary removal — option 3 (researcher direction 2026-05-04).**
 - Today's `render_news_glossary` in [news/prompts.py:219-260](../../src/tcg_pipeline/news/prompts.py) emits the full developer registry + market-filtered project list as a cached system block (~103k tokens at LA scale; ~50k+ projects unscoped at 25-market scale, which exceeds context).
-- Stage 1 removes this from the default-extraction prompt entirely. Implemented 2026-05-05: `render_extraction_prompt` now emits only (a) the system template (`extract_v1/system.md`, small), (b) the signal flag registry (small).
-- Default extraction emits raw `candidate_name` and `candidate_developer` text without `registry_developer_id` / `registry_project_id` hints. `extract_v1/schema.json` keeps those fields available for parser compatibility but no longer requires them.
-- Legacy `reextract_v1` keeps its glossary block until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`; the A/B harness must call the default `extract_v1` path, not the legacy re-extraction path.
+- Stage 1 removes this from the default-extraction prompt entirely. Implemented 2026-05-05: `render_extraction_prompt` now emits only (a) the system template (`extract_v2/system.md`, small), (b) the signal flag registry (small).
+- Default extraction emits raw `candidate_name` and `candidate_developer` text without `registry_developer_id` / `registry_project_id` hints. `extract_v2/schema.json` keeps those fields available for parser compatibility but no longer requires them.
+- `extract_v1` is retained as the legacy glossary prompt so historical rows tagged `extract_v1` keep one meaning. Legacy `reextract_v1` keeps its glossary block until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`; the A/B harness must call the default `extract_v2` path, not either legacy path.
 - The deterministic matcher continues to use its existing fuzzy registry matching (developer canonicalization via `canonicalize_developer_name`, project name fuzzy via rapidfuzz).
 - Registry knowledge moves to the agent's tool layer (`get_developer_projects`, `search_articles_similar`, `get_nearby_projects`) — accessed on demand when the agent fires, not preloaded into every extraction.
 - Eliminates the 25-market scaling blocker and the dominant per-article cost line.
@@ -1239,9 +1239,15 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 
 - **2026-05-04 — Initial draft.** Reconciles the original `agentic_pipeline_proposal.md` against actual codebase state (verified extraction.py, integration.py, news_matcher.py, db/models.py, settings.py, costs.py, structural.py, prompts.py, evidence.py, collect.py, resolution/engine.py, source_adapters/ladbs.py). Incorporates researcher answers to the 17 clarifying questions. Adds two top-of-file callouts: Batch API deferred, model-choice deferred.
 
-- **2026-05-05 (revision 13) — Slim default extraction prompt implemented.**
-  - `render_extraction_prompt` now omits `render_news_glossary` and sends only the extraction system template plus signal-flag registry as cacheable system blocks.
-  - `extract_v1/system.md` now instructs the model to emit raw candidate names/developers and not infer registry IDs; `extract_v1/schema.json` no longer requires `registry_developer_id` / `registry_project_id`.
+- **2026-05-05 (revision 14) — Prompt-version audit cut for slim default extraction.**
+  - Active default extraction is now `extract_v2`, not `extract_v1`. `config/news_prompts.yaml` points `extract` at `extract_v2` so new `news_extractions.prompt_id` rows have a clean cutover marker.
+  - `extract_v2/system.md` instructs the model to emit raw candidate names/developers and not infer registry IDs; `extract_v2/schema.json` no longer requires `registry_developer_id` / `registry_project_id`.
+  - `extract_v1` is restored as the legacy glossary prompt/schema so historical rows tagged `extract_v1` keep one meaning for cost and quality reconciliation.
+  - Developer/project dictionary Pass 3a structural-conflict triggers are effectively silent for active `extract_v2` because default extraction no longer emits registry hints. This is intentional interim behavior until AGENT.2 moves those cases into the agent layer; the A/B harness should measure agent-trigger proxies and reviewer workload with that gap visible.
+
+- **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
+  - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
+  - Senior review identified that changing `extract_v1` in place would make pre-cutover and post-cutover `news_extractions.prompt_id = 'extract_v1'` rows mean two different prompts. Revision 14 resolves that by restoring `extract_v1` as legacy and promoting the slim prompt as `extract_v2`.
   - `render_reextraction_prompt` explicitly keeps the legacy glossary path until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`. This preserves current fallback behavior while ensuring the AGENT.1 A/B harness measures the intended slim default-extraction path.
 
 - **2026-05-05 (revision 12) — AGENT.1 provider/pricing hardening.**

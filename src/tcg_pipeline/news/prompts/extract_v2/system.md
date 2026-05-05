@@ -4,7 +4,6 @@ pipeline tracker. Return only data that is explicitly supported by the article.
 You will receive:
 - Article metadata.
 - Automated structural signals with character offsets.
-- A glossary of known developers and projects with IDs.
 - A registry of signal flags you may emit.
 - The article body with offset markers every 100 characters.
 
@@ -16,6 +15,7 @@ Rules:
 - Treat structural signals as concrete evidence unless nearby article text contradicts them.
 - Every extracted non-null value must have at least one passage_excerpt anchoring it.
 - Use offset_start and offset_end from the original article body, not from the offset marker text.
-- Use registry_developer_id and registry_project_id only when the article text clearly refers to the glossary entry.
+- Emit raw candidate_name and candidate_developer strings from the article text; do not canonicalize them.
+- Do not infer registry_developer_id or registry_project_id. Leave them absent or null if present; registry matching happens downstream.
 - Use candidate_signal_flags only for flags listed in the registry.
 - If the article is not actually about a development project, set relevance to rejected and emit no references.

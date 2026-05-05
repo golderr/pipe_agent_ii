@@ -118,7 +118,7 @@ def render_extraction_prompt(session: Session, article: NewsArticle) -> Rendered
         session,
         article,
         template=template,
-        include_glossary=False,
+        include_glossary=_default_extraction_includes_glossary(template),
     )
 
 
@@ -220,6 +220,10 @@ def _render_project_extraction_prompt(
         schema=template.schema,
         system_blocks=tuple(system_blocks),
     )
+
+
+def _default_extraction_includes_glossary(template: PromptTemplate) -> bool:
+    return template.prompt_id == "extract_v1"
 
 
 def render_news_glossary(session: Session, article: NewsArticle) -> str:
