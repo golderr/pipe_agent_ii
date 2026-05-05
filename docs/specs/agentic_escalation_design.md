@@ -370,7 +370,7 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 - `MODEL_PRICING_USD_PER_MILLION` covers the AGENT.1 harness candidates: Haiku 4.5 triage, Opus 4.7, Sonnet 4.6, and GPT-5.4. Alias support covers native IDs and Gateway-style provider prefixes (for example `anthropic/claude-sonnet-4-6`, `openai/gpt-5.4`).
 - Vercel AI Gateway requires `AI_GATEWAY_API_KEY`. It must not fall back to `OPENAI_API_KEY`; the keys are distinct and falling back would mask configuration errors as 401s during the harness.
 - Pricing assumptions are machine-readable for harness output. Current explicit assumption: GPT-5.4 cached-input tokens are priced at full input rate until an explicit cached-input rate is confirmed.
-- First-harness routing convention: run Claude candidates through the native Anthropic client and GPT-5.4 through the OpenAI-compatible provider path. Run a separate Gateway connectivity smoke before relying on Gateway-routed Claude model IDs; if it passes, an all-Gateway comparison can be added as an auxiliary run.
+- Current routing policy until explicitly revised: use direct provider APIs for all built/current AGENT work. Run Claude candidates through native Anthropic and GPT-5.4 through native OpenAI. Vercel AI Gateway remains a deferred operational option for centralized routing/monitoring; before enabling it, run a sweep of all LLM call sites, configs, pricing aliases, cost attribution, alerts, and deployment env vars to confirm Gateway routing is intentional and no direct-provider assumptions remain. A separate Gateway connectivity smoke may be added later as an auxiliary run, not the primary A/B.
 
 **A/B harness — end-to-end, not extraction-JSON-only (revised 2026-05-04).** Senior-developer feedback called out that the product impact is attribution + review workload, not just per-field JSON correctness. The harness measures the full pipeline outcome per candidate model.
 
@@ -1225,7 +1225,7 @@ Phase J.1 (LLM model configuration console) was originally scoped as news-extrac
 3. **Sample size sufficiency for Pipedream auto-compare.** Validates on June 2026 first run.
 4. **Pipedream coverage mapping infrastructure.** Build minimum for LA in Stage 2; expand per-market as markets come online (San Diego, SF, Silicon Valley, Seattle, Denver, others — per Q11).
 5. **Spot-check cadence taper rules.** Default 10/week; tune after 3 months of agreement-rate data.
-6. **Cross-provider integration approach.** Direct OpenAI SDK call vs Vercel AI Gateway. Stage 1 decides as part of building the multi-provider abstraction. Both are real options; Gateway gives unified observability + fallback at the cost of a vendor dependency.
+6. **Cross-provider integration approach.** Resolved 2026-05-05: direct provider APIs are current policy for all built/current AGENT work. Vercel AI Gateway stays a deferred operational option for centralized routing/monitoring, but Gateway activation requires a deliberate code/config sweep first.
 7. **Cold-storage tier for `agent_runs.evidence_consulted`.** Decide if/when the table grows large.
 8. **Batch API dispatch.** Deferred per §0.1; architecture supports plug-in.
 
@@ -1320,6 +1320,11 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - AGENT.3 wires permits into the same interface with deterministic LADBS/source-profile rules first. LLM/agent interpretation is reserved for ambiguous permit descriptions, conflicting signals, or cross-stream exceptions.
   - Workforce units are tracked as a planned canonical unit bucket in ROADMAP E.6; interpreters must not silently collapse workforce units into affordable or market-rate counts before that field lands.
 
+- **2026-05-05 (revision 19) — Direct provider APIs are current routing policy.**
+  - For all already-built files and future AGENT steps until an explicit revision, use direct provider APIs: native Anthropic for Claude/agent calls and native OpenAI for GPT-5.4.
+  - Vercel AI Gateway remains a later operational option for centralized routing/monitoring, not part of the current A/B or default build path.
+  - Before enabling Gateway, run a sweep of all LLM call sites, configs, pricing aliases, cost attribution, alerts, and deployment env vars to confirm routing is intentional and no direct-provider assumptions remain.
+
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
   - Senior review identified that changing `extract_v1` in place would make pre-cutover and post-cutover `news_extractions.prompt_id = 'extract_v1'` rows mean two different prompts. Revision 14 resolves that by restoring `extract_v1` as legacy and promoting the slim prompt as `extract_v2`.
@@ -1328,7 +1333,7 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 - **2026-05-05 (revision 12) — AGENT.1 provider/pricing hardening.**
   - **Gateway auth:** Vercel AI Gateway requires `AI_GATEWAY_API_KEY`; no fallback to `OPENAI_API_KEY`. This avoids confusing 401s during the A/B harness.
   - **Pricing readiness:** `MODEL_PRICING_USD_PER_MILLION` now covers Opus 4.7, Sonnet 4.6, GPT-5.4, and Haiku 4.5, with provider-prefix aliases for harness/Gateway IDs. Opus 4.7 pricing updated to current Anthropic list pricing. GPT-5.4 cached-input cost is recorded as a conservative full-input-rate assumption for harness output.
-  - **Harness routing convention:** first A/B harness runs Claude candidates through native Anthropic and GPT-5.4 through the OpenAI-compatible path. Gateway-routed Claude IDs require a separate connectivity smoke before use as the primary comparison path.
+  - **Harness routing convention:** first A/B harness runs Claude candidates through native Anthropic and GPT-5.4 through native OpenAI. Gateway-routed model IDs require a separate sweep/activation decision before use.
   - **Operational cleanup:** successful LLM calls clear stale provider-specific missing-key alerts for the relevant component. Added extraction-shaped OpenAI-compatible schema-invalid coverage before the harness.
 
 - **2026-05-04 (revision 11) — `cost_cap_overrides` constraint + migration field mapping.**
