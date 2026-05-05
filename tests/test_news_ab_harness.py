@@ -235,6 +235,14 @@ def test_run_extraction_ab_harness_rolls_back_projection_writes(
     assert report["preflight_results"][0]["status"] == "skipped"
     assert report["cost_accounting"]["llm_cost_usage_written"] is False
     assert report["candidate_summaries"][0]["articles"] == 1
+    article_result = report["article_results"]["anthropic:claude-opus-4-7"][0]
+    reference_result = article_result["reference_results"][0]
+    assert article_result["diagnostic"] == {}
+    assert reference_result["candidate_product_type"] == "apartment"
+    assert reference_result["candidate_age_restriction"] == "non_age_restricted"
+    assert reference_result["candidate_status_signal"] == "Proposed"
+    assert reference_result["candidate_neighborhood"] == "Downtown Los Angeles"
+    assert reference_result["passage_excerpts"][0]["field"] == "candidate_name"
 
 
 def test_news_ab_extract_cli_invokes_harness(

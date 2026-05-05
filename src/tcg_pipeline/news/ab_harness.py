@@ -383,6 +383,7 @@ def _run_candidate_for_article(
         "parse_status": parsed.parse_status,
         "parse_error_text": parsed.parse_error_text,
         "unknown_signal_flags": list(parsed.unknown_signal_flags),
+        "diagnostic": {},
         "reference_count": 0,
         "matcher_status_counts": {},
         "match_type_counts": {},
@@ -418,6 +419,9 @@ def _run_candidate_for_article(
         or parsed.parse_status != NewsExtractionParseStatus.OK.value
     ):
         return result
+    diagnostic = parsed.payload.get("diagnostic")
+    if isinstance(diagnostic, dict):
+        result["diagnostic"] = diagnostic
 
     extraction = _transient_extraction(
         article=article,
@@ -434,24 +438,7 @@ def _run_candidate_for_article(
         match = match_news_reference(session, article=article, reference=reference)
         matcher_status_counts[match.status.value] += 1
         match_type_counts[match.match_type] += 1
-        reference_results.append(
-            {
-                "reference_index": reference.reference_index,
-                "candidate_name": reference.candidate_name,
-                "candidate_address": reference.candidate_address,
-                "candidate_developer": reference.candidate_developer,
-                "candidate_unit_total": reference.candidate_unit_total,
-                "candidate_confidence": reference.candidate_confidence,
-                "match_status": match.status.value,
-                "match_type": match.match_type,
-                "match_confidence": match.confidence,
-                "matched_project_id": str(match.project_id) if match.project_id else None,
-                "candidate_project_ids": [
-                    str(project_id) for project_id in match.candidate_project_ids
-                ],
-                "match_reason": match.reason,
-            }
-        )
+        reference_results.append(_reference_result(reference, match))
 
     agent_reasons = _agent_trigger_reasons(article, extraction, matcher_status_counts)
     result.update(
@@ -623,6 +610,46 @@ def _review_counts_from_integration(integration: NewsIntegrationResult) -> dict[
         "new_candidate": new_candidate,
         "status_change": status_change,
         "total_projected": possible + new_candidate + status_change,
+    }
+
+
+def _reference_result(reference: NewsProjectReference, match: Any) -> dict[str, Any]:
+    delivery_date = reference.candidate_delivery_year_normalized
+    return {
+        "reference_index": reference.reference_index,
+        "candidate_name": reference.candidate_name,
+        "candidate_address": reference.candidate_address,
+        "candidate_developer": reference.candidate_developer,
+        "candidate_unit_total": reference.candidate_unit_total,
+        "candidate_unit_affordable": reference.candidate_unit_affordable,
+        "candidate_unit_market_rate": reference.candidate_unit_market_rate,
+        "candidate_product_type": reference.candidate_product_type,
+        "candidate_age_restriction": reference.candidate_age_restriction,
+        "candidate_status_signal": reference.candidate_status_signal,
+        "candidate_delivery_year_text": reference.candidate_delivery_year_text,
+        "candidate_delivery_year_normalized": (
+            delivery_date.isoformat() if delivery_date is not None else None
+        ),
+        "candidate_signal_flags": reference.candidate_signal_flags or {},
+        "candidate_identifiers": reference.candidate_identifiers
+        or {
+            "case_number": [],
+            "permit_number": [],
+            "apn": [],
+        },
+        "candidate_neighborhood": reference.candidate_neighborhood,
+        "candidate_lat": reference.candidate_lat,
+        "candidate_lng": reference.candidate_lng,
+        "candidate_confidence": reference.candidate_confidence,
+        "passage_excerpts": reference.passage_excerpts or [],
+        "match_status": match.status.value,
+        "match_type": match.match_type,
+        "match_confidence": match.confidence,
+        "matched_project_id": str(match.project_id) if match.project_id else None,
+        "candidate_project_ids": [
+            str(project_id) for project_id in match.candidate_project_ids
+        ],
+        "match_reason": match.reason,
     }
 
 
@@ -874,6 +901,7 @@ def _error_article_result(
         "parse_status": "api_error",
         "parse_error_text": None,
         "unknown_signal_flags": [],
+        "diagnostic": {},
         "reference_count": 0,
         "matcher_status_counts": {},
         "match_type_counts": {},
