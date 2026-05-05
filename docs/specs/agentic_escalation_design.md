@@ -28,11 +28,12 @@ The original proposal called for cron-driven extraction to route through Anthrop
 The proposal suggests Sonnet 4.6 as the default extraction model. We are not committing to that yet.
 
 - **Decision:** Stage 1 of this design stands up the model-swap *infrastructure* (configurable model, prompt-cache validation across models, A/B harness), but the chosen model is an open question.
-- **Candidates under consideration (all three measured in Stage 1):**
+- **Primary candidates under consideration (measured in Stage 1):**
   - **Claude Sonnet 4.6** — default tier-step-down assumption from the proposal. Untested against TCG articles.
   - **GPT-5.4** — separate provider entirely; requires a multi-provider abstraction in the LLM layer or a Vercel AI Gateway integration before A/B can run against it.
   - **Claude Opus 4.7 (status quo)** — measured as the baseline. Even if we keep Opus as default, the agent layer's selective use of Opus on hard cases is a cost improvement over today's path, where Opus runs on every Pass 2 plus every Pass 3a/3b.
-- **Decision gate:** Pick after Stage 1 measures all three on the D.6 smoke article set, with quality and cost data per candidate. **There is no hard cost target that fails the swap** — under the current trajectory we already extract every article on Opus, so any of the three candidates is at worst a status-quo cost decision and at best a meaningful reduction. Quality is the dominant criterion; cost informs the choice but does not gate it.
+- **Supplemental candidates:** Opus 4.6 and GPT-5.5 were requested and measured after provider preflight confirmed availability.
+- **Decision gate:** Pick after Stage 1 measures candidates on the D.6 smoke article set, with quality and cost data per candidate. **There is no hard cost target that fails the swap** — under the current trajectory we already extract every article on Opus, so any candidate is at worst a status-quo cost decision and at best a meaningful reduction. Quality is the dominant criterion; cost informs the choice but does not gate it.
 - **Roadmap impact:** Stage 1 builds the model A/B harness and the cross-provider abstraction (so GPT-5.4 can be measured, not deferred). Document the GPT-5.4 integration path in §5.1.
 
 ---
@@ -78,7 +79,7 @@ This document supersedes the originally-proposed Pass 0/1/2/3 deterministic-with
 | Pass 3a fires on (a) Pass 1↔2 conflict, (b) low confidence, (c) parse/schema/refused/truncated | (a) and (b) → agent escalation. (c) → cheaper output-quality retry path. |
 | Pass 3b fires on `new_candidate` matches at integration time | Folds into agent escalation triggers (`new_candidate` is one of several agent triggers). |
 | `reextract_v1` prompt is the active re-extraction template | Reference-only. Agent prompt + tool definitions replace it. Legacy reextraction rows backfilled with synthetic `reasoning_trace` per §10. |
-| Default extraction is Opus 4.7 | Configurable; default chosen via Stage 1 A/B. Candidates: Sonnet 4.6, GPT-5.4, or stay on Opus. |
+| Default extraction is Opus 4.7 | Configurable; default chosen via Stage 1 A/B. Primary candidates: Sonnet 4.6, GPT-5.4, or stay on Opus. Supplemental measured candidates: Opus 4.6 and GPT-5.5. |
 | `detect_project_contradictions` runs only post-resolve, only against active researcher overrides | Folded into agent layer. Agent owns contradiction reasoning pre-resolve (article-vs-state) and post-resolve (newer-evidence-vs-override). |
 | Reviewer acceptance is per-field via review_decisions; no retrieval consequence | Per-reference acceptance gates retrieval-index inclusion. |
 | Re-extraction output is structured JSON only | Agent output adds `reasoning_trace` (100-300 chars), `evidence_consulted[]` (list of {article_id, project_id, role}), `tool_calls_summary[]`. |
@@ -100,8 +101,8 @@ This document supersedes the originally-proposed Pass 0/1/2/3 deterministic-with
 Recorded verbatim from researcher answers, 2026-05-04, with implementation notes.
 
 ### Q1 — Sonnet vs Opus quality A/B
-**Answer.** Not yet tested. Open to Sonnet 4.6, GPT-5.4, or staying on Opus 4.7 if costs are manageable.
-**Implementation.** Stage 1 builds a three-way A/B harness running Opus 4.7, Sonnet 4.6, and GPT-5.4 against the D.6 smoke article set (5 URLs from `tests/fixtures/news/urbanize_la/pass1_validation_articles.json`), comparing extraction outputs field-by-field plus per-call cost. Goal of Stage 1 is to produce firm cost-and-quality numbers per candidate, not to enforce a budget gate. Decision is made by the researcher after seeing the data.
+**Answer.** Initially open to Sonnet 4.6, GPT-5.4, or staying on Opus 4.7 if costs are manageable. Opus 4.6 and GPT-5.5 were added as supplemental measured candidates once availability was confirmed.
+**Implementation.** Stage 1 builds an A/B harness running candidates against the D.6 smoke article set (5 URLs from `tests/fixtures/news/urbanize_la/pass1_validation_articles.json`), comparing extraction outputs field-by-field plus per-call cost. Primary run covers Opus 4.7, Sonnet 4.6, and GPT-5.4; supplemental run covers Opus 4.7, Opus 4.6, and GPT-5.5. Goal of Stage 1 is to produce firm cost-and-quality numbers per candidate, not to enforce a budget gate. Decision is made by the researcher after seeing the data.
 
 ### Q2 — Basis for "Sonnet good enough"
 **Answer.** Just model-tier ladder; no real basis.
@@ -370,7 +371,7 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 - `MODEL_PRICING_USD_PER_MILLION` covers the AGENT.1 harness candidates: Haiku 4.5 triage, Opus 4.7, Opus 4.6, Sonnet 4.6, GPT-5.5, and GPT-5.4. Alias support covers native IDs and Gateway-style provider prefixes (for example `anthropic/claude-sonnet-4-6`, `openai/gpt-5.4`).
 - Vercel AI Gateway requires `AI_GATEWAY_API_KEY`. It must not fall back to `OPENAI_API_KEY`; the keys are distinct and falling back would mask configuration errors as 401s during the harness.
 - Pricing assumptions are machine-readable for harness output. Current explicit assumption: OpenAI Responses usage should report cache-creation tokens as zero; if non-zero cache-creation usage is ever passed into internal accounting, it is priced at the full input rate. Cached input uses current OpenAI list pricing.
-- Current routing policy until explicitly revised: use direct provider APIs for all built/current AGENT work. Run Claude candidates through native Anthropic and GPT-5.4 through native OpenAI. Vercel AI Gateway remains a deferred operational option for centralized routing/monitoring; before enabling it, run a sweep of all LLM call sites, configs, pricing aliases, cost attribution, alerts, and deployment env vars to confirm Gateway routing is intentional and no direct-provider assumptions remain. A separate Gateway connectivity smoke may be added later as an auxiliary run, not the primary A/B.
+- Current routing policy until explicitly revised: use direct provider APIs for all built/current AGENT work. Run Claude candidates through native Anthropic and GPT candidates through native OpenAI. Vercel AI Gateway remains a deferred operational option for centralized routing/monitoring; before enabling it, run a sweep of all LLM call sites, configs, pricing aliases, cost attribution, alerts, and deployment env vars to confirm Gateway routing is intentional and no direct-provider assumptions remain. A separate Gateway connectivity smoke may be added later as an auxiliary run, not the primary A/B.
 
 **A/B harness — end-to-end, not extraction-JSON-only (revised 2026-05-04).** Senior-developer feedback called out that the product impact is attribution + review workload, not just per-field JSON correctness. The harness measures the full pipeline outcome per candidate model.
 
@@ -391,6 +392,26 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
   - **Payload quality (researcher spot-grade):** for each model on each article, researcher rates the extraction output 1-5 on (a) factual correctness, (b) completeness, (c) field-attribution fidelity (e.g., "did the model put the developer in the right field?"). Sample size: 5 articles × 3 models = 15 graded outputs. Manageable.
 - Output: a single JSON summary report under `data/output/news/ab_extract_*.json` by default. Each article result includes empty `payload_quality_spot_grade.score` / `notes` fields for researcher grading before deciding.
 - Researcher picks default model from the data. No hard cost gate. Cost is one of seven dimensions, not the gating one.
+
+**Live AGENT.1 smoke-set results (2026-05-05).**
+
+Primary run after `extract_v2` observed-field tightening: `data/output/news/ab_extract_20260505_174623.json`.
+
+| Candidate | Parse outcomes | References | Agent trigger rate | Projected review items | Measured/adjusted cost |
+|---|---:|---:|---:|---:|---:|
+| `anthropic:claude-opus-4-7` | 5/5 ok | 6 | 1.0 | 4 | `$0.202427` |
+| `anthropic:claude-sonnet-4-6` | 5/5 ok | 5 | 0.6 | 4 | `$0.107957` |
+| `openai:gpt-5.4` | 5/5 ok | 5 | 0.6 | 3 | `$0.054534` adjusted to current OpenAI cached-input pricing; the JSON report was generated before the cached-input pricing correction and shows `$0.072966`. |
+
+Supplemental requested run against two additional available models: `data/output/news/ab_extract_20260505_180014.json`.
+
+| Candidate | Parse outcomes | References | Agent trigger rate | Projected review items | Measured cost |
+|---|---:|---:|---:|---:|---:|
+| `anthropic:claude-opus-4-7` | 5/5 ok | 6 | 1.0 | 4 | `$0.201802` |
+| `anthropic:claude-opus-4-6` | 5/5 ok | 6 | 0.8 | 4 | `$0.233970` |
+| `openai:gpt-5.5` (`gpt-5.5-2026-04-23`) | 5/5 ok | 6 | 0.8 | 4 | `$0.292948` |
+
+Initial interpretation: Opus 4.7 remains the quality baseline on this five-article smoke set. Opus 4.6 matched the same aggregate pipeline metrics but cost more in this run because it did not receive Anthropic cache-hit accounting. GPT-5.5 parsed cleanly and matched aggregate counts, but was slower and more expensive than Opus 4.7 on this prompt/fixture set. Researcher spot-grading is still the final model-choice input.
 
 **Prompt cache validation.**
 - Today's `_cacheable_system_blocks` ([extraction.py:210-219](../../src/tcg_pipeline/news/extraction.py)) emits `cache_control: ephemeral` per system block. With the glossary removed, the cache write becomes ~1k tokens instead of ~103k. Cache writes effectively become free; cache hits become near-free. The cache infrastructure stays in place but its cost contribution is negligible after this change.
@@ -1066,8 +1087,10 @@ Per-article steady state, projected (validate against Stage 1 A/B):
 - Average per article: Stage 1 harness output is authoritative. Expect lower than the earlier ~$0.50 / ~$75 projection if token counts resemble D.6, because current Opus 4.7 list pricing is lower than the prior estimate.
 - Still cheaper than status quo ($80–110) if Pass 3a/3b at status-quo fire rate is replaced by bounded agent runs on a fraction of articles.
 
-**With GPT-5.4 as default:**
-- Pricing implemented for A/B accounting at $2.50/MTok input and $15/MTok output. Cached input is currently priced conservatively at the full input rate in `MODEL_PRICING_ASSUMPTIONS` until an explicit cached-input rate is confirmed.
+**With GPT-5.4 or GPT-5.5 as default:**
+- GPT-5.4 pricing implemented for A/B accounting at $2.50/MTok input, $0.25/MTok cached input, and $15/MTok output.
+- GPT-5.5 pricing implemented for supplemental A/B accounting at $5.00/MTok input, $0.50/MTok cached input, and $30/MTok output.
+- OpenAI Responses usage is expected to report cache-creation tokens as zero; if non-zero cache-creation usage is ever passed into internal accounting, it is priced at the full input rate.
 - Agent runs continue on Opus 4.7 regardless of default model.
 - Stage 1 A/B harness measures.
 
@@ -1321,9 +1344,14 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Workforce units are tracked as a planned canonical unit bucket in ROADMAP E.6; interpreters must not silently collapse workforce units into affordable or market-rate counts before that field lands.
 
 - **2026-05-05 (revision 19) — Direct provider APIs are current routing policy.**
-  - For all already-built files and future AGENT steps until an explicit revision, use direct provider APIs: native Anthropic for Claude/agent calls and native OpenAI for GPT-5.4.
+  - For all already-built files and future AGENT steps until an explicit revision, use direct provider APIs: native Anthropic for Claude/agent calls and native OpenAI for GPT candidates.
   - Vercel AI Gateway remains a later operational option for centralized routing/monitoring, not part of the current A/B or default build path.
   - Before enabling Gateway, run a sweep of all LLM call sites, configs, pricing aliases, cost attribution, alerts, and deployment env vars to confirm routing is intentional and no direct-provider assumptions remain.
+
+- **2026-05-05 (revision 20) — AGENT.1 live A/B costs recorded.**
+  - Primary post-tightening smoke-set report: `data/output/news/ab_extract_20260505_174623.json`. Costs: Opus 4.7 `$0.202427`, Sonnet 4.6 `$0.107957`, GPT-5.4 `$0.054534` adjusted to current OpenAI cached-input pricing. The original JSON was generated before the cached-input pricing correction and shows `$0.072966`.
+  - Supplemental requested report: `data/output/news/ab_extract_20260505_180014.json`. Costs: Opus 4.7 `$0.201802`, Opus 4.6 `$0.233970`, GPT-5.5 (`gpt-5.5-2026-04-23`) `$0.292948`. All three supplemental candidates parsed 5/5 articles.
+  - Initial interpretation: Opus 4.7 remains the quality baseline pending researcher spot-grading; Opus 4.6 matched aggregate pipeline metrics but was more expensive in this run because it did not receive Anthropic cache-hit accounting; GPT-5.5 parsed cleanly but was slower and more expensive than Opus 4.7 on this prompt/fixture set.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
@@ -1333,7 +1361,7 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 - **2026-05-05 (revision 12) — AGENT.1 provider/pricing hardening.**
   - **Gateway auth:** Vercel AI Gateway requires `AI_GATEWAY_API_KEY`; no fallback to `OPENAI_API_KEY`. This avoids confusing 401s during the A/B harness.
   - **Pricing readiness:** `MODEL_PRICING_USD_PER_MILLION` now covers Opus 4.7, Opus 4.6, Sonnet 4.6, GPT-5.5, GPT-5.4, and Haiku 4.5, with provider-prefix aliases for harness/Gateway IDs. Opus 4.7/4.6 pricing uses current Anthropic list pricing. GPT-5.5/GPT-5.4 cached-input cost uses current OpenAI list pricing; the remaining OpenAI accounting assumption is only that Responses usage reports cache-creation tokens as zero.
-  - **Harness routing convention:** first A/B harness runs Claude candidates through native Anthropic and GPT-5.4 through native OpenAI. Gateway-routed model IDs require a separate sweep/activation decision before use.
+  - **Harness routing convention:** A/B harness runs Claude candidates through native Anthropic and GPT candidates through native OpenAI. Gateway-routed model IDs require a separate sweep/activation decision before use.
   - **Operational cleanup:** successful LLM calls clear stale provider-specific missing-key alerts for the relevant component. Added extraction-shaped OpenAI-compatible schema-invalid coverage before the harness.
 
 - **2026-05-04 (revision 11) — `cost_cap_overrides` constraint + migration field mapping.**
