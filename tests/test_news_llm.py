@@ -219,6 +219,8 @@ def test_openai_stop_reason_maps_incomplete_and_refusal() -> None:
 
 def test_pricing_supports_openai_gateway_model_suffix() -> None:
     assert pricing_for_model("openai/gpt-5.4") == pricing_for_model("gpt-5.4")
+    assert pricing_for_model("gpt-5.4-2026-03-05") == pricing_for_model("gpt-5.4")
+    assert pricing_for_model("openai/gpt-5.4-2026-03-05") == pricing_for_model("gpt-5.4")
     cost = calculate_llm_cost_usd(
         "openai/gpt-5.4",
         input_tokens_uncached=1000,
