@@ -1,6 +1,9 @@
 from sqlalchemy.orm import configure_mappers
 
 from tcg_pipeline.db.models import (
+    AgentRun,
+    AgentRunOutcome,
+    AgentRunReviewItem,
     DeveloperAlias,
     Evidence,
     NewsArticle,
@@ -98,6 +101,34 @@ def test_scrape_job_news_extension_columns_are_declared() -> None:
         "news_backfill_chunk",
     }
     assert NewsExtractionPass.REEXTRACTION.value == "reextraction"
+    assert NewsExtractionPass.EXTRACT_RETRY.value == "extract_retry"
+
+
+def test_agent_run_audit_tables_are_declared() -> None:
+    configure_mappers()
+
+    agent_run_indexes = {index.name for index in AgentRun.__table__.indexes}
+    link_indexes = {index.name for index in AgentRunReviewItem.__table__.indexes}
+    constraint_names = {constraint.name for constraint in AgentRun.__table__.constraints}
+
+    assert "ix_agent_runs_intake" in agent_run_indexes
+    assert "ix_agent_runs_project" in agent_run_indexes
+    assert "ix_agent_runs_profile_outcome" in agent_run_indexes
+    assert "ix_agent_runs_source_run" in agent_run_indexes
+    assert "ix_agent_runs_created_at" in agent_run_indexes
+    assert "ix_agent_run_review_items_review_item" in link_indexes
+    assert "ck_agent_runs_triggered_by_nonempty_array" in constraint_names
+    assert "ck_agent_runs_outcome" in constraint_names
+    assert "ck_agent_runs_nonnegative_counters" in constraint_names
+    assert "ck_agent_runs_failed_outcome_error_text" in constraint_names
+    assert {member.value for member in AgentRunOutcome} == {
+        "completed",
+        "escalated",
+        "failed_timeout",
+        "failed_budget",
+        "failed_error",
+        "killed_by_switch",
+    }
 
 
 def test_system_alert_indexes_are_declared() -> None:

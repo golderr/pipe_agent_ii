@@ -194,6 +194,7 @@ class NewsTriageStatus(enum.StrEnum):
 class NewsExtractionPass(enum.StrEnum):
     TRIAGE = "triage"
     EXTRACTION = "extraction"
+    EXTRACT_RETRY = "extract_retry"
     REEXTRACTION = "reextraction"
 
 
@@ -225,6 +226,15 @@ class CoStarUploadStatus(enum.StrEnum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class AgentRunOutcome(enum.StrEnum):
+    COMPLETED = "completed"
+    ESCALATED = "escalated"
+    FAILED_TIMEOUT = "failed_timeout"
+    FAILED_BUDGET = "failed_budget"
+    FAILED_ERROR = "failed_error"
+    KILLED_BY_SWITCH = "killed_by_switch"
 
 
 PIPELINE_STATUS_ENUM = SAEnum(
@@ -557,6 +567,7 @@ class Project(Base, TimestampMixin):
     source_records: Mapped[list["ProjectSourceRecord"]] = relationship(back_populates="project")
     evidence_rows: Mapped[list["Evidence"]] = relationship(back_populates="project")
     review_items: Mapped[list["ReviewItem"]] = relationship(back_populates="project")
+    agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="project")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="project")
     resolution_logs: Mapped[list["ResolutionLog"]] = relationship(back_populates="project")
     researcher_overrides: Mapped[list[ResearcherOverride]] = relationship(
@@ -975,6 +986,7 @@ class SourceRun(Base):
     review_items: Mapped[list["ReviewItem"]] = relationship(back_populates="source_run")
     scrape_jobs: Mapped[list["ScrapeJob"]] = relationship(back_populates="source_run")
     costar_uploads: Mapped[list["CoStarUpload"]] = relationship(back_populates="source_run")
+    agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="source_run")
 
 
 class ScrapeJob(Base):
@@ -1063,6 +1075,7 @@ class ScrapeJob(Base):
 
     jurisdiction: Mapped[Jurisdiction | None] = relationship(back_populates="scrape_jobs")
     source_run: Mapped[SourceRun | None] = relationship(back_populates="scrape_jobs")
+    agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="scrape_job")
 
 
 class CoStarUpload(Base):
@@ -1303,6 +1316,7 @@ class NewsExtraction(Base):
     project_references: Mapped[list["NewsProjectReference"]] = relationship(
         back_populates="extraction"
     )
+    agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="intake_extraction")
 
 
 class NewsProjectReference(Base, TimestampMixin):
@@ -1615,6 +1629,144 @@ class LLMCostUsage(Base):
     )
 
 
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(triggered_by) = 'array' AND jsonb_array_length(triggered_by) > 0",
+            name="triggered_by_nonempty_array",
+        ),
+        CheckConstraint(
+            "outcome IN ("
+            "'completed', "
+            "'escalated', "
+            "'failed_timeout', "
+            "'failed_budget', "
+            "'failed_error', "
+            "'killed_by_switch'"
+            ")",
+            name="outcome",
+        ),
+        CheckConstraint(
+            "input_tokens_uncached >= 0 "
+            "AND input_tokens_cache_creation >= 0 "
+            "AND input_tokens_cached >= 0 "
+            "AND output_tokens >= 0 "
+            "AND cost_usd >= 0 "
+            "AND latency_ms >= 0 "
+            "AND budget_consumed_usd >= 0 "
+            "AND tool_calls_count >= 0 "
+            "AND wallclock_seconds >= 0",
+            name="nonnegative_counters",
+        ),
+        CheckConstraint(
+            "(outcome LIKE 'failed_%' AND error_text IS NOT NULL) "
+            "OR (outcome NOT LIKE 'failed_%')",
+            name="failed_outcome_error_text",
+        ),
+        Index("ix_agent_runs_intake", "intake_source_type", "intake_record_id"),
+        Index(
+            "ix_agent_runs_project",
+            "project_id",
+            postgresql_where=text("project_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_agent_runs_profile_outcome",
+            "profile_name",
+            "outcome",
+            text("created_at DESC"),
+        ),
+        Index(
+            "ix_agent_runs_source_run",
+            "source_run_id",
+            postgresql_where=text("source_run_id IS NOT NULL"),
+        ),
+        Index("ix_agent_runs_created_at", text("created_at DESC")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    intake_source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    intake_record_id: Mapped[str] = mapped_column(Text, nullable=False)
+    intake_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_extractions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("source_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    scrape_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("scrape_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    profile_name: Mapped[str] = mapped_column(Text, nullable=False)
+    profile_version: Mapped[str] = mapped_column(Text, nullable=False)
+    triggered_by: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    input_tokens_uncached: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_tokens_cache_creation: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_tokens_cached: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    reasoning_trace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_consulted: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    tool_calls_summary: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    matcher_original_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    agent_revised_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    budget_consumed_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False)
+    tool_calls_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    wallclock_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    intake_extraction: Mapped[NewsExtraction | None] = relationship(back_populates="agent_runs")
+    project: Mapped[Project | None] = relationship(back_populates="agent_runs")
+    source_run: Mapped[SourceRun | None] = relationship(back_populates="agent_runs")
+    scrape_job: Mapped[ScrapeJob | None] = relationship(back_populates="agent_runs")
+    review_item_links: Mapped[list[AgentRunReviewItem]] = relationship(
+        back_populates="agent_run"
+    )
+
+
+class AgentRunReviewItem(Base):
+    __tablename__ = "agent_run_review_items"
+    __table_args__ = (
+        Index("ix_agent_run_review_items_review_item", "review_item_id"),
+    )
+
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    review_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("review_items.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    agent_run: Mapped[AgentRun] = relationship(back_populates="review_item_links")
+    review_item: Mapped[ReviewItem] = relationship(back_populates="agent_run_links")
+
+
 class NewsSignalFlag(Base):
     __tablename__ = "news_signal_flag_registry"
     __table_args__ = (
@@ -1849,6 +2001,9 @@ class ReviewItem(Base):
     winning_evidence: Mapped[Evidence | None] = relationship()
     decisions: Mapped[list["ReviewDecision"]] = relationship(back_populates="review_item")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="review_item")
+    agent_run_links: Mapped[list[AgentRunReviewItem]] = relationship(
+        back_populates="review_item"
+    )
 
 
 class ReviewDecision(Base):

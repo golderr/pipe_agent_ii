@@ -783,8 +783,11 @@ Legacy reextractions (Q16) get synthetic rows in `news_extractions` per today's 
 
 **Implementation status (2026-05-05).** The AGENT.1 indexing code is implemented in
 `src/tcg_pipeline/news/embeddings.py`, exposed by `tcg-pipeline news index-articles`, and
-wired to the `news_backfill_chunk` worker kind. It remains pending database smoke because the
-AGENT.1 migration has not been applied to production.
+wired to the `news_backfill_chunk` worker kind. The AGENT.1 migration was applied to the
+single production Supabase database after a logical backup. Production smoke indexed one
+accepted Urbanize reference into one per-reference chunk plus one whole-article chunk
+(`883` embedding input tokens, `$0.000018`) and an immediate rerun skipped both unchanged
+chunks with zero API calls.
 
 **Per-reference indexing contract (concrete, revised 2026-05-04 — actual decision-type names verified against [db/review_workflow.py:81-85](../../src/tcg_pipeline/db/review_workflow.py#L81)).**
 
@@ -1135,7 +1138,7 @@ Cost-cap config lives in `cost_caps` (per §5.8 split). Spend rollup lives in `l
 8. Multi-provider abstraction in `news/llm.py` (Anthropic + OpenAI/Vercel AI Gateway) — required for GPT-5.4 in the A/B.
 
 ### AGENT.2 migrations
-1. `CREATE TABLE agent_runs (...)` per §5.6 full observability schema.
+1. `CREATE TABLE agent_runs (...)` per §5.6 full observability schema. Implemented in repo as `202605050029` with the authoritative `agent_run_review_items` join table; not yet production-applied.
 2. New `pass` enum value `extract_retry` (output-quality retry path).
 3. Backfill synthetic `reasoning_trace` for legacy `pass='reextraction'` rows (Q16).
 4. Move Pass 3a/3b code from `news/extraction.py` to `news/extraction_legacy.py`; remove from active news ingestion code path; keep importable per §5.8.
