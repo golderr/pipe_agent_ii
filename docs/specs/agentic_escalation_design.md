@@ -23,18 +23,18 @@ The original proposal called for cron-driven extraction to route through Anthrop
   - Cost reservation, structured logging, and `news_extractions` row writes stay identical regardless of dispatch backend.
 - **Roadmap impact:** Add a deferred item under Phase D-late (or a later phase) for "Batch API dispatch for scheduled extractions" with explicit cost-savings target.
 
-### 0.2 Model choice for default extraction is deferred
+### 0.2 Default extraction model is Opus 4.7
 
-The proposal suggests Sonnet 4.6 as the default extraction model. We are not committing to that yet.
+The proposal suggested Sonnet 4.6 as the default extraction model. After AGENT.1 smoke-set A/B testing, the researcher selected Opus 4.7 for quality.
 
-- **Decision:** Stage 1 of this design stands up the model-swap *infrastructure* (configurable model, prompt-cache validation across models, A/B harness), but the chosen model is an open question.
-- **Primary candidates under consideration (measured in Stage 1):**
+- **Decision:** Keep Opus 4.7 as the default extraction model. Stage 1 still keeps the model-swap infrastructure (configurable model, prompt-cache validation across models, A/B harness) so future model changes can be measured rather than guessed.
+- **Primary candidates measured in Stage 1:**
   - **Claude Sonnet 4.6** — default tier-step-down assumption from the proposal. Untested against TCG articles.
   - **GPT-5.4** — separate provider entirely; requires a multi-provider abstraction in the LLM layer or a Vercel AI Gateway integration before A/B can run against it.
-  - **Claude Opus 4.7 (status quo)** — measured as the baseline. Even if we keep Opus as default, the agent layer's selective use of Opus on hard cases is a cost improvement over today's path, where Opus runs on every Pass 2 plus every Pass 3a/3b.
+  - **Claude Opus 4.7 (selected)** — measured as the baseline and retained as default.
 - **Supplemental candidates:** Opus 4.6 and GPT-5.5 were requested and measured after provider preflight confirmed availability.
-- **Decision gate:** Pick after Stage 1 measures candidates on the D.6 smoke article set, with quality and cost data per candidate. **There is no hard cost target that fails the swap** — under the current trajectory we already extract every article on Opus, so any candidate is at worst a status-quo cost decision and at best a meaningful reduction. Quality is the dominant criterion; cost informs the choice but does not gate it.
-- **Roadmap impact:** Stage 1 builds the model A/B harness and the cross-provider abstraction (so GPT-5.4 can be measured, not deferred). Document the GPT-5.4 integration path in §5.1.
+- **Decision gate result:** Opus 4.7 won on quality. **There is no hard cost target that fails the choice** — the slim no-glossary prompt already cuts default-extraction cost substantially, and AGENT.2 reduces total Opus usage by replacing Pass 3a/3b re-extraction with targeted agent escalation.
+- **Roadmap impact:** Stage 1 built the model A/B harness and the cross-provider abstraction. AGENT.1 now proceeds to retrieval/embedding implementation.
 
 ---
 
@@ -47,7 +47,7 @@ This document supersedes the originally-proposed Pass 0/1/2/3 deterministic-with
 1. **Discovery & fetch.** Daily cron polls source, or researcher pastes a link. No model. *(Unchanged from today.)*
 2. **Pass 1 structural.** Regex and dictionary extraction. No model. *(Unchanged.)*
 3. **Triage.** Haiku 4.5 broad-net classifier, uncertain leans relevant. *(Unchanged.)*
-4. **Default extraction.** Single-call structured extraction. Model choice deferred per §0.2. System prompt cached. *(Today: Opus 4.7; future: TBD per Stage 1 A/B.)*
+4. **Default extraction.** Single-call structured extraction using Opus 4.7 per §0.2. System prompt cached. *(Still configurable; Opus 4.7 is the selected default.)*
 5. **Match.** Deterministic 5-stage cascade matcher. Classifies as `confirmed`, `possible`, `new_candidate`, or `discarded`. *(Unchanged.)*
 6. **Agent escalation.** Opus 4.7 agent loop with tool access. Replaces today's Pass 3a structural-conflict + low-confidence reextract path AND today's Pass 3b new-candidate reextract path. Output uses the same extraction schema plus `reasoning_trace`, `evidence_consulted[]`, `tool_calls_summary[]`. *(New.)*
 7. **Output-quality retry.** Separate cheaper retry path for `parse_error / schema_invalid / refused / truncated` extraction outputs — these route to a stronger-guidance retry, NOT the agent loop. *(New, replaces today's Pass 3a output-quality branch.)*
@@ -79,7 +79,7 @@ This document supersedes the originally-proposed Pass 0/1/2/3 deterministic-with
 | Pass 3a fires on (a) Pass 1↔2 conflict, (b) low confidence, (c) parse/schema/refused/truncated | (a) and (b) → agent escalation. (c) → cheaper output-quality retry path. |
 | Pass 3b fires on `new_candidate` matches at integration time | Folds into agent escalation triggers (`new_candidate` is one of several agent triggers). |
 | `reextract_v1` prompt is the active re-extraction template | Reference-only. Agent prompt + tool definitions replace it. Legacy reextraction rows backfilled with synthetic `reasoning_trace` per §10. |
-| Default extraction is Opus 4.7 | Configurable; default chosen via Stage 1 A/B. Primary candidates: Sonnet 4.6, GPT-5.4, or stay on Opus. Supplemental measured candidates: Opus 4.6 and GPT-5.5. |
+| Default extraction is Opus 4.7 | Stays Opus 4.7 after Stage 1 A/B. The model remains configurable and the harness remains available for future swaps. |
 | `detect_project_contradictions` runs only post-resolve, only against active researcher overrides | Folded into agent layer. Agent owns contradiction reasoning pre-resolve (article-vs-state) and post-resolve (newer-evidence-vs-override). |
 | Reviewer acceptance is per-field via review_decisions; no retrieval consequence | Per-reference acceptance gates retrieval-index inclusion. |
 | Re-extraction output is structured JSON only | Agent output adds `reasoning_trace` (100-300 chars), `evidence_consulted[]` (list of {article_id, project_id, role}), `tool_calls_summary[]`. |
@@ -101,12 +101,12 @@ This document supersedes the originally-proposed Pass 0/1/2/3 deterministic-with
 Recorded verbatim from researcher answers, 2026-05-04, with implementation notes.
 
 ### Q1 — Sonnet vs Opus quality A/B
-**Answer.** Initially open to Sonnet 4.6, GPT-5.4, or staying on Opus 4.7 if costs are manageable. Opus 4.6 and GPT-5.5 were added as supplemental measured candidates once availability was confirmed.
-**Implementation.** Stage 1 builds an A/B harness running candidates against the D.6 smoke article set (5 URLs from `tests/fixtures/news/urbanize_la/pass1_validation_articles.json`), comparing extraction outputs field-by-field plus per-call cost. Primary run covers Opus 4.7, Sonnet 4.6, and GPT-5.4; supplemental run covers Opus 4.7, Opus 4.6, and GPT-5.5. Goal of Stage 1 is to produce firm cost-and-quality numbers per candidate, not to enforce a budget gate. Decision is made by the researcher after seeing the data.
+**Answer.** Initially open to Sonnet 4.6, GPT-5.4, or staying on Opus 4.7 if costs are manageable. Opus 4.6 and GPT-5.5 were added as supplemental measured candidates once availability was confirmed. Researcher decision on 2026-05-05: keep Opus 4.7.
+**Implementation.** Stage 1 builds an A/B harness running candidates against the D.6 smoke article set (5 URLs from `tests/fixtures/news/urbanize_la/pass1_validation_articles.json`), comparing extraction outputs field-by-field plus per-call cost. Primary run covers Opus 4.7, Sonnet 4.6, and GPT-5.4; supplemental run covers Opus 4.7, Opus 4.6, and GPT-5.5. Goal of Stage 1 is to produce firm cost-and-quality numbers per candidate, not to enforce a budget gate. The selected default is Opus 4.7.
 
 ### Q2 — Basis for "Sonnet good enough"
 **Answer.** Just model-tier ladder; no real basis.
-**Implementation.** Sonnet as default is a hypothesis, not a commitment. The A/B harness exists specifically because the assumption is unvalidated. Outcome of Stage 1 may be "Sonnet wins on cost-quality tradeoff," "GPT-5.4 wins," or "stay on Opus because the quality gap isn't worth the savings." All three are acceptable outcomes.
+**Implementation.** Sonnet as default was a hypothesis, not a commitment. The A/B harness exists specifically because the assumption was unvalidated. Outcome of Stage 1 is "stay on Opus because the quality gap isn't worth the savings."
 
 ### Q3 — Cost target
 **Answer.** Aspirational target is ~$100 for 12-month backfill (~$17 for 8-week LA window). **This is not a hard budget.** Under the current trajectory we already extract every article with Opus, so any agent-on-hard-cases architecture using *any* of the three candidate default-extraction models is a cost improvement over status quo. Sonnet being more expensive than projected is not a fail.
@@ -206,7 +206,7 @@ The three roadmap items below are dependency-tracking units within the sprint, n
 **AGENT.1 — Default-extraction infrastructure + retrieval prerequisites.**
 - Multi-provider abstraction in [news/llm.py](../../src/tcg_pipeline/news/llm.py) (Anthropic + OpenAI, or Vercel AI Gateway).
 - Three-way A/B harness; run Opus 4.7, Sonnet 4.6, GPT-5.4 against the D.6 smoke article set.
-- Researcher decision: pick default extraction model based on measured quality + cost data. No hard cost gate.
+- Researcher decision complete: keep Opus 4.7 as the default extraction model. No hard cost gate.
 - PostGIS GIST index on `Project.location`.
 - Article embedding pipeline gated on Q13 per-reference acceptance.
 - Drop in-prompt glossary entirely (option 3 per §5.1).
@@ -411,7 +411,7 @@ Supplemental requested run against two additional available models: `data/output
 | `anthropic:claude-opus-4-6` | 5/5 ok | 6 | 0.8 | 4 | `$0.233970` |
 | `openai:gpt-5.5` (`gpt-5.5-2026-04-23`) | 5/5 ok | 6 | 0.8 | 4 | `$0.292948` |
 
-Initial interpretation: Opus 4.7 remains the quality baseline on this five-article smoke set. Opus 4.6 matched the same aggregate pipeline metrics but cost more in this run because it did not receive Anthropic cache-hit accounting. GPT-5.5 parsed cleanly and matched aggregate counts, but was slower and more expensive than Opus 4.7 on this prompt/fixture set. Researcher spot-grading is still the final model-choice input.
+Decision: keep Opus 4.7 as the default extraction model. Opus 4.6 matched the same aggregate pipeline metrics but cost more in this run because it did not receive Anthropic cache-hit accounting. GPT-5.5 parsed cleanly and matched aggregate counts, but was slower and more expensive than Opus 4.7 on this prompt/fixture set.
 
 **Prompt cache validation.**
 - Today's `_cacheable_system_blocks` ([extraction.py:210-219](../../src/tcg_pipeline/news/extraction.py)) emits `cache_control: ephemeral` per system block. With the glossary removed, the cache write becomes ~1k tokens instead of ~103k. Cache writes effectively become free; cache hits become near-free. The cache infrastructure stays in place but its cost contribution is negligible after this change.
@@ -1163,7 +1163,7 @@ The existing ROADMAP.md should be updated as follows. Concrete edits to apply wh
 - **D.late.AGENT.1 — Default-extraction infrastructure + retrieval prerequisites.**
   - Build multi-provider abstraction in `news/llm.py` (Anthropic + OpenAI, or Vercel AI Gateway).
   - Build three-way A/B harness; run Opus 4.7, Sonnet 4.6, GPT-5.4 against D.6 smoke set.
-  - Researcher decision: pick default extraction model from the measured cost/quality data. No hard cost gate.
+  - Researcher decision complete: keep Opus 4.7 as the default extraction model. No hard cost gate.
   - Add PostGIS GIST index on `Project.location`.
   - Build article embedding pipeline (per-reference acceptance gating).
   - **Drop the in-prompt glossary entirely** (option 3 from the §5.1 / §7 glossary discussion). Default extraction emits raw `candidate_name` / `candidate_developer` text without registry hints; matcher continues using fuzzy registry matching; agent's tools (Stage 2) provide registry knowledge on demand.
@@ -1243,21 +1243,20 @@ Phase J.1 (LLM model configuration console) was originally scoped as news-extrac
 
 ## 10. Open Items / Deferred Decisions
 
-1. **Default extraction model** (per §0.2). Stage 1 three-way A/B (Opus 4.7 / Sonnet 4.6 / GPT-5.4) produces measured data; researcher picks.
-2. **Embedding model** for article chunks. Stage 1 sub-decision; cheap path is OpenAI `text-embedding-3-small`.
-3. **Sample size sufficiency for Pipedream auto-compare.** Validates on June 2026 first run.
-4. **Pipedream coverage mapping infrastructure.** Build minimum for LA in Stage 2; expand per-market as markets come online (San Diego, SF, Silicon Valley, Seattle, Denver, others — per Q11).
-5. **Spot-check cadence taper rules.** Default 10/week; tune after 3 months of agreement-rate data.
-6. **Cross-provider integration approach.** Resolved 2026-05-05: direct provider APIs are current policy for all built/current AGENT work. Vercel AI Gateway stays a deferred operational option for centralized routing/monitoring, but Gateway activation requires a deliberate code/config sweep first.
-7. **Cold-storage tier for `agent_runs.evidence_consulted`.** Decide if/when the table grows large.
-8. **Batch API dispatch.** Deferred per §0.1; architecture supports plug-in.
+1. **Embedding model** for article chunks. Stage 1 sub-decision; cheap path is OpenAI `text-embedding-3-small`.
+2. **Sample size sufficiency for Pipedream auto-compare.** Validates on June 2026 first run.
+3. **Pipedream coverage mapping infrastructure.** Build minimum for LA in Stage 2; expand per-market as markets come online (San Diego, SF, Silicon Valley, Seattle, Denver, others — per Q11).
+4. **Spot-check cadence taper rules.** Default 10/week; tune after 3 months of agreement-rate data.
+5. **Cross-provider integration approach.** Resolved 2026-05-05: direct provider APIs are current policy for all built/current AGENT work. Vercel AI Gateway stays a deferred operational option for centralized routing/monitoring, but Gateway activation requires a deliberate code/config sweep first.
+6. **Cold-storage tier for `agent_runs.evidence_consulted`.** Decide if/when the table grows large.
+7. **Batch API dispatch.** Deferred per §0.1; architecture supports plug-in.
 
 ---
 
 ## 11. Risks and Mitigations
 
 ### R1 — Sonnet (or chosen alternate model) quality is materially worse than Opus
-**Mitigation.** Stage 1 A/B harness measures all three candidates before any production commit. If Sonnet and GPT-5.4 both show quality gaps, the decision is "stay on Opus as default" — which is still a cost improvement over today's Pass-3a/3b-on-Opus-on-everything path because the agent fires on a fraction of articles instead of every article. There is no failure mode here; only a choice between cost-quality tradeoffs.
+**Mitigation.** Resolved by Stage 1 A/B: stay on Opus 4.7 as default. This is still a cost improvement over today's Pass-3a/3b-on-Opus-on-everything path because AGENT.2 fires the agent on a fraction of articles instead of re-extracting deterministically for every difficult case.
 
 ### R2 — Agent fire rate exceeds projection
 **Updated projection (2026-05-04).** Original §7 cost model assumed 15-20% fire rate. With the researcher-chosen uniform 10% unit-delta trigger threshold (replacing earlier >50%/>25% sketches), fire rate is more likely 25-30% initially — possibly higher in the first weeks before prompt-tuning settles.
@@ -1351,7 +1350,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 - **2026-05-05 (revision 20) — AGENT.1 live A/B costs recorded.**
   - Primary post-tightening smoke-set report: `data/output/news/ab_extract_20260505_174623.json`. Costs: Opus 4.7 `$0.202427`, Sonnet 4.6 `$0.107957`, GPT-5.4 `$0.054534` adjusted to current OpenAI cached-input pricing. The original JSON was generated before the cached-input pricing correction and shows `$0.072966`.
   - Supplemental requested report: `data/output/news/ab_extract_20260505_180014.json`. Costs: Opus 4.7 `$0.201802`, Opus 4.6 `$0.233970`, GPT-5.5 (`gpt-5.5-2026-04-23`) `$0.292948`. All three supplemental candidates parsed 5/5 articles.
-  - Initial interpretation: Opus 4.7 remains the quality baseline pending researcher spot-grading; Opus 4.6 matched aggregate pipeline metrics but was more expensive in this run because it did not receive Anthropic cache-hit accounting; GPT-5.5 parsed cleanly but was slower and more expensive than Opus 4.7 on this prompt/fixture set.
+  - Initial interpretation: Opus 4.7 remained the quality baseline; Opus 4.6 matched aggregate pipeline metrics but was more expensive in this run because it did not receive Anthropic cache-hit accounting; GPT-5.5 parsed cleanly but was slower and more expensive than Opus 4.7 on this prompt/fixture set.
+
+- **2026-05-05 (revision 21) — Default extraction model selected.**
+  - Researcher decision: keep Opus 4.7 as the default extraction model.
+  - No runtime config/code change is required because Opus 4.7 was already the production default.
+  - AGENT.1's remaining implementation blocker is retrieval: choose the embedding model and build the article chunk/indexing pipeline.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
