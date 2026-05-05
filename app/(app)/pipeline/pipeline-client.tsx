@@ -22,12 +22,12 @@ import MapLibreMap, { Layer, NavigationControl, Popup, Source } from "react-map-
 import { Command } from "cmdk";
 import { useRouter } from "next/navigation";
 import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import { createProjectAction } from "./actions";
 import {
-  createProjectAction,
   initialProjectCreateState,
   type ProjectCreateActionState,
   type ProjectCreateFormValues
-} from "./actions";
+} from "./state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { compactStatus, statusStyle, STATUS_STYLES } from "@/lib/status";

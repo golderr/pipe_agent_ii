@@ -3,10 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useActionState, useEffect } from "react";
 import { Link as LinkIcon, Newspaper, Send } from "lucide-react";
-import {
-  createResearchArticleAction,
-  initialResearchArticleCreateState
-} from "./actions";
+import { createResearchArticleAction } from "./actions";
+import { initialResearchArticleCreateState } from "./state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
