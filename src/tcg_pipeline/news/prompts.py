@@ -114,7 +114,12 @@ def render_triage_prompt(article: NewsArticle) -> RenderedPrompt:
 
 def render_extraction_prompt(session: Session, article: NewsArticle) -> RenderedPrompt:
     template = load_active_prompt("extract")
-    return _render_project_extraction_prompt(session, article, template=template)
+    return _render_project_extraction_prompt(
+        session,
+        article,
+        template=template,
+        include_glossary=False,
+    )
 
 
 def render_reextraction_prompt(
@@ -143,6 +148,7 @@ def render_reextraction_prompt(
         session,
         article,
         template=template,
+        include_glossary=True,
         extra_user_values={
             "previous_output_json": previous_output_json,
             "previous_parse_status": previous_parse_status,
@@ -157,13 +163,13 @@ def _render_project_extraction_prompt(
     article: NewsArticle,
     *,
     template: PromptTemplate,
+    include_glossary: bool,
     extra_user_values: dict[str, Any] | None = None,
 ) -> RenderedPrompt:
-    system_blocks = (
-        template.system_template,
-        "Glossary:\n" + render_news_glossary(session, article),
-        "Signal flag registry:\n" + render_signal_flag_registry(session),
-    )
+    system_blocks = [template.system_template]
+    if include_glossary:
+        system_blocks.append("Glossary:\n" + render_news_glossary(session, article))
+    system_blocks.append("Signal flag registry:\n" + render_signal_flag_registry(session))
     system_text = "\n\n".join(system_blocks)
     metadata_json = json.dumps(
         {
@@ -212,7 +218,7 @@ def _render_project_extraction_prompt(
         system_text=system_text,
         user_text=user_text,
         schema=template.schema,
-        system_blocks=system_blocks,
+        system_blocks=tuple(system_blocks),
     )
 
 

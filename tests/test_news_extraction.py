@@ -34,7 +34,11 @@ from tcg_pipeline.news.extraction import (
     run_news_extraction_for_article,
 )
 from tcg_pipeline.news.llm import LLMUsage
-from tcg_pipeline.news.prompts import render_extraction_prompt, render_news_glossary
+from tcg_pipeline.news.prompts import (
+    render_extraction_prompt,
+    render_news_glossary,
+    render_reextraction_prompt,
+)
 from tcg_pipeline.settings import Settings
 
 
@@ -438,6 +442,84 @@ def test_render_news_glossary_excludes_inactive_and_deleted_projects(
     assert deleted_project.project_name not in glossary
 
 
+def test_render_extraction_prompt_omits_registry_glossary(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    unique_id = uuid.uuid4().hex
+    active_project = Project(
+        canonical_address=f"100 {unique_id[:8]} Main St",
+        market=source.market.slug if source.market else "unscoped",
+        market_id=source.market_id,
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name=f"Glossary Omitted Project {unique_id}",
+        pipeline_status=PipelineStatus.PROPOSED,
+    )
+    article = _article(source)
+    postgres_session.add_all([active_project, article])
+    postgres_session.flush()
+
+    rendered_prompt = render_extraction_prompt(postgres_session, article)
+
+    assert len(rendered_prompt.system_blocks) == 2
+    assert "Glossary:" not in rendered_prompt.system_text
+    assert active_project.project_name not in rendered_prompt.system_text
+    assert "Signal flag registry:" in rendered_prompt.system_text
+    assert "Do not infer registry_developer_id or registry_project_id" in (
+        rendered_prompt.system_text
+    )
+    required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
+    assert "registry_developer_id" not in required
+    assert "registry_project_id" not in required
+
+
+def test_render_reextraction_prompt_keeps_legacy_registry_glossary(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    unique_id = uuid.uuid4().hex
+    active_project = Project(
+        canonical_address=f"200 {unique_id[:8]} Main St",
+        market=source.market.slug if source.market else "unscoped",
+        market_id=source.market_id,
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name=f"Legacy Reextract Project {unique_id}",
+        pipeline_status=PipelineStatus.PROPOSED,
+    )
+    article = _article(source)
+    prior_extraction = NewsExtraction(
+        article_id=uuid.uuid4(),
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v1",
+        prompt_version="v1",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add_all([active_project, article])
+    postgres_session.flush()
+
+    rendered_prompt = render_reextraction_prompt(
+        postgres_session,
+        article,
+        prior_extraction=prior_extraction,
+        trigger_context={"triggered_by": "pass2_low_confidence"},
+    )
+
+    assert len(rendered_prompt.system_blocks) == 3
+    assert "Glossary:" in rendered_prompt.system_text
+    assert active_project.project_name in rendered_prompt.system_text
+    assert "Signal flag registry:" in rendered_prompt.system_text
+
+
 def test_persist_extraction_response_writes_extraction_references_article_pointer_and_cost(
     postgres_session: Session,
 ) -> None:
@@ -547,7 +629,8 @@ def test_run_news_extraction_for_article_reserves_calls_client_and_true_ups(
         def extract(self, prompt):  # type: ignore[no-untyped-def]
             assert "Helio" in prompt.user_text
             assert "Signal flag registry:" in prompt.system_text
-            assert len(prompt.system_blocks) == 3
+            assert "Glossary:" not in prompt.system_text
+            assert len(prompt.system_blocks) == 2
             return ExtractionLLMResponse(
                 payload=_payload(),
                 text="{}",
@@ -626,9 +709,13 @@ def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
             self.calls += 1
             if self.calls == 1:
                 assert prompt.prompt_id == "extract_v1"
+                assert "Glossary:" not in prompt.system_text
+                assert len(prompt.system_blocks) == 2
                 payload = _payload(candidate_unit_total=250)
             else:
                 assert prompt.prompt_id == "reextract_v1"
+                assert "Glossary:" in prompt.system_text
+                assert len(prompt.system_blocks) == 3
                 assert "Re-extraction trigger context" in prompt.user_text
                 assert "pass1_pass2_conflict" in prompt.user_text
                 payload = _payload(candidate_unit_total=310)

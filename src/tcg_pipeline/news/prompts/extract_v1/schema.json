@@ -33,9 +33,7 @@
           "candidate_lat",
           "candidate_lng",
           "candidate_confidence",
-          "passage_excerpts",
-          "registry_developer_id",
-          "registry_project_id"
+          "passage_excerpts"
         ],
         "properties": {
           "candidate_name": {

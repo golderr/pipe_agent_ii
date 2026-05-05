@@ -1234,6 +1234,8 @@ This is opt-in and slow-burn. We do not expand the registry automatically.
 
 ## 8. Component 3 — Pass 2 / Pass 3 (LLM Extraction)
 
+> **AGENT.1 amendment (2026-05-05):** The default extraction path is now slimmed for the AGENT.1 A/B harness. `render_extraction_prompt` no longer injects the developer/project glossary; `extract_v1` receives only the system template plus signal-flag registry as cacheable system blocks, emits raw `candidate_name` / `candidate_developer` values, and no longer requires `registry_developer_id` / `registry_project_id` in its schema. The older three-block glossary description below remains accurate only for legacy `reextract_v1` until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`. Provider/model details in this section are superseded by `agentic_escalation_design.md` §5.1 for AGENT.1+ work.
+
 ### 8.1 Models and providers
 
 - **Provider:** Anthropic API directly via the `anthropic` Python SDK. We use `prompt_caching` for the static parts of the prompt (system prompt, glossary, project list).

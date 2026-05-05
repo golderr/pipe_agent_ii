@@ -351,8 +351,9 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 
 **Glossary removal — option 3 (researcher direction 2026-05-04).**
 - Today's `render_news_glossary` in [news/prompts.py:219-260](../../src/tcg_pipeline/news/prompts.py) emits the full developer registry + market-filtered project list as a cached system block (~103k tokens at LA scale; ~50k+ projects unscoped at 25-market scale, which exceeds context).
-- Stage 1 removes this from the default-extraction prompt entirely. The cached system blocks shrink to (a) the system template (`extract_v1/system.md`, small), (b) the signal flag registry (small).
-- Default extraction emits raw `candidate_name` and `candidate_developer` text without `registry_developer_id` / `registry_project_id` hints.
+- Stage 1 removes this from the default-extraction prompt entirely. Implemented 2026-05-05: `render_extraction_prompt` now emits only (a) the system template (`extract_v1/system.md`, small), (b) the signal flag registry (small).
+- Default extraction emits raw `candidate_name` and `candidate_developer` text without `registry_developer_id` / `registry_project_id` hints. `extract_v1/schema.json` keeps those fields available for parser compatibility but no longer requires them.
+- Legacy `reextract_v1` keeps its glossary block until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`; the A/B harness must call the default `extract_v1` path, not the legacy re-extraction path.
 - The deterministic matcher continues to use its existing fuzzy registry matching (developer canonicalization via `canonicalize_developer_name`, project name fuzzy via rapidfuzz).
 - Registry knowledge moves to the agent's tool layer (`get_developer_projects`, `search_articles_similar`, `get_nearby_projects`) — accessed on demand when the agent fires, not preloaded into every extraction.
 - Eliminates the 25-market scaling blocker and the dominant per-article cost line.
@@ -1237,6 +1238,11 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 ## 13. Revision History
 
 - **2026-05-04 — Initial draft.** Reconciles the original `agentic_pipeline_proposal.md` against actual codebase state (verified extraction.py, integration.py, news_matcher.py, db/models.py, settings.py, costs.py, structural.py, prompts.py, evidence.py, collect.py, resolution/engine.py, source_adapters/ladbs.py). Incorporates researcher answers to the 17 clarifying questions. Adds two top-of-file callouts: Batch API deferred, model-choice deferred.
+
+- **2026-05-05 (revision 13) — Slim default extraction prompt implemented.**
+  - `render_extraction_prompt` now omits `render_news_glossary` and sends only the extraction system template plus signal-flag registry as cacheable system blocks.
+  - `extract_v1/system.md` now instructs the model to emit raw candidate names/developers and not infer registry IDs; `extract_v1/schema.json` no longer requires `registry_developer_id` / `registry_project_id`.
+  - `render_reextraction_prompt` explicitly keeps the legacy glossary path until AGENT.2 moves Pass 3a/3b into `news/extraction_legacy.py`. This preserves current fallback behavior while ensuring the AGENT.1 A/B harness measures the intended slim default-extraction path.
 
 - **2026-05-05 (revision 12) — AGENT.1 provider/pricing hardening.**
   - **Gateway auth:** Vercel AI Gateway requires `AI_GATEWAY_API_KEY`; no fallback to `OPENAI_API_KEY`. This avoids confusing 401s during the A/B harness.
