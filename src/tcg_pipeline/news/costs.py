@@ -9,14 +9,20 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from tcg_pipeline.db.models import NewsCostCap, NewsExtractionCost, SystemAlert
+from tcg_pipeline.db.models import CostCap, CostCapOverride, LLMCostUsage, SystemAlert
 
-NEWS_COST_CAP_LOCK_KEY = 0x4E455753434150
+LLM_COST_CAP_LOCK_KEY = 0x4E455753434150
 NEWS_COST_TIMEZONE = ZoneInfo("America/Los_Angeles")
+NEWS_COST_BUCKET = "news"
 RESERVATION_PASS_NAME = "reserved"
+RESERVATION_PROVIDER = "_reservation_"
 RESERVATION_MODEL = "_reservation_"
 DEFAULT_DAILY_WARN_USD = Decimal("25.00")
 DEFAULT_DAILY_HARD_USD = Decimal("35.00")
+DEFAULT_BUCKET_CAPS = {
+    NEWS_COST_BUCKET: (DEFAULT_DAILY_WARN_USD, DEFAULT_DAILY_HARD_USD),
+    "permits": (Decimal("50.00"), Decimal("75.00")),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,49 +46,57 @@ def reserve_llm_cost(
     pass_name: str,
     model: str,
     estimated_cost_usd: Decimal,
+    bucket: str = NEWS_COST_BUCKET,
+    provider: str = "anthropic",
     now: datetime | None = None,
 ) -> ActiveCostCap | None:
     current = _as_aware(now or datetime.now(UTC))
     cost_date = cost_date_for(current)
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": NEWS_COST_CAP_LOCK_KEY},
+        {"lock_key": LLM_COST_CAP_LOCK_KEY},
     )
-    cap = active_cost_cap(session, cost_date=cost_date, now=current)
+    cap = active_cost_cap(session, cost_date=cost_date, bucket=bucket, now=current)
     projected_spend = cap.spent_usd + estimated_cost_usd
     if projected_spend >= cap.daily_warn_usd:
         _raise_cost_alert(
             session,
-            alert_key="news_daily_cost_warn_cap_reached",
+            alert_key=_alert_key(bucket, "warn"),
             severity="warning",
-            message="News extraction daily warn cost cap reached.",
+            message=f"{bucket} LLM daily warn cost cap reached.",
+            bucket=bucket,
             cost_date=cost_date,
             spent_usd=projected_spend,
             cap_usd=cap.daily_warn_usd,
             pass_name=pass_name,
+            provider=provider,
             model=model,
             now=current,
         )
     if projected_spend > cap.daily_hard_usd:
         _raise_cost_alert(
             session,
-            alert_key="news_daily_cost_hard_cap_reached",
+            alert_key=_alert_key(bucket, "hard"),
             severity="high",
-            message="News extraction daily hard cost cap reached.",
+            message=f"{bucket} LLM daily hard cost cap reached.",
+            bucket=bucket,
             cost_date=cost_date,
             spent_usd=projected_spend,
             cap_usd=cap.daily_hard_usd,
             pass_name=pass_name,
+            provider=provider,
             model=model,
             now=current,
         )
         return None
     _increment_cost_rollup(
         session,
+        bucket=bucket,
         cost_date=cost_date,
-        pass_name=RESERVATION_PASS_NAME,
+        capability=RESERVATION_PASS_NAME,
+        provider=RESERVATION_PROVIDER,
         model=RESERVATION_MODEL,
-        cost_usd=estimated_cost_usd,
+        spent_usd=estimated_cost_usd,
     )
     return ActiveCostCap(
         cost_date=cost_date,
@@ -96,16 +110,19 @@ def release_llm_cost_reservation(
     session: Session,
     *,
     reserved_cost_usd: Decimal,
+    bucket: str = NEWS_COST_BUCKET,
     now: datetime | None = None,
 ) -> None:
     if reserved_cost_usd == 0:
         return
     _increment_cost_rollup(
         session,
+        bucket=bucket,
         cost_date=cost_date_for(now),
-        pass_name=RESERVATION_PASS_NAME,
+        capability=RESERVATION_PASS_NAME,
+        provider=RESERVATION_PROVIDER,
         model=RESERVATION_MODEL,
-        cost_usd=-reserved_cost_usd,
+        spent_usd=-reserved_cost_usd,
     )
 
 
@@ -120,28 +137,34 @@ def record_llm_cost(
     output_tokens: int,
     cost_usd: Decimal,
     reserved_cost_usd: Decimal = Decimal("0"),
+    bucket: str = NEWS_COST_BUCKET,
+    provider: str = "anthropic",
     now: datetime | None = None,
 ) -> None:
     cost_date = cost_date_for(now)
     if reserved_cost_usd:
         _increment_cost_rollup(
             session,
+            bucket=bucket,
             cost_date=cost_date,
-            pass_name=RESERVATION_PASS_NAME,
+            capability=RESERVATION_PASS_NAME,
+            provider=RESERVATION_PROVIDER,
             model=RESERVATION_MODEL,
-            cost_usd=-reserved_cost_usd,
+            spent_usd=-reserved_cost_usd,
         )
     _increment_cost_rollup(
         session,
+        bucket=bucket,
         cost_date=cost_date,
-        pass_name=pass_name,
+        capability=pass_name,
+        provider=provider,
         model=model,
         call_count=1,
         input_tokens_uncached=input_tokens_uncached,
         input_tokens_cache_creation=input_tokens_cache_creation,
         input_tokens_cached=input_tokens_cached,
         output_tokens=output_tokens,
-        cost_usd=cost_usd,
+        spent_usd=cost_usd,
     )
 
 
@@ -149,41 +172,65 @@ def active_cost_cap(
     session: Session,
     *,
     cost_date: date,
+    bucket: str = NEWS_COST_BUCKET,
     now: datetime | None = None,
 ) -> ActiveCostCap:
     cap = session.execute(
-        select(NewsCostCap)
-        .where(NewsCostCap.effective_date <= cost_date)
-        .order_by(NewsCostCap.effective_date.desc())
+        select(CostCap)
+        .where(
+            CostCap.bucket == bucket,
+            CostCap.effective_from <= cost_date,
+            (CostCap.effective_to.is_(None)) | (CostCap.effective_to >= cost_date),
+        )
+        .order_by(CostCap.effective_from.desc())
         .limit(1)
     ).scalar_one_or_none()
     current = _as_aware(now or datetime.now(UTC))
     if cap is None:
-        warn = DEFAULT_DAILY_WARN_USD
-        hard = DEFAULT_DAILY_HARD_USD
+        warn, hard = DEFAULT_BUCKET_CAPS.get(
+            bucket,
+            (DEFAULT_DAILY_WARN_USD, DEFAULT_DAILY_HARD_USD),
+        )
     else:
         warn = Decimal(cap.daily_warn_usd)
         hard = Decimal(cap.daily_hard_usd)
-        if (
-            cap.override_until is not None
-            and cap.override_hard_usd is not None
-            and _as_aware(cap.override_until) > current
-        ):
-            hard = Decimal(cap.override_hard_usd)
+    override = session.execute(
+        select(CostCapOverride)
+        .where(
+            CostCapOverride.bucket == bucket,
+            CostCapOverride.effective_from <= current,
+            CostCapOverride.effective_until > current,
+        )
+        .order_by(
+            CostCapOverride.override_hard_usd.desc(),
+            CostCapOverride.effective_until.desc(),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if override is not None:
+        hard = Decimal(override.override_hard_usd)
+        if override.override_warn_usd is not None:
+            warn = Decimal(override.override_warn_usd)
     return ActiveCostCap(
         cost_date=cost_date,
         daily_warn_usd=warn,
         daily_hard_usd=hard,
-        spent_usd=current_day_spend(session, cost_date=cost_date),
+        spent_usd=current_day_spend(session, cost_date=cost_date, bucket=bucket),
     )
 
 
-def current_day_spend(session: Session, *, cost_date: date) -> Decimal:
+def current_day_spend(
+    session: Session,
+    *,
+    cost_date: date,
+    bucket: str = NEWS_COST_BUCKET,
+) -> Decimal:
     # Reservation rows can briefly go negative while a completed call true-ups its
     # estimate to actual cost. The daily spend check intentionally sums all rows.
     spent = session.execute(
-        select(func.coalesce(func.sum(NewsExtractionCost.cost_usd), 0)).where(
-            NewsExtractionCost.cost_date == cost_date
+        select(func.coalesce(func.sum(LLMCostUsage.spent_usd), 0)).where(
+            LLMCostUsage.bucket == bucket,
+            LLMCostUsage.cost_date == cost_date,
         )
     ).scalar_one()
     return Decimal(spent)
@@ -192,49 +239,54 @@ def current_day_spend(session: Session, *, cost_date: date) -> Decimal:
 def _increment_cost_rollup(
     session: Session,
     *,
+    bucket: str,
     cost_date: date,
-    pass_name: str,
+    capability: str,
+    provider: str,
     model: str,
     call_count: int = 0,
     input_tokens_uncached: int = 0,
     input_tokens_cache_creation: int = 0,
     input_tokens_cached: int = 0,
     output_tokens: int = 0,
-    cost_usd: Decimal = Decimal("0"),
+    spent_usd: Decimal = Decimal("0"),
 ) -> None:
     statement = (
-        insert(NewsExtractionCost)
+        insert(LLMCostUsage)
         .values(
+            bucket=bucket,
             cost_date=cost_date,
-            **{"pass": pass_name},
+            capability=capability,
+            provider=provider,
             model=model,
             call_count=call_count,
             input_tokens_uncached=input_tokens_uncached,
             input_tokens_cache_creation=input_tokens_cache_creation,
             input_tokens_cached=input_tokens_cached,
             output_tokens=output_tokens,
-            cost_usd=cost_usd,
+            spent_usd=spent_usd,
         )
         .on_conflict_do_update(
             index_elements=[
-                NewsExtractionCost.cost_date,
-                NewsExtractionCost.pass_name,
-                NewsExtractionCost.model,
+                LLMCostUsage.bucket,
+                LLMCostUsage.cost_date,
+                LLMCostUsage.capability,
+                LLMCostUsage.provider,
+                LLMCostUsage.model,
             ],
             set_={
-                "call_count": NewsExtractionCost.call_count + call_count,
+                "call_count": LLMCostUsage.call_count + call_count,
                 "input_tokens_uncached": (
-                    NewsExtractionCost.input_tokens_uncached + input_tokens_uncached
+                    LLMCostUsage.input_tokens_uncached + input_tokens_uncached
                 ),
                 "input_tokens_cache_creation": (
-                    NewsExtractionCost.input_tokens_cache_creation
-                    + input_tokens_cache_creation
+                    LLMCostUsage.input_tokens_cache_creation + input_tokens_cache_creation
                 ),
                 "input_tokens_cached": (
-                    NewsExtractionCost.input_tokens_cached + input_tokens_cached
+                    LLMCostUsage.input_tokens_cached + input_tokens_cached
                 ),
-                "output_tokens": NewsExtractionCost.output_tokens + output_tokens,
-                "cost_usd": NewsExtractionCost.cost_usd + cost_usd,
+                "output_tokens": LLMCostUsage.output_tokens + output_tokens,
+                "spent_usd": LLMCostUsage.spent_usd + spent_usd,
             },
         )
     )
@@ -247,10 +299,12 @@ def _raise_cost_alert(
     alert_key: str,
     severity: str,
     message: str,
+    bucket: str,
     cost_date: date,
     spent_usd: Decimal,
     cap_usd: Decimal,
     pass_name: str,
+    provider: str,
     model: str,
     now: datetime,
 ) -> None:
@@ -259,12 +313,14 @@ def _raise_cost_alert(
         .values(
             alert_key=alert_key,
             severity=severity,
-            scope={"cost_date": cost_date.isoformat()},
+            scope=_alert_scope(bucket=bucket, cost_date=cost_date),
             message=message,
             detail={
+                "bucket": bucket,
                 "spent_usd": str(spent_usd),
                 "cap_usd": str(cap_usd),
                 "pass": pass_name,
+                "provider": provider,
                 "model": model,
             },
             raised_at=now,
@@ -280,9 +336,11 @@ def _raise_cost_alert(
                 "severity": severity,
                 "message": message,
                 "detail": {
+                    "bucket": bucket,
                     "spent_usd": str(spent_usd),
                     "cap_usd": str(cap_usd),
                     "pass": pass_name,
+                    "provider": provider,
                     "model": model,
                 },
                 "last_seen_at": now,
@@ -290,6 +348,18 @@ def _raise_cost_alert(
         )
     )
     session.execute(statement)
+
+
+def _alert_key(bucket: str, cap_kind: str) -> str:
+    if bucket == NEWS_COST_BUCKET:
+        return f"news_daily_cost_{cap_kind}_cap_reached"
+    return f"{bucket}_daily_cost_{cap_kind}_cap_reached"
+
+
+def _alert_scope(*, bucket: str, cost_date: date) -> dict[str, str]:
+    if bucket == NEWS_COST_BUCKET:
+        return {"cost_date": cost_date.isoformat()}
+    return {"bucket": bucket, "cost_date": cost_date.isoformat()}
 
 
 def _as_aware(value: datetime) -> datetime:

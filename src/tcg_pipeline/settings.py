@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     news_triage_max_tokens: int = Field(default=300, ge=1)
     news_extract_model: str = "claude-opus-4-7"
     news_extract_max_tokens: int = Field(default=5000, ge=1)
+    agent_enabled_for_news: bool = True
+    agent_enabled_for_permits: bool = True
+    news_use_legacy_pass3: bool = False
 
     api_cors_origins: str = "http://localhost:3000"
     api_auth_audience: str = "authenticated"

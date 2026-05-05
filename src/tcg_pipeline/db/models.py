@@ -30,6 +30,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import UserDefinedType
 
 
 def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
@@ -306,6 +307,19 @@ naming_convention = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=naming_convention)
+
+
+class Vector(UserDefinedType):
+    cache_ok = True
+
+    def __init__(self, dimensions: int) -> None:
+        self.dimensions = dimensions
+
+    def get_col_spec(self, **_: object) -> str:
+        return f"vector({self.dimensions})"
+
+
+NEWS_ARTICLE_CHUNK_EMBEDDING_DIMENSIONS = 1536
 
 
 class TimestampMixin:
@@ -1388,18 +1402,195 @@ class NewsProjectReference(Base, TimestampMixin):
     review_item: Mapped[ReviewItem | None] = relationship()
 
 
-class NewsExtractionCost(Base):
-    __tablename__ = "news_extraction_costs"
+class NewsArticleChunk(Base):
+    __tablename__ = "news_article_chunks"
     __table_args__ = (
-        UniqueConstraint("cost_date", "pass", "model"),
-        Index("ix_news_extraction_costs_cost_date", text("cost_date DESC")),
+        CheckConstraint(
+            "gate_source IN ("
+            "'review_accept', "
+            "'auto_applied_corroborating', "
+            "'auto_applied_high_confidence'"
+            ")",
+            name="gate_source",
+        ),
+        Index(
+            "ix_news_article_chunks_article_reference",
+            "article_id",
+            "reference_index",
+        ),
+        Index(
+            "ix_news_article_chunks_active_gate",
+            "gate_source",
+            text("embedded_at DESC"),
+            postgresql_where=text("superseded_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    cost_date: Mapped[date] = mapped_column(Date, nullable=False)
-    pass_name: Mapped[str] = mapped_column("pass", Text, nullable=False)
-    model: Mapped[str] = mapped_column(Text, nullable=False)
-    call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_articles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reference_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_offset_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chunk_offset_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    embedding: Mapped[object | None] = mapped_column(
+        Vector(NEWS_ARTICLE_CHUNK_EMBEDDING_DIMENSIONS),
+        nullable=True,
+    )
+    embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gate_source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    article: Mapped[NewsArticle] = relationship()
+
+
+class NewsReferenceAutoApplied(Base):
+    __tablename__ = "news_reference_auto_applied"
+    __table_args__ = (
+        CheckConstraint(
+            "gate IN ('auto_applied_corroborating', 'auto_applied_high_confidence')",
+            name="gate",
+        ),
+        UniqueConstraint(
+            "article_id",
+            "reference_index",
+            "source_run_id",
+            "gate",
+            name="uq_news_reference_auto_applied_reference_gate",
+        ),
+        Index(
+            "ix_news_reference_auto_applied_article_reference",
+            "article_id",
+            "reference_index",
+        ),
+        Index(
+            "ix_news_reference_auto_applied_source_run",
+            "source_run_id",
+        ),
+        Index(
+            "uq_news_reference_auto_applied_null_source_run_reference_gate",
+            "article_id",
+            "reference_index",
+            "gate",
+            unique=True,
+            postgresql_where=text("source_run_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_articles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reference_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("source_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    applied_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    gate: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    article: Mapped[NewsArticle] = relationship()
+    source_run: Mapped[SourceRun | None] = relationship()
+
+
+class CostCap(Base):
+    __tablename__ = "cost_caps"
+    __table_args__ = (
+        CheckConstraint(
+            "daily_warn_usd <= daily_hard_usd",
+            name="warn_lte_hard",
+        ),
+        Index("ix_cost_caps_bucket_effective", "bucket", text("effective_from DESC")),
+    )
+
+    bucket: Mapped[str] = mapped_column(Text, primary_key=True)
+    effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    daily_warn_usd: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    daily_hard_usd: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CostCapOverride(Base):
+    __tablename__ = "cost_cap_overrides"
+    __table_args__ = (
+        CheckConstraint(
+            "(set_by_user_id IS NOT NULL) <> (set_by_actor IS NOT NULL)",
+            name="exactly_one_setter",
+        ),
+        CheckConstraint(
+            "override_warn_usd IS NULL OR override_warn_usd <= override_hard_usd",
+            name="warn_lte_hard",
+        ),
+        CheckConstraint(
+            "effective_until > effective_from",
+            name="valid_window",
+        ),
+        Index(
+            "ix_cost_cap_overrides_bucket_until",
+            "bucket",
+            text("effective_until DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    override_hard_usd: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    override_warn_usd: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    effective_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    set_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    set_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class LLMCostUsage(Base):
+    __tablename__ = "llm_cost_usage"
+    __table_args__ = (
+        Index("ix_llm_cost_usage_bucket_date", "bucket", text("cost_date DESC")),
+    )
+
+    bucket: Mapped[str] = mapped_column(Text, primary_key=True)
+    cost_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    capability: Mapped[str] = mapped_column(Text, primary_key=True)
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    call_count: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     input_tokens_uncached: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
@@ -1424,28 +1615,12 @@ class NewsExtractionCost(Base):
         default=0,
         server_default="0",
     )
-    cost_usd: Mapped[float] = mapped_column(
+    spent_usd: Mapped[float] = mapped_column(
         Numeric(12, 6),
         nullable=False,
         default=0,
         server_default="0",
     )
-
-
-class NewsCostCap(Base, TimestampMixin):
-    __tablename__ = "news_cost_caps"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    effective_date: Mapped[date] = mapped_column(Date, nullable=False, unique=True)
-    daily_warn_usd: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False)
-    daily_hard_usd: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False)
-    override_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    override_hard_usd: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
-    override_set_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        nullable=True,
-    )
-    override_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class NewsSignalFlag(Base):

@@ -9,10 +9,10 @@ from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.db.models import (
+    CostCap,
+    LLMCostUsage,
     NewsArticle,
-    NewsCostCap,
     NewsExtraction,
-    NewsExtractionCost,
     NewsExtractionParseStatus,
     NewsExtractionPass,
     NewsFetchStatus,
@@ -170,10 +170,12 @@ def test_persist_triage_response_writes_extraction_article_status_and_cost(
     assert extraction.parse_status == NewsExtractionParseStatus.OK.value
     assert extraction.output_json["relevant"] is True
     cost = postgres_session.execute(
-        select(NewsExtractionCost).where(
-            NewsExtractionCost.cost_date == date(2026, 4, 29),
-            NewsExtractionCost.pass_name == NewsExtractionPass.TRIAGE.value,
-            NewsExtractionCost.model == "claude-haiku-4-5-20251001",
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == NewsExtractionPass.TRIAGE.value,
+            LLMCostUsage.provider == "anthropic",
+            LLMCostUsage.model == "claude-haiku-4-5-20251001",
         )
     ).scalar_one()
     assert cost.call_count == 1
@@ -181,7 +183,7 @@ def test_persist_triage_response_writes_extraction_article_status_and_cost(
     assert cost.input_tokens_cache_creation == 25
     assert cost.input_tokens_cached == 100
     assert cost.output_tokens == 50
-    assert Decimal(cost.cost_usd) == Decimal("0.001291")
+    assert Decimal(cost.spent_usd) == Decimal("0.001291")
 
 
 def test_run_news_triage_for_article_reserves_calls_client_and_true_ups(
@@ -245,13 +247,15 @@ def test_run_news_triage_for_article_reserves_calls_client_and_true_ups(
     assert refreshed_article is not None
     assert refreshed_article.triage_extraction_id == result.extraction_id
     reservation = postgres_session.execute(
-        select(NewsExtractionCost).where(
-            NewsExtractionCost.cost_date == date(2026, 4, 29),
-            NewsExtractionCost.pass_name == "reserved",
-            NewsExtractionCost.model == "_reservation_",
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == "reserved",
+            LLMCostUsage.provider == "_reservation_",
+            LLMCostUsage.model == "_reservation_",
         )
     ).scalar_one()
-    assert Decimal(reservation.cost_usd) == Decimal("0.000000")
+    assert Decimal(reservation.spent_usd) == Decimal("0.000000")
 
 
 def test_run_news_triage_for_article_skips_and_alerts_without_api_key(
@@ -310,8 +314,9 @@ def test_reserve_llm_cost_hard_cap_creates_alert(postgres_session: Session) -> N
     _ensure_news_triage_tables(postgres_session)
     cost_date = date(2099, 1, 1)
     postgres_session.add(
-        NewsCostCap(
-            effective_date=cost_date,
+        CostCap(
+            bucket="news",
+            effective_from=cost_date,
             daily_warn_usd=Decimal("0.01"),
             daily_hard_usd=Decimal("0.02"),
         )
@@ -342,8 +347,8 @@ def _ensure_news_triage_tables(postgres_session: Session) -> None:
     required_tables = {
         "news_articles",
         "news_extractions",
-        "news_extraction_costs",
-        "news_cost_caps",
+        "llm_cost_usage",
+        "cost_caps",
         "system_alerts",
     }
     missing = [
@@ -354,14 +359,11 @@ def _ensure_news_triage_tables(postgres_session: Session) -> None:
     extraction_columns = {
         column["name"] for column in inspector.get_columns("news_extractions")
     }
-    cost_columns = {
-        column["name"] for column in inspector.get_columns("news_extraction_costs")
-    }
-    if (
-        "input_tokens_cache_creation" not in extraction_columns
-        or "input_tokens_cache_creation" not in cost_columns
-    ):
+    cost_columns = {column["name"] for column in inspector.get_columns("llm_cost_usage")}
+    if "input_tokens_cache_creation" not in extraction_columns:
         pytest.skip("Apply migration 202604290022 before running triage tests.")
+    if "input_tokens_cache_creation" not in cost_columns:
+        pytest.skip("Apply migration 202605040028 before running triage tests.")
 
 
 def _news_source(postgres_session: Session) -> NewsSource:

@@ -9,10 +9,10 @@ from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.db.models import (
+    CostCap,
+    LLMCostUsage,
     NewsArticle,
-    NewsCostCap,
     NewsExtraction,
-    NewsExtractionCost,
     NewsExtractionParseStatus,
     NewsExtractionPass,
     NewsFetchStatus,
@@ -494,10 +494,12 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     assert reference.candidate_delivery_year_normalized == date(2027, 11, 1)
     assert reference.match_status == "pending"
     cost = postgres_session.execute(
-        select(NewsExtractionCost).where(
-            NewsExtractionCost.cost_date == date(2026, 4, 29),
-            NewsExtractionCost.pass_name == NewsExtractionPass.EXTRACTION.value,
-            NewsExtractionCost.model == "claude-opus-4-7",
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == NewsExtractionPass.EXTRACTION.value,
+            LLMCostUsage.provider == "anthropic",
+            LLMCostUsage.model == "claude-opus-4-7",
         )
     ).scalar_one()
     assert cost.call_count == 1
@@ -505,7 +507,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     assert cost.input_tokens_cache_creation == 100
     assert cost.input_tokens_cached == 200
     assert cost.output_tokens == 50
-    assert Decimal(cost.cost_usd) == Decimal("0.020925")
+    assert Decimal(cost.spent_usd) == Decimal("0.020925")
 
 
 def test_run_news_extraction_for_article_reserves_calls_client_and_true_ups(
@@ -557,13 +559,15 @@ def test_run_news_extraction_for_article_reserves_calls_client_and_true_ups(
     assert refreshed_article is not None
     assert refreshed_article.current_extraction_id == result.extraction_id
     reservation = postgres_session.execute(
-        select(NewsExtractionCost).where(
-            NewsExtractionCost.cost_date == date(2026, 4, 29),
-            NewsExtractionCost.pass_name == "reserved",
-            NewsExtractionCost.model == "_reservation_",
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == "reserved",
+            LLMCostUsage.provider == "_reservation_",
+            LLMCostUsage.model == "_reservation_",
         )
     ).scalar_one()
-    assert Decimal(reservation.cost_usd) == Decimal("0.000000")
+    assert Decimal(reservation.spent_usd) == Decimal("0.000000")
 
 
 def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
@@ -663,10 +667,12 @@ def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
     ).scalar_one()
     assert reference.candidate_unit_total == 310
     reextraction_cost = postgres_session.execute(
-        select(NewsExtractionCost).where(
-            NewsExtractionCost.cost_date == date(2026, 4, 29),
-            NewsExtractionCost.pass_name == NewsExtractionPass.REEXTRACTION.value,
-            NewsExtractionCost.model == "claude-opus-4-7",
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == NewsExtractionPass.REEXTRACTION.value,
+            LLMCostUsage.provider == "anthropic",
+            LLMCostUsage.model == "claude-opus-4-7",
         )
     ).scalar_one()
     assert reextraction_cost.call_count == 1
@@ -710,10 +716,12 @@ def test_run_news_extraction_for_article_does_not_reextract_without_trigger(
     assert result.extraction_id is not None
     assert result.reextraction_id is None
     assert postgres_session.execute(
-        select(NewsExtractionCost).where(
-            NewsExtractionCost.cost_date == date(2026, 4, 29),
-            NewsExtractionCost.pass_name == NewsExtractionPass.REEXTRACTION.value,
-            NewsExtractionCost.model == "claude-opus-4-7",
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == NewsExtractionPass.REEXTRACTION.value,
+            LLMCostUsage.provider == "anthropic",
+            LLMCostUsage.model == "claude-opus-4-7",
         )
     ).scalar_one_or_none() is None
 
@@ -969,11 +977,15 @@ def _set_cost_cap(
     hard_usd: Decimal,
 ) -> None:
     cap = postgres_session.execute(
-        select(NewsCostCap).where(NewsCostCap.effective_date == effective_date)
+        select(CostCap).where(
+            CostCap.bucket == "news",
+            CostCap.effective_from == effective_date,
+        )
     ).scalar_one_or_none()
     if cap is None:
-        cap = NewsCostCap(
-            effective_date=effective_date,
+        cap = CostCap(
+            bucket="news",
+            effective_from=effective_date,
             daily_warn_usd=warn_usd,
             daily_hard_usd=hard_usd,
         )
@@ -981,8 +993,6 @@ def _set_cost_cap(
     else:
         cap.daily_warn_usd = warn_usd
         cap.daily_hard_usd = hard_usd
-        cap.override_hard_usd = None
-        cap.override_until = None
     postgres_session.flush()
 
 
@@ -1081,8 +1091,8 @@ def _ensure_news_extraction_tables(postgres_session: Session) -> None:
         "news_articles",
         "news_extractions",
         "news_project_references",
-        "news_extraction_costs",
-        "news_cost_caps",
+        "llm_cost_usage",
+        "cost_caps",
         "news_signal_flag_registry",
         "system_alerts",
     }

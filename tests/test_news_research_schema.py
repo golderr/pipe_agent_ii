@@ -96,10 +96,12 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
     cost_cap = postgres_session.execute(
         text(
             """
-            SELECT effective_date, daily_warn_usd, daily_hard_usd
-            FROM news_cost_caps
-            WHERE effective_date <= CURRENT_DATE
-            ORDER BY effective_date DESC
+            SELECT effective_from, daily_warn_usd, daily_hard_usd
+            FROM cost_caps
+            WHERE bucket = 'news'
+              AND effective_from <= CURRENT_DATE
+              AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
+            ORDER BY effective_from DESC
             LIMIT 1
             """
         )
@@ -181,6 +183,68 @@ def test_news_scrape_active_dedup_index_is_source_scoped(
     assert "COALESCE" not in indexdef
 
 
+def test_agent1_foundation_schema_is_present(postgres_session: Session) -> None:
+    _ensure_news_schema(postgres_session)
+
+    assert _to_regclass(postgres_session, "cost_cap_overrides") is not None
+    assert _to_regclass(postgres_session, "news_article_chunks") is not None
+    assert _to_regclass(postgres_session, "news_reference_auto_applied") is not None
+
+    llm_cost_usage_columns = _relation_columns(postgres_session, "llm_cost_usage")
+    assert {
+        "bucket",
+        "cost_date",
+        "capability",
+        "provider",
+        "model",
+        "call_count",
+        "spent_usd",
+    }.issubset(llm_cost_usage_columns)
+
+    chunk_embedding_type = postgres_session.execute(
+        text(
+            """
+            SELECT udt_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'news_article_chunks'
+              AND column_name = 'embedding'
+            """
+        )
+    ).scalar_one()
+    assert chunk_embedding_type == "vector"
+
+    project_location_index = postgres_session.execute(
+        text(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'projects'
+              AND indexname = 'ix_projects_location_gist'
+            """
+        )
+    ).scalar_one_or_none()
+    assert project_location_index is not None
+    assert "using gist" in project_location_index.lower()
+
+    nullable_source_run_index = postgres_session.execute(
+        text(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'news_reference_auto_applied'
+              AND indexname = 'uq_news_reference_auto_applied_null_source_run_reference_gate'
+            """
+        )
+    ).scalar_one_or_none()
+    assert nullable_source_run_index is not None
+    assert "unique" in nullable_source_run_index.lower()
+    assert "(article_id, reference_index, gate)" in nullable_source_run_index
+    assert "source_run_id IS NULL" in nullable_source_run_index
+
+
 def _ensure_news_schema(postgres_session: Session) -> None:
     inspector = inspect(postgres_session.bind)
     if not inspector.has_table("news_sources"):
@@ -200,14 +264,23 @@ def _ensure_news_schema(postgres_session: Session) -> None:
     extraction_columns = {
         column["name"] for column in inspector.get_columns("news_extractions")
     }
-    cost_columns = {
-        column["name"] for column in inspector.get_columns("news_extraction_costs")
-    }
-    if (
-        "input_tokens_cache_creation" not in extraction_columns
-        or "input_tokens_cache_creation" not in cost_columns
-    ):
+    agent1_tables = (
+        "cost_caps",
+        "cost_cap_overrides",
+        "llm_cost_usage",
+        "news_article_chunks",
+        "news_reference_auto_applied",
+    )
+    missing_agent1_tables = [
+        table_name for table_name in agent1_tables if not inspector.has_table(table_name)
+    ]
+    if missing_agent1_tables:
+        pytest.skip("Apply migration 202605040028 before running news schema tests.")
+    cost_columns = {column["name"] for column in inspector.get_columns("llm_cost_usage")}
+    if "input_tokens_cache_creation" not in extraction_columns:
         pytest.skip("Apply migration 202604290022 before running news schema tests.")
+    if "input_tokens_cache_creation" not in cost_columns:
+        pytest.skip("Apply migration 202605040028 before running news schema tests.")
     missing_views = [
         view_name
         for view_name in (
