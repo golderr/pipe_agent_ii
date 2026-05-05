@@ -14,7 +14,7 @@ from sqlalchemy import delete, func, select
 from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest
 from tcg_pipeline.collectors.factory import build_collector
 from tcg_pipeline.db.collect import persist_collected_records
-from tcg_pipeline.db.connection import get_session_factory
+from tcg_pipeline.db.connection import get_session_factory, redact_database_url
 from tcg_pipeline.db.models import (
     DeveloperRegistry,
     DismissReason,
@@ -129,15 +129,36 @@ def news_ab_extract(
     ] = None,
 ) -> None:
     """Run the AGENT.1 default-extraction A/B harness."""
-    from tcg_pipeline.news.ab_harness import run_extraction_ab_harness
+    from tcg_pipeline.news.ab_harness import (
+        load_article_fixtures,
+        parse_candidate_specs,
+        run_extraction_ab_harness,
+    )
 
     try:
+        settings = get_settings()
+        candidate_specs = parse_candidate_specs(candidates)
+        fixtures = load_article_fixtures(fixture)
+        article_count = len(fixtures[:limit]) if limit is not None else len(fixtures)
+        database_label = (
+            redact_database_url(settings.database_url)
+            if settings.database_url
+            else "missing DATABASE_URL"
+        )
+        typer.echo(
+            "Running A/B harness against "
+            f"{database_label} | "
+            f"articles={article_count} | "
+            f"candidates={len(candidate_specs)} | "
+            f"planned LLM calls={article_count * len(candidate_specs)}"
+        )
         report = run_extraction_ab_harness(
             fixture_path=fixture,
             candidates=candidates,
             source_slug=source_slug,
             output_path=output,
             limit=limit,
+            settings=settings,
         )
     except (RuntimeError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)

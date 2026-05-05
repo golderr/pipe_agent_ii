@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from tcg_pipeline.db.connection import get_session_factory
+from tcg_pipeline.db.connection import get_session_factory, redact_database_url
 from tcg_pipeline.db.models import (
     NewsArticle,
     NewsExtraction,
@@ -30,9 +31,11 @@ from tcg_pipeline.db.models import (
 )
 from tcg_pipeline.matching.news_matcher import match_news_reference
 from tcg_pipeline.news.extraction import (
+    AnthropicExtractionClient,
     ExtractionLLMClient,
     ExtractionLLMResponse,
     NewsExtractionRunResult,
+    OpenAIExtractionClient,
     _reference_from_payload,
     build_extraction_client,
     decide_pass3a_reextraction,
@@ -41,6 +44,7 @@ from tcg_pipeline.news.extraction import (
 from tcg_pipeline.news.integration import NewsIntegrationResult, run_news_integration_for_article
 from tcg_pipeline.news.llm import (
     calculate_llm_cost_usd,
+    create_anthropic_message,
     normalize_llm_provider,
     pricing_assumption_for_model,
     pricing_for_model,
@@ -56,6 +60,24 @@ DEFAULT_AB_CANDIDATES = (
     "openai:gpt-5.4"
 )
 DEFAULT_AB_FIXTURE = Path("tests/fixtures/news/urbanize_la/pass1_validation_articles.json")
+PREFLIGHT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["ok"],
+    "properties": {"ok": {"type": "boolean"}},
+}
+HARNESS_COST_ACCOUNTING_NOTE = (
+    "The A/B harness calls provider clients directly and does not write "
+    "reserve_llm_cost/record_llm_cost rows. Use this report's measured usage "
+    "and cost fields as the audit trail for harness spend."
+)
+HARNESS_CACHE_COMPARISON_NOTE = (
+    "Provider cache semantics are not fully apples-to-apples. Anthropic prompt "
+    "cache may reduce articles after the first candidate call; OpenAI-compatible "
+    "providers report cached tokens differently. The slim extract_v2 prompt keeps "
+    "the absolute effect small, but close model-cost results should be interpreted "
+    "with this caveat."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +156,7 @@ def run_extraction_ab_harness(
     settings: Settings | None = None,
     session_factory: sessionmaker[Session] | None = None,
     now: datetime | None = None,
+    run_preflight: bool = True,
 ) -> dict[str, Any]:
     resolved_settings = settings or get_settings()
     resolved_session_factory = session_factory or get_session_factory()
@@ -150,6 +173,11 @@ def run_extraction_ab_harness(
         candidate.key: _build_candidate_client(resolved_settings, candidate)
         for candidate in candidate_specs
     }
+    preflight_results = (
+        preflight_candidate_clients(clients, candidate_specs)
+        if run_preflight
+        else _skipped_preflight_results(candidate_specs)
+    )
 
     candidate_results: dict[str, list[dict[str, Any]]] = {
         candidate.key: [] for candidate in candidate_specs
@@ -197,7 +225,14 @@ def run_extraction_ab_harness(
         "generated_at": started_at.isoformat(),
         "fixture_path": str(fixture_path),
         "source_slug": source_slug,
+        "database_url_redacted": _redacted_database_url(resolved_settings),
         "prompt_id": _first_prompt_id(candidate_results),
+        "preflight_results": preflight_results,
+        "cost_accounting": {
+            "llm_cost_usage_written": False,
+            "note": HARNESS_COST_ACCOUNTING_NOTE,
+            "cache_comparison_note": HARNESS_CACHE_COMPARISON_NOTE,
+        },
         "candidate_summaries": summarize_candidate_results(candidate_results),
         "article_results": candidate_results,
         "grading_contract": {
@@ -218,6 +253,30 @@ def run_extraction_ab_harness(
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     return report
+
+
+def preflight_candidate_clients(
+    clients: dict[str, ExtractionLLMClient],
+    candidates: tuple[ABExtractionCandidate, ...],
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for candidate in candidates:
+        client = clients[candidate.key]
+        started_at = time.perf_counter()
+        try:
+            _preflight_candidate_client(client)
+        except Exception as exc:  # noqa: BLE001 - surface provider-specific failures clearly.
+            raise RuntimeError(f"A/B preflight failed for {candidate.key}: {exc}") from exc
+        results.append(
+            {
+                "candidate": candidate.key,
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "status": "ok",
+                "latency_ms": int((time.perf_counter() - started_at) * 1000),
+            }
+        )
+    return results
 
 
 def summarize_candidate_results(
@@ -698,6 +757,52 @@ def _build_candidate_client(settings: Settings, candidate: ABExtractionCandidate
     return build_extraction_client(candidate_settings)
 
 
+def _preflight_candidate_client(client: ExtractionLLMClient) -> None:
+    if isinstance(client, AnthropicExtractionClient):
+        create_anthropic_message(
+            client._client,
+            model=client.model,
+            max_tokens=8,
+            temperature=0,
+            system="Reply with the single word ok.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "ping"}],
+                }
+            ],
+        )
+        return
+    if isinstance(client, OpenAIExtractionClient):
+        client._client.create_json_response(
+            system_text="Return JSON that matches the schema.",
+            user_text='Return {"ok": true}.',
+            schema=PREFLIGHT_SCHEMA,
+            schema_name="ab_harness_preflight",
+        )
+        return
+    custom_preflight = getattr(client, "preflight", None)
+    if callable(custom_preflight):
+        custom_preflight()
+        return
+    raise RuntimeError(f"Unsupported A/B harness preflight client: {type(client).__name__}")
+
+
+def _skipped_preflight_results(
+    candidates: tuple[ABExtractionCandidate, ...],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "candidate": candidate.key,
+            "provider": candidate.provider,
+            "model": candidate.model,
+            "status": "skipped",
+            "latency_ms": 0,
+        }
+        for candidate in candidates
+    ]
+
+
 def _validate_candidate_credentials(
     settings: Settings,
     candidates: tuple[ABExtractionCandidate, ...],
@@ -709,6 +814,10 @@ def _validate_candidate_credentials(
     if missing:
         deduped = ", ".join(sorted(set(missing)))
         raise RuntimeError(f"Missing API key for A/B candidate provider(s): {deduped}.")
+
+
+def _redacted_database_url(settings: Settings) -> str | None:
+    return redact_database_url(settings.database_url) if settings.database_url else None
 
 
 def _load_news_source(session: Session, source_slug: str) -> NewsSource:
@@ -760,6 +869,8 @@ def _error_article_result(
         "prompt_id": prompt.prompt_id,
         "prompt_version": prompt.prompt_version,
         "prompt_hash": prompt.prompt_hash,
+        # Harness-only synthetic status. It is intentionally not a
+        # NewsExtractionParseStatus value because no provider response was parsed.
         "parse_status": "api_error",
         "parse_error_text": None,
         "unknown_signal_flags": [],

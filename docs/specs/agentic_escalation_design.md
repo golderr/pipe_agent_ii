@@ -374,6 +374,8 @@ Goal: enable model swap with measured quality validation, AND remove the dominan
 - Runs all three models against the same articles with the new (slim) cached system prompt — no glossary, just template + signal flags.
 - Uses active `extract_v2` through `render_extraction_prompt`, then parses with the production extraction parser.
 - Runs deterministic matcher projections directly, and projects review-item counts by invoking the existing news integration code inside a rollback-only transaction. The harness report is therefore non-mutating: temporary `news_articles`, `news_extractions`, `news_project_references`, `source_runs`, `evidence`, and `review_items` rows are rolled back after each projection.
+- Before the first article LLM call, the CLI prints the redacted `DATABASE_URL`, fixture article count, candidate count, and planned LLM call count. The harness then runs a lightweight provider/model preflight per candidate; any missing key, unreachable model, or Gateway routing error aborts before the paid article loop.
+- Harness LLM spend intentionally bypasses `reserve_llm_cost` / `record_llm_cost` and therefore does not write `llm_cost_usage` rows. The JSON report records this explicitly under `cost_accounting` and is the audit trail for harness spend.
 - Per-model metrics captured for each article:
   - **Parse outcomes:** parse_status distribution (`ok` / `parse_error` / `schema_invalid` / `refused` / `truncated`).
   - **Reference counts:** how many `project_references` does each model emit per article. Outliers in either direction indicate over- or under-extraction.
@@ -1252,6 +1254,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Harness uses active `extract_v2`, production parser/schema validation, production matcher, and rollback-only integration projection for review-item counts.
   - Report output includes parse status counts, reference counts, matcher status/match-type counts, agent-trigger proxy reasons, projected review-item counts, measured extraction cost, latency, token usage, pricing assumptions, and blank researcher spot-grade fields.
   - The integration projection intentionally rolls back temporary article/extraction/reference/evidence/review/source-run rows, so the harness can run against staging or production-like databases without polluting operational data.
+
+- **2026-05-05 (revision 16) — A/B harness live-run guardrails.**
+  - Added a DB-backed rollback invariant test that snapshots `news_articles`, `news_extractions`, `news_project_references`, `evidence`, `review_items`, and `source_runs` before and after a stubbed harness run.
+  - CLI startup prints the redacted DB target plus fixture article count, candidate count, and planned LLM call count before any provider call.
+  - Harness preflights each provider/model before the article loop so wrong model IDs, missing keys, or Gateway configuration failures do not turn into repeated per-article `api_error` rows.
+  - Report metadata now states that harness spend bypasses cost-cap accounting and does not write `llm_cost_usage`; provider cache semantics are also called out as not perfectly apples-to-apples.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
