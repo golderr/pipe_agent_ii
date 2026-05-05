@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tcg_pipeline.embedding_config import DEFAULT_NEWS_EMBEDDING_MODEL, NEWS_EMBEDDING_DIMENSIONS
+
 
 def normalize_database_url(database_url: str) -> str:
     if database_url.startswith("postgresql://"):
@@ -65,6 +67,12 @@ class Settings(BaseSettings):
     news_extract_provider: str = "anthropic"
     news_extract_max_tokens: int = Field(default=5000, ge=1)
     news_llm_timeout_seconds: float = Field(default=90.0, ge=1)
+    news_embedding_provider: str = "openai"
+    news_embedding_model: str = DEFAULT_NEWS_EMBEDDING_MODEL
+    news_embedding_dimensions: int = Field(default=NEWS_EMBEDDING_DIMENSIONS, ge=1)
+    news_embedding_batch_size: int = Field(default=32, ge=1)
+    news_embedding_max_chars: int = Field(default=12_000, ge=500)
+    news_embedding_timeout_seconds: float = Field(default=60.0, ge=1)
     agent_enabled_for_news: bool = True
     agent_enabled_for_permits: bool = True
     news_use_legacy_pass3: bool = False

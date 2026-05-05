@@ -5,6 +5,7 @@ import uuid
 from datetime import date, datetime
 
 from geoalchemy2 import Geography
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -30,7 +31,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy.types import UserDefinedType
+
+from tcg_pipeline.embedding_config import NEWS_EMBEDDING_DIMENSIONS
 
 
 def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
@@ -309,17 +311,7 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=naming_convention)
 
 
-class Vector(UserDefinedType):
-    cache_ok = True
-
-    def __init__(self, dimensions: int) -> None:
-        self.dimensions = dimensions
-
-    def get_col_spec(self, **_: object) -> str:
-        return f"vector({self.dimensions})"
-
-
-NEWS_ARTICLE_CHUNK_EMBEDDING_DIMENSIONS = 1536
+NEWS_ARTICLE_CHUNK_EMBEDDING_DIMENSIONS = NEWS_EMBEDDING_DIMENSIONS
 
 
 class TimestampMixin:

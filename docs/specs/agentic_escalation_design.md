@@ -781,6 +781,11 @@ Legacy reextractions (Q16) get synthetic rows in `news_extractions` per today's 
 
 **Article embedding pipeline (AGENT.1 build, AGENT.2 use).**
 
+**Implementation status (2026-05-05).** The AGENT.1 indexing code is implemented in
+`src/tcg_pipeline/news/embeddings.py`, exposed by `tcg-pipeline news index-articles`, and
+wired to the `news_backfill_chunk` worker kind. It remains pending database smoke because the
+AGENT.1 migration has not been applied to production.
+
 **Per-reference indexing contract (concrete, revised 2026-05-04 — actual decision-type names verified against [db/review_workflow.py:81-85](../../src/tcg_pipeline/db/review_workflow.py#L81)).**
 
 A reference enters the embedding index iff **any** of the following gates fires:
@@ -811,10 +816,10 @@ Pipeline:
 - Triggered on auto-applied confirmation (gate 2) when integration writes the `news_reference_auto_applied` audit row.
 - Triggered on re-extraction to supersede prior chunks.
 - Chunking strategy: per-reference chunks (the body offsets cited in `passage_excerpts`) plus one whole-article chunk for general retrieval (only indexed if the article has at least one accepted reference).
-- Embedding model: TBD (AGENT.1 sub-decision; cheap option: OpenAI `text-embedding-3-small`, $0.02/M tokens; alternatives include Voyage, Cohere).
+- Embedding model: direct OpenAI `text-embedding-3-small` at 1536 dimensions for AGENT.1. Cost accounting prices input tokens at `$0.02 / 1M`; alternatives such as Voyage/Cohere are deferred model-registry options and require a vector-dimension migration/sweep.
 - Re-embed on embedding-model upgrade or on prompt-version bumps that materially change downstream agent reasoning (rare).
 
-**Backfill.** AGENT.1 populates the index from existing `news_project_references` whose review items are already committed-accept. The current production set is small (D.6 staging smoke = 5 articles, 9 references; expected D.B 8-week LA backfill = ~150 articles, ~300-500 references). Backfill is a one-shot script.
+**Backfill.** AGENT.1 populates the index from existing `news_project_references` whose review items are already committed-accept. The current production set is small (D.6 staging smoke = 5 articles, 9 references; expected D.B 8-week LA backfill = ~150 articles, ~300-500 references). Backfill runs through `tcg-pipeline news index-articles` (plan-only by default, `--apply` to spend/write) or the durable `news_backfill_chunk` worker job.
 
 **PostGIS GIST index (Stage 1).**
 - `CREATE INDEX ix_projects_location_gist ON projects USING GIST (location);`
@@ -1356,6 +1361,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Researcher decision: keep Opus 4.7 as the default extraction model.
   - No runtime config/code change is required because Opus 4.7 was already the production default.
   - AGENT.1's remaining implementation blocker is retrieval: choose the embedding model and build the article chunk/indexing pipeline.
+
+- **2026-05-05 (revision 22) — AGENT.1 article embedding/indexing path implemented.**
+  - Selected direct OpenAI `text-embedding-3-small` for AGENT.1 article embeddings, matching the `vector(1536)` schema.
+  - Added `news/embeddings.py`: accepted-reference gate queries, per-reference/whole-article chunk building, OpenAI embeddings client, active-chunk supersession, and `llm_cost_usage` reservation/true-up.
+  - Added `tcg-pipeline news index-articles` in dry-run/apply form and wired the `news_backfill_chunk` worker task to the same implementation.
+  - Remaining validation: apply the AGENT.1 migration to a dev/staging database and smoke `index-articles --source-slug urbanize_la` before AGENT.2 retrieval tools consume the index.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

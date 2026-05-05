@@ -219,7 +219,121 @@ def run_news_reextract_task(scrape_job_id: str) -> None:
 
 
 def run_news_backfill_chunk_task(scrape_job_id: str) -> None:
-    _run_unimplemented_news_job(uuid.UUID(scrape_job_id), ScrapeJobKind.NEWS_BACKFILL_CHUNK.value)
+    run_news_backfill_chunk_job(uuid.UUID(scrape_job_id))
+
+
+def run_news_backfill_chunk_job(
+    job_id: uuid.UUID,
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+    settings: Settings | None = None,
+) -> None:
+    resolved_session_factory = session_factory or get_session_factory()
+    now = datetime.now(UTC)
+    try:
+        with resolved_session_factory() as session:
+            job = _load_news_job(
+                session,
+                job_id=job_id,
+                expected_kind=ScrapeJobKind.NEWS_BACKFILL_CHUNK.value,
+            )
+            if job is None:
+                return
+            payload = job.target_payload or {}
+            source_slug = payload.get("source_slug")
+            if source_slug is not None and not isinstance(source_slug, str):
+                raise RuntimeError("News chunk backfill payload has invalid 'source_slug'.")
+            article_id = _payload_uuid(payload, "article_id", required=False)
+            limit = _payload_int(payload, "limit", required=False)
+            apply = _payload_bool(payload, "apply", default=True)
+            job.status = ScrapeJobStatus.RUNNING
+            job.started_at = now
+            job.progress = {
+                "message": "News chunk backfill started.",
+                "source_slug": source_slug,
+                "article_id": str(article_id) if article_id is not None else None,
+                "limit": limit,
+                "apply": apply,
+            }
+            session.commit()
+    except Exception as exc:
+        _record_news_backfill_chunk_failure(
+            resolved_session_factory,
+            job_id=job_id,
+            error=exc,
+        )
+        raise
+
+    try:
+        from tcg_pipeline.news.embeddings import run_news_article_chunk_indexing
+
+        result = run_news_article_chunk_indexing(
+            session_factory=resolved_session_factory,
+            settings=settings,
+            source_slug=source_slug,
+            article_id=article_id,
+            limit=limit,
+            apply=apply,
+            now=now,
+        )
+    except Exception as exc:
+        _record_news_backfill_chunk_failure(
+            resolved_session_factory,
+            job_id=job_id,
+            error=exc,
+        )
+        raise
+
+    with resolved_session_factory() as session:
+        job = session.get(ScrapeJob, job_id)
+        if job is None or job.status != ScrapeJobStatus.RUNNING:
+            return
+        job.status = ScrapeJobStatus.COMPLETED
+        job.completed_at = datetime.now(UTC)
+        job.error_text = None
+        job.progress = {
+            "message": "News chunk backfill completed.",
+            "apply": result.apply,
+            "gated_reference_count": result.gated_reference_count,
+            "planned_chunk_count": result.planned_chunk_count,
+            "planned_reference_chunk_count": result.planned_reference_chunk_count,
+            "planned_whole_article_chunk_count": result.planned_whole_article_chunk_count,
+            "indexed_chunk_count": result.indexed_chunk_count,
+            "superseded_chunk_count": result.superseded_chunk_count,
+            "embedding_call_count": result.embedding_call_count,
+            "input_tokens": result.input_tokens,
+            "cost_usd": str(result.cost_usd),
+            "skipped_reason": result.skipped_reason,
+        }
+        session.commit()
+
+
+def _record_news_backfill_chunk_failure(
+    session_factory: sessionmaker[Session],
+    *,
+    job_id: uuid.UUID,
+    error: Exception,
+) -> None:
+    with session_factory() as session:
+        job = session.get(ScrapeJob, job_id)
+        if job is None or job.status in {ScrapeJobStatus.COMPLETED, ScrapeJobStatus.CANCELLED}:
+            return
+        job.status = ScrapeJobStatus.FAILED
+        job.completed_at = datetime.now(UTC)
+        job.error_text = str(error)
+        job.progress = {
+            "message": "News chunk backfill failed.",
+            "error": str(error),
+        }
+        raise_system_alert(
+            session,
+            alert_key="news_job_failed",
+            severity="warning",
+            message="News job failed.",
+            scope={"job_id": str(job_id), "kind": ScrapeJobKind.NEWS_BACKFILL_CHUNK.value},
+            detail={"error": str(error)},
+        )
+        session.commit()
 
 
 def scheduler_tick(
@@ -863,6 +977,35 @@ def _payload_uuid(payload: dict, key: str, *, required: bool = True) -> uuid.UUI
         return uuid.UUID(value)
     except ValueError as exc:
         raise RuntimeError(f"News scrape job payload has invalid '{key}'.") from exc
+
+
+def _payload_int(payload: dict, key: str, *, required: bool = True) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        if required:
+            raise RuntimeError(f"News scrape job payload is missing '{key}'.")
+        return None
+    if isinstance(value, bool):
+        raise RuntimeError(f"News scrape job payload has invalid '{key}'.")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"News scrape job payload has invalid '{key}'.") from exc
+
+
+def _payload_bool(payload: dict, key: str, *, default: bool) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    raise RuntimeError(f"News scrape job payload has invalid '{key}'.")
 
 
 def _payload_datetime(payload: dict, key: str, *, required: bool = True) -> datetime | None:

@@ -177,6 +177,58 @@ def news_ab_extract(
         )
 
 
+@news_app.command("index-articles")
+def news_index_articles(
+    source_slug: Annotated[
+        str | None,
+        typer.Option(help="Optional news source slug filter, e.g. urbanize_la."),
+    ] = None,
+    article_id: Annotated[
+        uuid.UUID | None,
+        typer.Option(help="Optional single news article UUID to index."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(min=1, help="Maximum accepted references to plan or index."),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Call the embedding API and write news_article_chunks. Default is plan-only.",
+        ),
+    ] = False,
+) -> None:
+    """Plan or run AGENT.1 accepted-reference article chunk indexing."""
+    from tcg_pipeline.news.embeddings import run_news_article_chunk_indexing
+
+    try:
+        result = run_news_article_chunk_indexing(
+            source_slug=source_slug,
+            article_id=article_id,
+            limit=limit,
+            apply=apply,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Apply mode: {result.apply}")
+    typer.echo(f"Gated references: {result.gated_reference_count}")
+    typer.echo(f"Planned chunks: {result.planned_chunk_count}")
+    typer.echo(f"  Reference chunks: {result.planned_reference_chunk_count}")
+    typer.echo(f"  Whole-article chunks: {result.planned_whole_article_chunk_count}")
+    if result.apply:
+        typer.echo(f"Indexed chunks: {result.indexed_chunk_count}")
+        typer.echo(f"Superseded active chunks: {result.superseded_chunk_count}")
+        typer.echo(f"Embedding calls: {result.embedding_call_count}")
+        typer.echo(f"Embedding input tokens: {result.input_tokens}")
+        typer.echo(f"Embedding cost: ${result.cost_usd}")
+    if result.skipped_reason:
+        typer.echo(f"Skipped reason: {result.skipped_reason}", err=True)
+        raise typer.Exit(1)
+
+
 @app.command()
 def preview_pipedream(
     workbook_path: Path,

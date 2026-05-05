@@ -19,6 +19,7 @@ dependencies = [
   "openpyxl>=3.1,<4.0",
   "pdfplumber>=0.11,<1.0",
   "playwright>=1.45,<2.0",
+  "pgvector>=0.3,<0.5",
   "psycopg[binary]>=3.2,<4.0",
   "pyahocorasick>=2.0,<3.0",
   "pydantic>=2.11,<3.0",
