@@ -89,6 +89,15 @@ FIELD_TO_REFERENCE_FIELD = {
     project_field: reference_field
     for reference_field, project_field in REFERENCE_FIELD_TO_PROJECT_FIELD.items()
 }
+LOW_CONFIDENCE_REFERENCE_FIELDS = {
+    "pipeline_status": "candidate_status_signal",
+    "total_units": "candidate_unit_total",
+    "affordable_units": "candidate_unit_affordable",
+    "market_rate_units": "candidate_unit_market_rate",
+    "developer": "candidate_developer",
+    "date_delivery": "candidate_delivery_year_normalized",
+    "candidate_address": "candidate_address",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,9 +359,9 @@ def _run_news_agents_for_first_pass(
     if first_pass.extraction_id is None:
         return {}
     agent_pairs = [
-        (reference, match, trigger)
+        (reference, match, triggers)
         for reference, match in zip(first_pass.references, first_pass.matches, strict=True)
-        if (trigger := _agent_trigger_for_match(match)) is not None
+        if (triggers := _agent_triggers_for_reference(reference=reference, match=match))
     ]
     if not agent_pairs:
         return {}
@@ -366,7 +375,7 @@ def _run_news_agents_for_first_pass(
         client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
 
     decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
-    for reference, match, trigger in agent_pairs:
+    for reference, match, triggers in agent_pairs:
         with session_factory() as session:
             article = session.get(NewsArticle, first_pass.article_id)
             extraction = session.get(NewsExtraction, first_pass.extraction_id)
@@ -390,7 +399,7 @@ def _run_news_agents_for_first_pass(
                 payload=payload,
             ),
             matcher_results=[matcher_payload],
-            trigger_reasons=[trigger],
+            trigger_reasons=list(triggers),
             profile=NEWS_AGENT_PROFILE,
             client=client,
             settings=settings,
@@ -401,15 +410,32 @@ def _run_news_agents_for_first_pass(
     return decisions
 
 
-def _agent_trigger_for_match(match: NewsMatchResult) -> AgentTrigger | None:
+def _agent_triggers_for_reference(
+    *,
+    reference: NewsProjectReference,
+    match: NewsMatchResult,
+) -> tuple[AgentTrigger, ...]:
+    triggers: list[AgentTrigger] = []
     if match.status == NewsMatchStatus.NEW_CANDIDATE:
-        return AgentTrigger.NEW_CANDIDATE
+        triggers.append(AgentTrigger.NEW_CANDIDATE)
     if (
         match.status == NewsMatchStatus.POSSIBLE
         and len(match.candidate_project_ids) > 0
     ):
-        return AgentTrigger.POSSIBLE_MULTI_CANDIDATE
-    return None
+        triggers.append(AgentTrigger.POSSIBLE_MULTI_CANDIDATE)
+    if _low_confidence_populated_fields(reference):
+        triggers.append(AgentTrigger.LOW_CONFIDENCE)
+    return tuple(triggers)
+
+
+def _low_confidence_populated_fields(reference: NewsProjectReference) -> list[str]:
+    if reference.candidate_confidence != "low":
+        return []
+    fields: list[str] = []
+    for field_name, reference_field in LOW_CONFIDENCE_REFERENCE_FIELDS.items():
+        if _has_value(serialize_json(getattr(reference, reference_field))):
+            fields.append(field_name)
+    return fields
 
 
 def _agent_intake_payload(
@@ -437,6 +463,7 @@ def _agent_intake_payload(
         },
         "reference": _agent_reference_payload(article=article, reference=reference),
         "matcher": _agent_matcher_payload(reference=reference, match=match),
+        "low_confidence_fields": _low_confidence_populated_fields(reference),
         "force_project_id": str(force_project_id) if force_project_id is not None else None,
         "body_access": "Use get_article_body(article_id) if full article text is needed.",
     }
@@ -814,7 +841,10 @@ def _agent_promoted_match(
     match: NewsMatchResult,
     agent_decision: _NewsAgentDecision | None,
 ) -> NewsMatchResult | None:
-    if match.status != NewsMatchStatus.NEW_CANDIDATE or agent_decision is None:
+    if (
+        match.status not in {NewsMatchStatus.NEW_CANDIDATE, NewsMatchStatus.DISCARDED}
+        or agent_decision is None
+    ):
         return None
     result = agent_decision.result
     if result.outcome != AgentRunOutcome.COMPLETED.value:
@@ -839,7 +869,7 @@ def _agent_promoted_match(
         project_id=project_id,
         candidate_project_ids=[project_id],
         reason=(
-            "Agent promoted deterministic new_candidate to an existing project "
+            f"Agent promoted deterministic {match.status.value} to an existing project "
             f"after tool review; agent_run_id={result.agent_run_id}."
         ),
         diagnostics={"agent_run_id": str(result.agent_run_id)},

@@ -1470,6 +1470,11 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - First live smoke completed on 2026-05-06: Rosa's Place possible-match candidate was confirmed to the matcher-provided project ID after `get_project_state`, with no fallback review item.
   - The Anthropic 400 visible during that local paste-link smoke was the known extraction temperature-deprecation retry path, not an agent-loop 400; future agent-turn 400s should still be investigated with provider response bodies.
 
+- **2026-05-06 (revision 32) — Low-confidence trigger routing.**
+  - References with `candidate_confidence='low'` and at least one populated load-bearing field now route through `news_v1` using the `low_confidence` trigger.
+  - If `low_confidence` appears with `new_candidate` or `possible_multi_candidate`, the existing trigger's verdict contract governs and low-confidence fields are reasoning context. If `low_confidence` is the only trigger, allowed verdicts are `no_change`, `escalated`, or `promote_existing_project` for a deterministic low-confidence discard that should match an existing project.
+  - Deterministic fallback still stands on no-change, escalation, budget rejection, timeout, killed-by-switch, invalid confidence, or invalid promotion project ID. Status-change review items produced from low-confidence confirmed evidence link back through `agent_run_review_items`.
+
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
   - Senior review identified that changing `extract_v1` in place would make pre-cutover and post-cutover `news_extractions.prompt_id = 'extract_v1'` rows mean two different prompts. Revision 14 resolves that by restoring `extract_v1` as legacy and promoting the slim prompt as `extract_v2`.

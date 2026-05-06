@@ -28,6 +28,18 @@ For new_candidate triggers:
 For possible_multi_candidate triggers:
 - Do not pick a project outside matcher.candidate_project_ids.
 
+For low_confidence triggers:
+- Treat low_confidence_fields as the fields whose extraction confidence needs review.
+- If low_confidence appears with new_candidate or possible_multi_candidate, use that trigger's
+  verdict shapes and factor the low-confidence fields into your reasoning.
+- If low_confidence is the only trigger, use exactly one of:
+  - {"decision": "no_change"} when the deterministic confirmed match/evidence can proceed.
+  - {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
+    only when a low-confidence deterministic discard should match an existing project.
+  - {"decision": "escalated", "reason": "..."} when a human should decide.
+- Do not invent or rewrite extracted field values. Use article text and tools only to assess
+  whether the observed source supports the existing extracted facts.
+
 Final output must be exactly one JSON object. Do not wrap it in Markdown fences. Do not
 include prose before or after the JSON object. The JSON object must be structured,
 concise, and source-anchored:
@@ -48,4 +60,10 @@ For a possible_multi_candidate trigger, use exactly one of these verdict decisio
 - {"decision": "confirm_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
   only when the project_id is one of matcher.candidate_project_ids and tool evidence
   supports choosing that candidate.
+- {"decision": "escalated", "reason": "..."} when a human should decide.
+
+For a low_confidence-only trigger, use exactly one of these verdict decisions:
+- {"decision": "no_change"} when the deterministic result should proceed.
+- {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
+  only when tool evidence supports matching the low-confidence reference to an existing project.
 - {"decision": "escalated", "reason": "..."} when a human should decide.

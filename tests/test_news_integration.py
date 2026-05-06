@@ -25,6 +25,7 @@ from tcg_pipeline.db.models import (
     NewsSource,
     NewsTriageStatus,
     PipelineStatus,
+    Priority,
     Project,
     ProjectIdentifier,
     ReviewItem,
@@ -914,6 +915,210 @@ def test_news_possible_match_requires_live_llm_opt_in_without_injected_client(
         )
 
 
+def test_news_low_confidence_confirmed_agent_links_status_review_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2700 Low Confidence Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Low Confidence Tower",
+        developer="Atlas Development",
+        total_units=80,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Low Confidence Tower",
+                candidate_address="2700 Low Confidence Boulevard, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_unit_total=120,
+                candidate_confidence="low",
+                passage_excerpts=[
+                    {
+                        "field": "candidate_unit_total",
+                        "value": 120,
+                        "passage": "Low Confidence Tower would include 120 apartments.",
+                    }
+                ],
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient({"decision": "no_change"})
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.status_change_review_items >= 1
+    assert client.requests
+    request = client.requests[0]
+    assert request.trigger_reasons == ("low_confidence",)
+    assert request.intake.payload["low_confidence_fields"] == [
+        "total_units",
+        "developer",
+        "candidate_address",
+    ]
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+            ReviewItem.field_name == "total_units",
+        )
+    ).scalar_one()
+    assert review_item.priority == Priority.LOW.value
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["low_confidence"]
+    link = postgres_session.get(
+        AgentRunReviewItem,
+        (agent_run.id, review_item.id),
+    )
+    assert link is not None
+
+
+def test_news_low_confidence_requires_live_llm_opt_in_without_injected_client(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2800 Low Guard Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Low Guard Tower",
+        developer="Atlas Development",
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, _reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Low Guard Tower",
+                candidate_address="2800 Low Guard Boulevard, Los Angeles, CA 90012",
+                candidate_developer="Atlas Development",
+                candidate_confidence="low",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+
+    with pytest.raises(RuntimeError, match="AGENT_ALLOW_LIVE_LLM=true"):
+        run_news_integration_for_article(
+            article.id,
+            source_run_id=source_run.id,
+            session_factory=_task_session_factory(postgres_session),
+            settings=Settings(
+                agent_enabled_for_news=True,
+                agent_allow_live_llm=False,
+                news_use_legacy_pass3=False,
+            ),
+            now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        )
+
+
+def test_news_low_confidence_agent_can_promote_discarded_reference(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    project = _project(
+        source,
+        canonical_address=_canonical("2900 Agent Recovery Boulevard, Los Angeles, CA 90012"),
+        project_name="Agent Recovery Tower",
+        developer="Recovery Homes",
+        total_units=64,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Low Confidence Standalone",
+                candidate_developer="Standalone Homes",
+                candidate_unit_total=64,
+                candidate_confidence="low",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient(
+        {
+            "decision": "promote_existing_project",
+            "project_id": str(project.id),
+            "confidence": 0.9,
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.discarded == 0
+    assert client.requests[0].trigger_reasons == ("low_confidence",)
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
+    assert refreshed_reference.matched_project_id == project.id
+    assert refreshed_reference.match_candidates["match_type"] == (
+        "agent_promoted_existing_project"
+    )
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.project_id == project.id
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["low_confidence"]
+
+
 def test_news_new_candidate_accept_links_orphan_evidence(
     postgres_session: Session,
 ) -> None:
@@ -1470,6 +1675,7 @@ def _reference_payload(
     candidate_identifiers: dict[str, list[str]] | None = None,
     candidate_product_type: str | None = None,
     candidate_age_restriction: str | None = None,
+    candidate_confidence: str = "high",
     passage_excerpts: list[dict] | None = None,
     registry_project_id: str | None = None,
 ) -> dict:
@@ -1491,7 +1697,7 @@ def _reference_payload(
         "candidate_neighborhood": None,
         "candidate_lat": None,
         "candidate_lng": None,
-        "candidate_confidence": "high",
+        "candidate_confidence": candidate_confidence,
         "passage_excerpts": passage_excerpts or [],
         "registry_developer_id": None,
         "registry_project_id": registry_project_id,
