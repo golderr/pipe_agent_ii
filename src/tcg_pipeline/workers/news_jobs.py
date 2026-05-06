@@ -1104,7 +1104,7 @@ def mark_news_job_failed(
     job.progress = {"message": "News job failed."}
     if job.target_payload and isinstance(job.target_payload.get("article_id"), str):
         article = session.get(NewsArticle, uuid.UUID(job.target_payload["article_id"]))
-        if article is not None:
+        if article is not None and article.fetch_status == NewsFetchStatus.PENDING.value:
             article.fetch_status = NewsFetchStatus.FETCH_FAILED.value
             article.fetch_error_text = str(error)
     session.flush()
