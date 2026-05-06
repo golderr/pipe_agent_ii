@@ -1464,9 +1464,11 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 
 - **2026-05-06 (revision 31) — Possible-match Type 3 routing.**
   - `possible` matcher outcomes with deterministic `candidate_project_ids` now route through `news_v1` using the `possible_multi_candidate` trigger.
+  - The trigger string is kept for audit continuity even though the implementation now covers single-candidate possible matches too; the agent action remains "choose from matcher-provided candidate IDs or preserve review fallback."
   - The only mutating verdict is `{"decision": "confirm_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}` and the selected project must be one of the matcher-provided candidate IDs. Off-list IDs, invalid confidence, `no_change`, `escalated`, failed, budget-rejected, timeout, and killed-by-switch outcomes all preserve the deterministic possible-match review item.
   - Produced fallback review items are linked through `agent_run_review_items`; confirmed Type 3 matches write evidence against the selected project and use `match_type='agent_confirmed_possible_match'`.
   - First live smoke completed on 2026-05-06: Rosa's Place possible-match candidate was confirmed to the matcher-provided project ID after `get_project_state`, with no fallback review item.
+  - The Anthropic 400 visible during that local paste-link smoke was the known extraction temperature-deprecation retry path, not an agent-loop 400; future agent-turn 400s should still be investigated with provider response bodies.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

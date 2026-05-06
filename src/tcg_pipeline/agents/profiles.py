@@ -22,6 +22,9 @@ class AgentTrigger(enum.StrEnum):
     PASS1_PASS2_CONFLICT = "pass1_pass2_conflict"
     LOW_CONFIDENCE = "low_confidence"
     NEW_CANDIDATE = "new_candidate"
+    # Historical string kept for audit continuity; the gate covers any
+    # deterministic possible match with candidate_project_ids, including one
+    # candidate, because the agent action is still "pick from matcher choices."
     POSSIBLE_MULTI_CANDIDATE = "possible_multi_candidate"
     MULTIPLE_DISTINCT_MENTIONS = "multiple_distinct_mentions"
     MATERIAL_CONTRADICTION = "material_contradiction"

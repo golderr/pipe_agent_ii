@@ -248,7 +248,11 @@ def news_paste_link_smoke(
         typer.Option(help="Optional project UUID hint for single-reference matcher tests."),
     ] = None,
 ) -> None:
-    """Run the paste-a-link pipeline without using the frontend."""
+    """Run the paste-a-link pipeline without using the frontend.
+
+    Add a unique no-op query parameter to a known URL when a smoke needs to
+    bypass URL dedupe and re-exercise a deterministic trigger path.
+    """
     from fastapi import HTTPException
 
     from tcg_pipeline.api.routers.research import enqueue_paste_a_link_article
