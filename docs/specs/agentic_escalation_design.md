@@ -504,7 +504,7 @@ class IntakeRecord:
 
 The runner is the same code regardless of source. What varies is the `SourceProfile`: which tools the agent can call, which system prompt frames the task, which cost-cap bucket the run charges, which kill switch gates execution.
 
-**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the inert source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. It does not yet include the real Anthropic tool-loop client or production news integration wiring.
+**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. The Anthropic tool-loop client shell and bounded tool registry now exist; real data-backed tool handlers and production news integration wiring are still deferred.
 
 **Runner loop (pseudocode).**
 ```
@@ -560,6 +560,8 @@ The discovery job enqueues integration jobs after Pass 2 completes; integration 
 ### 5.4 Agent tools — core and source-specific
 
 Tools are categorized so each source profile can declare exactly which subset its agent runs may call. The runner enforces the subset; tools outside the profile are not visible to the agent.
+
+**Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. Current handlers are scaffolding/injected tests only; the real DB-backed handlers land next.
 
 #### Core tools (always available, regardless of source)
 
@@ -1411,6 +1413,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - The runner now performs post-hoc `tool_calls_summary` count checks and per-run cost checks. Tool-count violations write `failed_error`; cost overshoots write `failed_budget`, record actual cost, and raise a `SystemAlert`.
   - `SourceProfile.required_intake_fields` added. `NEWS_AGENT_PROFILE` requires `extraction_id` so the agent cannot run without the default-extraction anchor.
   - Added focused tests for timeout, tool-count violation, cost-overshoot alerting, and missing news extraction anchor.
+
+- **2026-05-05 (revision 26) — Anthropic client and bounded tool dispatch shell.**
+  - Added `AnthropicAgentClient` for the AGENT.2 runner seam: cacheable profile system prompt, Anthropic Messages tool loop, profile `max_output_tokens`, usage aggregation across turns, and final structured JSON parsing.
+  - Added `AgentToolRegistry` / `AgentTool` primitives. The registry exposes only profile-allowed tools, rejects unregistered/disallowed calls, enforces hard output budgets with truncation metadata, and records compact tool-call summaries for `agent_runs.tool_calls_summary`.
+  - Added fake-Anthropic and fake-tool tests for successful tool-loop execution, unknown-tool failure, invalid-final-JSON failure, allowed-tool exposure, and output truncation.
+  - Production news ingestion remains unchanged; the next slices add real DB-backed tool handlers and wire news trigger decisions into the runner.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
