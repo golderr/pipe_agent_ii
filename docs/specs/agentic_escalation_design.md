@@ -1171,7 +1171,7 @@ Cost-cap config lives in `cost_caps` (per §5.8 split). Spend rollup lives in `l
 8. Multi-provider abstraction in `news/llm.py` (Anthropic + OpenAI/Vercel AI Gateway) — required for GPT-5.4 in the A/B.
 
 ### AGENT.2 migrations
-1. `CREATE TABLE agent_runs (...)` per §5.6 full observability schema. Implemented in repo as `202605050029` with the authoritative `agent_run_review_items` join table. Follow-up `202605050030` tightens `evidence_consulted` / `tool_calls_summary` to required JSON arrays, requires `completed_at`, and documents the news `intake_record_id` convention. Neither AGENT.2 migration is production-applied yet.
+1. `CREATE TABLE agent_runs (...)` per §5.6 full observability schema. Implemented in repo as `202605050029` with the authoritative `agent_run_review_items` join table. Follow-up `202605050030` tightens `evidence_consulted` / `tool_calls_summary` to required JSON arrays, requires `completed_at`, and documents the news `intake_record_id` convention. Both AGENT.2 migrations were production-applied on 2026-05-06 after a fresh logical backup.
 2. New `pass` enum value `extract_retry` (output-quality retry path).
 3. Backfill synthetic `reasoning_trace` for legacy `pass='reextraction'` rows (Q16).
 4. Move Pass 3a/3b code from `news/extraction.py` to `news/extraction_legacy.py`; remove from active news ingestion code path; keep importable per §5.8.
@@ -1474,6 +1474,7 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - References with `candidate_confidence='low'` and at least one populated load-bearing field now route through `news_v1` using the `low_confidence` trigger.
   - If `low_confidence` appears with `new_candidate` or `possible_multi_candidate`, the existing trigger's verdict contract governs and low-confidence fields are reasoning context. If `low_confidence` is the only trigger, allowed verdicts are `no_change`, `escalated`, or `promote_existing_project` for a deterministic low-confidence discard that should match an existing project.
   - Deterministic fallback still stands on no-change, escalation, budget rejection, timeout, killed-by-switch, invalid confidence, or invalid promotion project ID. Status-change review items produced from low-confidence confirmed evidence link back through `agent_run_review_items`.
+  - First live smoke completed on 2026-05-06 with synthetic fixture `d14149b95c`: the deterministic matcher confirmed the synthetic project, the agent ran with `triggered_by=['low_confidence']`, called `get_project_state`, returned `decision=no_change`, linked to two low-priority status-change review items, and recorded `$0.071788` under `agent.news_v1`.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.
