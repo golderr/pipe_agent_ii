@@ -976,7 +976,7 @@ def test_news_new_candidate_agent_invalid_confidence_falls_back_to_review(
     project = _project(
         source,
         canonical_address=_canonical("880 Invalid Confidence Avenue, Los Angeles, CA 90012"),
-        project_name="Invalid Confidence Tower",
+        project_name="Established Westside Homes",
         developer="Existing Sponsor",
         total_units=88,
     )
