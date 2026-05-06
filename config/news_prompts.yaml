@@ -1,4 +1,5 @@
 active:
   triage: triage_v1
   extract: extract_v2
+  extract_retry: extract_retry_v1
   reextract: reextract_v1

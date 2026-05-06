@@ -34,7 +34,7 @@ from tcg_pipeline.db.models import (
     StatusConfidence,
 )
 from tcg_pipeline.db.review_workflow import accept_review_item
-from tcg_pipeline.matching.news_matcher import match_news_reference
+from tcg_pipeline.matching.news_matcher import NewsMatchResult, match_news_reference
 from tcg_pipeline.matching.normalizer import normalize_address
 from tcg_pipeline.news.extraction import NewsExtractionRunResult
 from tcg_pipeline.news.integration import (
@@ -1117,6 +1117,154 @@ def test_news_low_confidence_agent_can_promote_discarded_reference(
         select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
     ).scalar_one()
     assert agent_run.triggered_by == ["low_confidence"]
+
+
+def test_news_combined_possible_low_confidence_uses_confirm_verdict(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2920 Combined Possible Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Combined Possible Tower",
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Combined Possible Tower",
+                candidate_address="2920 Combined Possible Boulevard, Los Angeles, CA 90012",
+                candidate_unit_total=120,
+                candidate_confidence="low",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_existing_project",
+            "project_id": str(project.id),
+            "confidence": 0.9,
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests[0].trigger_reasons == (
+        "possible_multi_candidate",
+        "low_confidence",
+    )
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
+    assert refreshed_reference.matched_project_id == project.id
+    assert refreshed_reference.match_candidates["match_type"] == (
+        "agent_confirmed_possible_match"
+    )
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == [
+        "possible_multi_candidate",
+        "low_confidence",
+    ]
+
+
+def test_news_combined_new_candidate_low_confidence_uses_promote_verdict(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    project = _project(
+        source,
+        canonical_address=_canonical("2930 Combined New Boulevard, Los Angeles, CA 90012"),
+        project_name="Combined New Tower",
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Low Confidence New Candidate",
+                candidate_address="2931 Combined New Boulevard, Los Angeles, CA 90012",
+                candidate_developer="Combined Homes",
+                candidate_unit_total=80,
+                candidate_confidence="low",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+
+    def fake_match(*_args: object, **_kwargs: object) -> NewsMatchResult:
+        return NewsMatchResult(
+            status=NewsMatchStatus.NEW_CANDIDATE,
+            match_type="test_new_candidate_low_confidence",
+            confidence=0.4,
+            reason="Synthetic combined-trigger matcher result.",
+        )
+
+    monkeypatch.setattr("tcg_pipeline.news.integration.match_news_reference", fake_match)
+    client = FakeNewsAgentClient(
+        {
+            "decision": "promote_existing_project",
+            "project_id": str(project.id),
+            "confidence": 0.9,
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.new_candidate == 0
+    assert client.requests[0].trigger_reasons == ("new_candidate", "low_confidence")
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
+    assert refreshed_reference.matched_project_id == project.id
+    assert refreshed_reference.match_candidates["match_type"] == (
+        "agent_promoted_existing_project"
+    )
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["new_candidate", "low_confidence"]
 
 
 def test_news_new_candidate_accept_links_orphan_evidence(

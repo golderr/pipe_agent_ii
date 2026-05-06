@@ -158,6 +158,40 @@ def render_reextraction_prompt(
     )
 
 
+def render_extract_retry_prompt(
+    session: Session,
+    article: NewsArticle,
+    *,
+    prior_extraction: Any,
+    retry_context: dict[str, Any],
+) -> RenderedPrompt:
+    template = load_active_prompt("extract_retry")
+    previous_output_json = json.dumps(
+        prior_extraction.output_json,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    )
+    retry_context_json = json.dumps(
+        retry_context,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    )
+    return _render_project_extraction_prompt(
+        session,
+        article,
+        template=template,
+        include_glossary=False,
+        extra_user_values={
+            "previous_output_json": previous_output_json,
+            "previous_parse_status": prior_extraction.parse_status or "",
+            "previous_parse_error_text": prior_extraction.parse_error_text or "",
+            "retry_context_json": retry_context_json,
+        },
+    )
+
+
 def _render_project_extraction_prompt(
     session: Session,
     article: NewsArticle,

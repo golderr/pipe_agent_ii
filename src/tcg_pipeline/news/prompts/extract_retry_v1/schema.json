@@ -1,0 +1,194 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["relevance", "rejected_reason", "project_references", "diagnostic"],
+  "properties": {
+    "relevance": {
+      "type": "string",
+      "enum": ["confirmed", "rejected", "unclear"]
+    },
+    "rejected_reason": {
+      "type": ["string", "null"]
+    },
+    "project_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "candidate_name",
+          "candidate_address",
+          "candidate_developer",
+          "candidate_unit_total",
+          "candidate_unit_affordable",
+          "candidate_unit_market_rate",
+          "candidate_product_type",
+          "candidate_age_restriction",
+          "candidate_status_signal",
+          "candidate_delivery_year_text",
+          "candidate_delivery_year_normalized",
+          "candidate_signal_flags",
+          "candidate_identifiers",
+          "candidate_neighborhood",
+          "candidate_lat",
+          "candidate_lng",
+          "candidate_confidence",
+          "passage_excerpts"
+        ],
+        "properties": {
+          "candidate_name": {
+            "type": ["string", "null"]
+          },
+          "candidate_address": {
+            "type": ["string", "null"]
+          },
+          "candidate_developer": {
+            "type": ["string", "null"]
+          },
+          "candidate_unit_total": {
+            "type": ["integer", "null"]
+          },
+          "candidate_unit_affordable": {
+            "type": ["integer", "null"]
+          },
+          "candidate_unit_market_rate": {
+            "type": ["integer", "null"]
+          },
+          "candidate_product_type": {
+            "type": ["string", "null"],
+            "enum": [
+              "apartment",
+              "condo",
+              "townhome",
+              "single_family",
+              "micro_co_living",
+              "other",
+              null
+            ]
+          },
+          "candidate_age_restriction": {
+            "type": ["string", "null"],
+            "enum": ["non_age_restricted", "senior", "student", "unknown", null]
+          },
+          "candidate_status_signal": {
+            "type": ["string", "null"],
+            "enum": [
+              "Conceptual",
+              "Proposed",
+              "Pending",
+              "Approved",
+              "Under Construction",
+              "Pre-Leasing/Pre-Selling",
+              "Complete",
+              "Stalled",
+              "Inactive",
+              null
+            ]
+          },
+          "candidate_delivery_year_text": {
+            "type": ["string", "null"]
+          },
+          "candidate_delivery_year_normalized": {
+            "type": ["string", "null"],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "candidate_signal_flags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          },
+          "candidate_identifiers": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["case_number", "permit_number", "apn"],
+            "properties": {
+              "case_number": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "permit_number": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "apn": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "candidate_neighborhood": {
+            "type": ["string", "null"]
+          },
+          "candidate_lat": {
+            "type": ["number", "null"]
+          },
+          "candidate_lng": {
+            "type": ["number", "null"]
+          },
+          "candidate_confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "passage_excerpts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["field", "value", "passage", "offset_start", "offset_end"],
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "value": {},
+                "passage": {
+                  "type": "string"
+                },
+                "offset_start": {
+                  "type": "integer"
+                },
+                "offset_end": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "registry_developer_id": {
+            "type": ["string", "null"]
+          },
+          "registry_project_id": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "structural_disagreements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "uncertain_offsets": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "model_notes": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

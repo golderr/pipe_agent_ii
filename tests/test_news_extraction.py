@@ -36,6 +36,7 @@ from tcg_pipeline.news.extraction import (
 from tcg_pipeline.news.llm import LLMUsage
 from tcg_pipeline.news.prompts import (
     load_prompt,
+    render_extract_retry_prompt,
     render_extraction_prompt,
     render_news_glossary,
     render_reextraction_prompt,
@@ -550,6 +551,44 @@ def test_render_reextraction_prompt_keeps_legacy_registry_glossary(
     assert "Signal flag registry:" in rendered_prompt.system_text
 
 
+def test_render_extract_retry_prompt_uses_retry_context_without_glossary(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    prior_extraction = NewsExtraction(
+        article_id=uuid.uuid4(),
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v2",
+        prompt_version="v2",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json={"malformed": True},
+        parse_status=NewsExtractionParseStatus.SCHEMA_INVALID.value,
+        parse_error_text="missing required field",
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+
+    rendered_prompt = render_extract_retry_prompt(
+        postgres_session,
+        article,
+        prior_extraction=prior_extraction,
+        retry_context={"attempt": 1, "max_attempts": 2},
+    )
+
+    assert rendered_prompt.prompt_id == "extract_retry_v1"
+    assert len(rendered_prompt.system_blocks) == 2
+    assert "Glossary:" not in rendered_prompt.system_text
+    assert "Signal flag registry:" in rendered_prompt.system_text
+    assert "Previous extraction parse status" in rendered_prompt.user_text
+    assert "schema_invalid" in rendered_prompt.user_text
+    assert "missing required field" in rendered_prompt.user_text
+    assert "Retry context" in rendered_prompt.user_text
+
+
 def test_persist_extraction_response_writes_extraction_references_article_pointer_and_cost(
     postgres_session: Session,
 ) -> None:
@@ -697,6 +736,163 @@ def test_run_news_extraction_for_article_reserves_calls_client_and_true_ups(
         )
     ).scalar_one()
     assert Decimal(reservation.spent_usd) == Decimal("0.000000")
+
+
+def test_run_news_extraction_for_article_retries_output_quality_failure(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                assert prompt.prompt_id == "extract_v2"
+                return _invalid_json_response()
+            assert prompt.prompt_id == "extract_retry_v1"
+            assert "Previous extraction parse status" in prompt.user_text
+            assert "parse_error" in prompt.user_text
+            assert "Glossary:" not in prompt.system_text
+            return _llm_response(_payload(candidate_unit_total=145))
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.calls == 2
+    assert result.extraction_id is not None
+    assert result.extract_retry_id is not None
+    assert result.extract_retry_attempt_count == 1
+    assert result.extract_retry_parse_status == NewsExtractionParseStatus.OK.value
+    assert result.extract_retry_reference_count == 1
+    assert result.reextraction_id is None
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    initial = postgres_session.get(NewsExtraction, result.extraction_id)
+    retry = postgres_session.get(NewsExtraction, result.extract_retry_id)
+    assert refreshed_article is not None
+    assert initial is not None
+    assert retry is not None
+    assert refreshed_article.current_extraction_id == retry.id
+    assert refreshed_article.current_extraction_version == 1
+    assert initial.pass_name == NewsExtractionPass.EXTRACTION.value
+    assert initial.parse_status == NewsExtractionParseStatus.PARSE_ERROR.value
+    assert retry.pass_name == NewsExtractionPass.EXTRACT_RETRY.value
+    assert retry.supersedes_extraction_id == initial.id
+    assert retry.triggered_by == "output_quality_retry"
+    assert retry.diagnostic["extract_retry_context"]["attempt"] == 1
+    reference = postgres_session.execute(
+        select(NewsProjectReference).where(
+            NewsProjectReference.extraction_id == retry.id
+        )
+    ).scalar_one()
+    assert reference.candidate_unit_total == 145
+    retry_cost = postgres_session.execute(
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == NewsExtractionPass.EXTRACT_RETRY.value,
+            LLMCostUsage.provider == "anthropic",
+            LLMCostUsage.model == "claude-opus-4-7",
+        )
+    ).scalar_one()
+    assert retry_cost.call_count == 1
+
+
+def test_run_news_extraction_for_article_bounds_extract_retry_attempts(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def extract(self, prompt):  # type: ignore[no-untyped-def]
+            self.prompts.append(prompt.prompt_id)
+            return _invalid_json_response()
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.prompts == ["extract_v2", "extract_retry_v1", "extract_retry_v1"]
+    assert result.extract_retry_id is not None
+    assert result.extract_retry_attempt_count == 2
+    assert result.extract_retry_parse_status == NewsExtractionParseStatus.PARSE_ERROR.value
+    assert result.extract_retry_reference_count == 0
+    assert result.reextraction_id is None
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_article is not None
+    assert refreshed_article.current_extraction_id is None
+    assert refreshed_article.current_extraction_version == 0
+    retry_rows = postgres_session.execute(
+        select(NewsExtraction)
+        .where(
+            NewsExtraction.article_id == article.id,
+            NewsExtraction.pass_name == NewsExtractionPass.EXTRACT_RETRY.value,
+        )
+    ).scalars().all()
+    assert len(retry_rows) == 2
+    first_retry = next(
+        row for row in retry_rows if row.supersedes_extraction_id == result.extraction_id
+    )
+    second_retry = next(
+        row for row in retry_rows if row.supersedes_extraction_id == first_retry.id
+    )
+    assert second_retry.id == result.extract_retry_id
+    assert all(
+        row.parse_status == NewsExtractionParseStatus.PARSE_ERROR.value
+        for row in retry_rows
+    )
+    retry_cost = postgres_session.execute(
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == NewsExtractionPass.EXTRACT_RETRY.value,
+            LLMCostUsage.provider == "anthropic",
+            LLMCostUsage.model == "claude-opus-4-7",
+        )
+    ).scalar_one()
+    assert retry_cost.call_count == 2
 
 
 def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
@@ -867,7 +1063,7 @@ def test_run_news_extraction_for_article_skips_pass3a_when_cost_cap_blocks(
         postgres_session,
         effective_date=date(2026, 4, 29),
         warn_usd=Decimal("0.01"),
-        hard_usd=Decimal("0.80"),
+        hard_usd=Decimal("0.76"),
     )
     source = _news_source(postgres_session)
     article = _article(source)
@@ -1081,6 +1277,22 @@ def _llm_response(
         ),
         latency_ms=100,
         stop_reason=stop_reason,
+    )
+
+
+def _invalid_json_response() -> ExtractionLLMResponse:
+    return ExtractionLLMResponse(
+        payload=None,
+        text="{not valid json",
+        model="claude-opus-4-7",
+        usage=LLMUsage(
+            input_tokens_uncached=100,
+            input_tokens_cache_creation=0,
+            input_tokens_cached=10,
+            output_tokens=20,
+        ),
+        latency_ms=100,
+        stop_reason="tool_use",
     )
 
 

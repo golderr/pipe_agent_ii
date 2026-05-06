@@ -514,19 +514,15 @@ def run_news_scrape_job(
                 extraction_result = extraction_runner(article_id)
                 if extraction_result.skipped_reason == "cost_cap":
                     stats.cost_cap_skipped_count += 1
+                if extraction_result.extract_retry_skipped_reason == "cost_cap":
+                    stats.cost_cap_skipped_count += 1
                 if extraction_result.reextraction_skipped_reason == "cost_cap":
                     stats.cost_cap_skipped_count += 1
-                if (
-                    extraction_result.parse_status == "ok"
-                    or extraction_result.reextraction_parse_status == "ok"
-                ):
+                if _extraction_has_ok_result(extraction_result):
                     stats.extraction_ok_count += 1
             if (
                 extraction_result is not None
-                and (
-                    extraction_result.parse_status == "ok"
-                    or extraction_result.reextraction_parse_status == "ok"
-                )
+                and _extraction_has_ok_result(extraction_result)
                 and integration_runner is not None
             ):
                 integration_result = integration_runner(
@@ -629,10 +625,7 @@ def run_news_paste_a_link_job(
     integration_result: NewsIntegrationResult | None = None
     if (
         extraction_result is not None
-        and (
-            extraction_result.parse_status == "ok"
-            or extraction_result.reextraction_parse_status == "ok"
-        )
+        and _extraction_has_ok_result(extraction_result)
         and integration_runner is not None
     ):
         try:
@@ -897,6 +890,24 @@ def finish_news_paste_a_link_job(
         job.progress["extraction_reference_count"] = extraction_result.reference_count
         job.progress["extraction_skipped_reason"] = extraction_result.skipped_reason
         job.progress["extraction_error_text"] = extraction_result.error_text
+        job.progress["extract_retry_id"] = (
+            str(extraction_result.extract_retry_id)
+            if extraction_result.extract_retry_id
+            else None
+        )
+        job.progress["extract_retry_attempt_count"] = (
+            extraction_result.extract_retry_attempt_count
+        )
+        job.progress["extract_retry_parse_status"] = (
+            extraction_result.extract_retry_parse_status
+        )
+        job.progress["extract_retry_reference_count"] = (
+            extraction_result.extract_retry_reference_count
+        )
+        job.progress["extract_retry_skipped_reason"] = (
+            extraction_result.extract_retry_skipped_reason
+        )
+        job.progress["extract_retry_error_text"] = extraction_result.extract_retry_error_text
         job.progress["reextraction_id"] = (
             str(extraction_result.reextraction_id)
             if extraction_result.reextraction_id
@@ -925,6 +936,14 @@ def finish_news_paste_a_link_job(
             job.progress["extraction_skipped_reason"] = "disabled"
     session.flush()
     return job
+
+
+def _extraction_has_ok_result(result: NewsExtractionRunResult) -> bool:
+    return (
+        result.parse_status == "ok"
+        or result.extract_retry_parse_status == "ok"
+        or result.reextraction_parse_status == "ok"
+    )
 
 
 def _run_unimplemented_news_job(job_id: uuid.UUID, expected_kind: str) -> None:

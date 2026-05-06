@@ -52,6 +52,7 @@ from tcg_pipeline.news.llm import (
 )
 from tcg_pipeline.news.prompts import (
     RenderedPrompt,
+    render_extract_retry_prompt,
     render_extraction_prompt,
     render_reextraction_prompt,
 )
@@ -63,7 +64,10 @@ PASS3A_TRIGGER_LOW_CONFIDENCE = "pass2_low_confidence"
 PASS3A_TRIGGER_PARSE_ERROR = "pass2_parse_error"
 PASS3B_TRIGGER_NEW_CANDIDATE = "pass2_new_candidate"
 EXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
+EXTRACT_RETRY_ESTIMATED_COST_USD = Decimal("0.75")
 REEXTRACTION_ESTIMATED_COST_USD = Decimal("0.75")
+EXTRACT_RETRY_TRIGGER_OUTPUT_QUALITY = "output_quality_retry"
+MAX_EXTRACT_RETRY_ATTEMPTS = 2
 EXTRACTION_TEMPERATURE = 0
 EXTRACTION_MAX_TOKENS = 5000
 EXTRACTION_TOOL_NAME = "emit_project_extraction"
@@ -75,6 +79,7 @@ PASS3A_PARSE_TRIGGER_STATUSES = frozenset(
         NewsExtractionParseStatus.TRUNCATED.value,
     }
 )
+EXTRACT_RETRY_TRIGGER_STATUSES = PASS3A_PARSE_TRIGGER_STATUSES
 PASS3A_REFERENCE_FIELD_MAP = {
     "pipeline_status": "candidate_status_signal",
     "total_units": "candidate_unit_total",
@@ -133,6 +138,12 @@ class NewsExtractionRunResult:
     reextraction_parse_status: str | None = None
     reextraction_skipped_reason: str | None = None
     reextraction_error_text: str | None = None
+    extract_retry_id: uuid.UUID | None = None
+    extract_retry_attempt_count: int = 0
+    extract_retry_parse_status: str | None = None
+    extract_retry_reference_count: int | None = None
+    extract_retry_skipped_reason: str | None = None
+    extract_retry_error_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +468,15 @@ def run_news_extraction_for_article(
             now=current,
         )
         session.commit()
+    extract_retry_result = _maybe_run_extract_retry(
+        article_id=article_id,
+        prior_result=result,
+        client=extraction_client,
+        session_factory=resolved_session_factory,
+        now=current,
+    )
+    if extract_retry_result is not None:
+        return _merge_extract_retry_result(result, extract_retry_result)
     pass3a_result = _maybe_run_pass3a_reextraction(
         article_id=article_id,
         prior_result=result,
@@ -723,6 +743,160 @@ def _maybe_run_pass3a_reextraction(
     return result
 
 
+def _maybe_run_extract_retry(
+    *,
+    article_id: uuid.UUID,
+    prior_result: NewsExtractionRunResult,
+    client: ExtractionLLMClient,
+    session_factory: sessionmaker[Session],
+    now: datetime,
+) -> NewsExtractionRunResult | None:
+    if (
+        prior_result.extraction_id is None
+        or prior_result.parse_status not in EXTRACT_RETRY_TRIGGER_STATUSES
+    ):
+        return None
+
+    last_extraction_id = prior_result.extraction_id
+    last_result: NewsExtractionRunResult | None = None
+    for attempt in range(1, MAX_EXTRACT_RETRY_ATTEMPTS + 1):
+        with session_factory() as session:
+            article = session.get(NewsArticle, article_id)
+            prior_extraction = session.get(NewsExtraction, last_extraction_id)
+            if article is None or prior_extraction is None:
+                raise RuntimeError("Extract retry references missing article/extraction rows.")
+            retry_context = _extract_retry_context(
+                initial_result=prior_result,
+                prior_extraction=prior_extraction,
+                attempt=attempt,
+            )
+            rendered_prompt = render_extract_retry_prompt(
+                session,
+                article,
+                prior_extraction=prior_extraction,
+                retry_context=retry_context,
+            )
+
+        with session_factory() as session:
+            reservation = reserve_llm_cost(
+                session,
+                pass_name=NewsExtractionPass.EXTRACT_RETRY.value,
+                model=client.model,
+                provider=_client_provider(client),
+                estimated_cost_usd=EXTRACT_RETRY_ESTIMATED_COST_USD,
+                now=now,
+            )
+            session.commit()
+        if reservation is None:
+            return NewsExtractionRunResult(
+                article_id=article_id,
+                extraction_id=None,
+                relevance=None,
+                reference_count=0,
+                parse_status=None,
+                skipped_reason="cost_cap",
+                triggered_by=EXTRACT_RETRY_TRIGGER_OUTPUT_QUALITY,
+                extract_retry_attempt_count=attempt - 1,
+            )
+
+        try:
+            llm_response = client.extract(rendered_prompt)
+        except Exception as exc:
+            with session_factory() as session:
+                release_llm_cost_reservation(
+                    session,
+                    reserved_cost_usd=EXTRACT_RETRY_ESTIMATED_COST_USD,
+                    now=now,
+                )
+                error_result = _persist_extraction_api_error(
+                    session,
+                    article_id=article_id,
+                    rendered_prompt=rendered_prompt,
+                    model=client.model,
+                    provider=_client_provider(client),
+                    error=exc,
+                    now=now,
+                    pass_name=NewsExtractionPass.EXTRACT_RETRY.value,
+                    triggered_by=EXTRACT_RETRY_TRIGGER_OUTPUT_QUALITY,
+                    supersedes_extraction_id=last_extraction_id,
+                    extra_diagnostic={"extract_retry_context": retry_context},
+                )
+                session.commit()
+            return NewsExtractionRunResult(
+                article_id=article_id,
+                extraction_id=error_result.extraction_id,
+                relevance=None,
+                reference_count=0,
+                parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
+                skipped_reason="error",
+                error_text=str(exc),
+                triggered_by=EXTRACT_RETRY_TRIGGER_OUTPUT_QUALITY,
+                extract_retry_attempt_count=attempt,
+            )
+
+        with session_factory() as session:
+            result = persist_extraction_response(
+                session,
+                article_id=article_id,
+                rendered_prompt=rendered_prompt,
+                llm_response=llm_response,
+                reserved_cost_usd=EXTRACT_RETRY_ESTIMATED_COST_USD,
+                now=now,
+                pass_name=NewsExtractionPass.EXTRACT_RETRY.value,
+                triggered_by=EXTRACT_RETRY_TRIGGER_OUTPUT_QUALITY,
+                supersedes_extraction_id=last_extraction_id,
+                extra_diagnostic={"extract_retry_context": retry_context},
+            )
+            session.commit()
+        last_result = _with_extract_retry_attempt_count(result, attempt)
+        if result.extraction_id is not None:
+            last_extraction_id = result.extraction_id
+        if result.parse_status == NewsExtractionParseStatus.OK.value:
+            return last_result
+
+    return last_result
+
+
+def _extract_retry_context(
+    *,
+    initial_result: NewsExtractionRunResult,
+    prior_extraction: NewsExtraction,
+    attempt: int,
+) -> dict[str, Any]:
+    return {
+        "initial_extraction_id": str(initial_result.extraction_id),
+        "prior_extraction_id": str(prior_extraction.id),
+        "prior_parse_status": prior_extraction.parse_status,
+        "prior_parse_error_text": prior_extraction.parse_error_text,
+        "attempt": attempt,
+        "max_attempts": MAX_EXTRACT_RETRY_ATTEMPTS,
+        "triggered_by": EXTRACT_RETRY_TRIGGER_OUTPUT_QUALITY,
+    }
+
+
+def _with_extract_retry_attempt_count(
+    result: NewsExtractionRunResult,
+    attempt_count: int,
+) -> NewsExtractionRunResult:
+    return NewsExtractionRunResult(
+        article_id=result.article_id,
+        extraction_id=result.extraction_id,
+        relevance=result.relevance,
+        reference_count=result.reference_count,
+        parse_status=result.parse_status,
+        skipped_reason=result.skipped_reason,
+        error_text=result.error_text,
+        triggered_by=result.triggered_by,
+        reextraction_id=result.reextraction_id,
+        reextraction_triggered_by=result.reextraction_triggered_by,
+        reextraction_reference_count=result.reextraction_reference_count,
+        reextraction_parse_status=result.reextraction_parse_status,
+        reextraction_skipped_reason=result.reextraction_skipped_reason,
+        reextraction_error_text=result.reextraction_error_text,
+        extract_retry_attempt_count=attempt_count,
+    )
+
+
 def _merge_pass3a_result(
     prior_result: NewsExtractionRunResult,
     pass3a_result: NewsExtractionRunResult,
@@ -742,6 +916,34 @@ def _merge_pass3a_result(
         reextraction_parse_status=pass3a_result.parse_status,
         reextraction_skipped_reason=pass3a_result.skipped_reason,
         reextraction_error_text=pass3a_result.error_text,
+    )
+
+
+def _merge_extract_retry_result(
+    prior_result: NewsExtractionRunResult,
+    extract_retry_result: NewsExtractionRunResult,
+) -> NewsExtractionRunResult:
+    return NewsExtractionRunResult(
+        article_id=prior_result.article_id,
+        extraction_id=prior_result.extraction_id,
+        relevance=prior_result.relevance,
+        reference_count=prior_result.reference_count,
+        parse_status=prior_result.parse_status,
+        skipped_reason=prior_result.skipped_reason,
+        error_text=prior_result.error_text,
+        triggered_by=prior_result.triggered_by,
+        reextraction_id=prior_result.reextraction_id,
+        reextraction_triggered_by=prior_result.reextraction_triggered_by,
+        reextraction_reference_count=prior_result.reextraction_reference_count,
+        reextraction_parse_status=prior_result.reextraction_parse_status,
+        reextraction_skipped_reason=prior_result.reextraction_skipped_reason,
+        reextraction_error_text=prior_result.reextraction_error_text,
+        extract_retry_id=extract_retry_result.extraction_id,
+        extract_retry_attempt_count=extract_retry_result.extract_retry_attempt_count,
+        extract_retry_parse_status=extract_retry_result.parse_status,
+        extract_retry_reference_count=extract_retry_result.reference_count,
+        extract_retry_skipped_reason=extract_retry_result.skipped_reason,
+        extract_retry_error_text=extract_retry_result.error_text,
     )
 
 

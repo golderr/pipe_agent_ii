@@ -469,10 +469,12 @@ Replaces today's Pass 3a output-quality branch.
   - For `refused`: rephrased framing (no policy-flag-likely content; the article is public news).
   - For `parse_error` / `schema_invalid`: include the parser's error text and the prior model's bad output as context.
 - Up to 2 retries. If both fail, escalate to review queue with the legacy "extraction quality failure" payload.
-- Records as `pass='extract_retry'` rows in `news_extractions` (new pass enum value).
+- Records as `pass='extract_retry'` rows in `news_extractions` (new pass enum value) and as `capability='extract_retry'` in `llm_cost_usage` so retry fire rate and spend are directly queryable.
 - Cost-cap-bounded; reuses existing `reserve_llm_cost`/`record_llm_cost`.
 
 **What it does NOT do.** No tool dispatch. No reasoning trace. This is the cheap path.
+
+**Implementation note (2026-05-06).** The active retry path is `extract_retry_v1`, wired after the initial default extraction persists a parse/schema/refusal/truncation failure and before any legacy Pass 3a output-quality path can run. Successful retries replace the article's `current_extraction_id`; exhausted retries preserve deterministic failure handling and do not create `agent_runs` rows.
 
 ### 5.3 Agent runner (Stage 2 — source-agnostic from day one)
 
@@ -1469,6 +1471,13 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Produced fallback review items are linked through `agent_run_review_items`; confirmed Type 3 matches write evidence against the selected project and use `match_type='agent_confirmed_possible_match'`.
   - First live smoke completed on 2026-05-06: Rosa's Place possible-match candidate was confirmed to the matcher-provided project ID after `get_project_state`, with no fallback review item.
   - The Anthropic 400 visible during that local paste-link smoke was the known extraction temperature-deprecation retry path, not an agent-loop 400; future agent-turn 400s should still be investigated with provider response bodies.
+
+- **2026-05-06 (revision 33) — Output-quality retry path implemented.**
+  - `extract_retry_v1` is now the active non-agent retry prompt for default-extraction `parse_error`, `schema_invalid`, `refused`, and `truncated` outcomes.
+  - The retry path makes at most two attempts, persists rows with `pass='extract_retry'`, records spend under `capability='extract_retry'`, and includes the previous parse status/error/output in the retry prompt while keeping the glossary out of the prompt.
+  - Successful retry rows become the article's current extraction and feed normal integration; exhausted retries preserve the deterministic failure/review path and do not enter the `news_v1` agent loop.
+  - Added DB-backed combined-trigger tests for `new_candidate + low_confidence` and `possible_multi_candidate + low_confidence`; fixture-based low-confidence rows are the repeatable smoke/regression recipe because organic low-confidence model output is nondeterministic.
+  - Step 11 spot-check sampling should explicitly surface `low_confidence` runs where a deterministic `discarded` reference was promoted to an existing project, since that is the highest-authority news-agent override path.
 
 - **2026-05-06 (revision 32) — Low-confidence trigger routing.**
   - References with `candidate_confidence='low'` and at least one populated load-bearing field now route through `news_v1` using the `low_confidence` trigger.
