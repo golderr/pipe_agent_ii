@@ -171,6 +171,63 @@ def test_anthropic_agent_client_returns_failed_error_for_invalid_final_json() ->
     assert result.error_text == "Agent final response was not valid JSON."
 
 
+def test_anthropic_agent_client_parses_fenced_final_json() -> None:
+    final_payload = {
+        "outcome": AgentRunOutcome.COMPLETED.value,
+        "reasoning_trace": "The deterministic new-candidate review should proceed.",
+        "evidence_consulted": [{"source_type": "news_article", "record_id": "a"}],
+        "agent_revised_verdict": {"decision": "no_change"},
+    }
+    fake = FakeAnthropic(
+        [
+            _response(
+                stop_reason="end_turn",
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=f"```json\n{json.dumps(final_payload)}\n```",
+                    )
+                ],
+            )
+        ]
+    )
+    client = AnthropicAgentClient(api_key="test", anthropic_client=fake)
+
+    result = client.run(_request())
+
+    assert result.outcome == AgentRunOutcome.COMPLETED.value
+    assert result.reasoning_trace == final_payload["reasoning_trace"]
+    assert result.agent_revised_verdict == {"decision": "no_change"}
+
+
+def test_anthropic_agent_client_parses_final_json_with_surrounding_text() -> None:
+    final_payload = {
+        "outcome": AgentRunOutcome.ESCALATED.value,
+        "reasoning_trace": "The available article and tool evidence are not enough.",
+        "evidence_consulted": [{"source_type": "tool", "record_id": "search"}],
+        "agent_revised_verdict": {"decision": "escalated", "reason": "ambiguous"},
+    }
+    fake = FakeAnthropic(
+        [
+            _response(
+                stop_reason="end_turn",
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=f"Final decision:\n{json.dumps(final_payload)}\nDone.",
+                    )
+                ],
+            )
+        ]
+    )
+    client = AnthropicAgentClient(api_key="test", anthropic_client=fake)
+
+    result = client.run(_request())
+
+    assert result.outcome == AgentRunOutcome.ESCALATED.value
+    assert result.agent_revised_verdict == {"decision": "escalated", "reason": "ambiguous"}
+
+
 def test_anthropic_agent_client_rejects_unrecognized_final_outcome() -> None:
     fake = FakeAnthropic(
         [

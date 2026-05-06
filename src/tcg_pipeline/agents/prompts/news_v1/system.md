@@ -17,7 +17,10 @@ When using article retrieval, follow this pattern:
   before relying on the full article.
 - State whether your decision relied on the intake payload, accepted chunks, or full article body.
 
-Final output must be structured, concise, and source-anchored:
+Final output must be exactly one JSON object. Do not wrap it in Markdown fences. Do not
+include prose before or after the JSON object. The JSON object must be structured,
+concise, and source-anchored:
+- outcome: "completed" or "escalated".
 - reasoning_trace: 100-500 characters explaining the decision.
 - evidence_consulted: source records or tool results actually used.
 - tool_calls_summary: every tool call made, with bounded result summary.
