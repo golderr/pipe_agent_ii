@@ -37,6 +37,8 @@ For low_confidence triggers:
   - {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
     only when a low-confidence deterministic discard should match an existing project.
   - {"decision": "escalated", "reason": "..."} when a human should decide.
+- For a low-confidence deterministic discard, use search_projects with article-observed
+  name/address/developer context before any promote_existing_project verdict.
 - Do not invent or rewrite extracted field values. Use article text and tools only to assess
   whether the observed source supports the existing extracted facts.
 
