@@ -236,6 +236,121 @@ def news_index_articles(
         raise typer.Exit(1)
 
 
+@news_app.command("paste-link-smoke")
+def news_paste_link_smoke(
+    url: Annotated[str, typer.Argument(help="Absolute news article URL to ingest.")],
+    note: Annotated[
+        str | None,
+        typer.Option(help="Optional note stored on the news article."),
+    ] = "CLI paste-link smoke.",
+    force_project_id: Annotated[
+        uuid.UUID | None,
+        typer.Option(help="Optional project UUID hint for single-reference matcher tests."),
+    ] = None,
+) -> None:
+    """Run the paste-a-link pipeline without using the frontend."""
+    from fastapi import HTTPException
+
+    from tcg_pipeline.api.auth import AuthenticatedUser
+    from tcg_pipeline.api.routers.research import enqueue_paste_a_link_article
+    from tcg_pipeline.api.schemas import ResearchArticleCreateRequest
+    from tcg_pipeline.db.models import (
+        AgentRun,
+        NewsArticle,
+        NewsProjectReference,
+        ReviewItem,
+        ScrapeJob,
+    )
+    from tcg_pipeline.workers.news_jobs import run_news_paste_a_link_job
+
+    settings = get_settings()
+    database_label = (
+        redact_database_url(settings.database_url)
+        if settings.database_url
+        else "missing DATABASE_URL"
+    )
+    typer.echo(
+        "Running paste-link smoke against "
+        f"{database_label}"
+    )
+
+    payload = ResearchArticleCreateRequest(
+        url=url,
+        force_project_id=force_project_id,
+        note=note,
+    )
+    user = AuthenticatedUser(
+        user_id=uuid.UUID(int=0),
+        email="codex-smoke@local",
+        role="service_role",
+        claims={"sub": str(uuid.UUID(int=0)), "email": "codex-smoke@local"},
+    )
+
+    try:
+        with get_session_factory()() as session:
+            article, job, existing_article = enqueue_paste_a_link_article(
+                session,
+                payload=payload,
+                user=user,
+            )
+            session.commit()
+            article_id = article.id
+            job_id = job.id if job else None
+            typer.echo(f"Article: {article_id}")
+            typer.echo(f"Existing article: {existing_article}")
+            if job_id is None:
+                typer.echo("No new scrape job was created.")
+                return
+            typer.echo(f"Scrape job: {job_id}")
+
+        run_news_paste_a_link_job(job_id)
+
+        with get_session_factory()() as session:
+            article = session.get(NewsArticle, article_id)
+            job = session.get(ScrapeJob, job_id)
+            references = session.execute(
+                select(NewsProjectReference).where(NewsProjectReference.article_id == article_id)
+            ).scalars().all()
+            agent_runs = session.execute(
+                select(AgentRun)
+                .where(AgentRun.intake_record_id == str(article_id))
+                .order_by(AgentRun.started_at.desc())
+            ).scalars().all()
+            review_items = session.execute(
+                select(ReviewItem).where(
+                    ReviewItem.payload["source_article_id"].astext == str(article_id)
+                )
+            ).scalars().all()
+
+            typer.echo(f"Job status: {job.status if job else 'missing'}")
+            if job and job.error_text:
+                typer.echo(f"Job error: {job.error_text}", err=True)
+            if article is not None:
+                typer.echo(f"Title: {article.title or 'untitled'}")
+                typer.echo(f"Fetch status: {article.fetch_status}")
+                typer.echo(f"Triage status: {article.triage_status}")
+                typer.echo(
+                    "Current extraction: "
+                    f"{article.current_extraction_id or 'none'} "
+                    f"(version {article.current_extraction_version})"
+                )
+            typer.echo(f"References: {len(references)}")
+            typer.echo(f"Review items: {len(review_items)}")
+            typer.echo(f"Agent runs: {len(agent_runs)}")
+            for run in agent_runs[:3]:
+                typer.echo(
+                    "  "
+                    f"{run.id} | outcome={run.outcome} | "
+                    f"decision={run.agent_revised_verdict} | cost=${run.cost_usd}"
+                )
+    except HTTPException as exc:
+        typer.echo(f"Error: {exc.detail}", err=True)
+        raise typer.Exit(1) from exc
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
 @app.command()
 def preview_pipedream(
     workbook_path: Path,
