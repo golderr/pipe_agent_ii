@@ -12,6 +12,7 @@ from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE
 from tcg_pipeline.agents.project_tools import (
     GET_PROJECT_STATE_OUTPUT_TOKEN_BUDGET,
     handle_get_project_state,
+    handle_search_projects,
 )
 from tcg_pipeline.agents.registry import build_agent_tool_registry
 from tcg_pipeline.agents.runner import AgentRunRequest, IntakeRecord
@@ -105,11 +106,13 @@ def test_default_tool_registry_includes_get_project_state() -> None:
         "get_article_body",
         "get_project_state",
         "search_articles_similar",
+        "search_projects",
     ]
     spec_by_name = {spec["name"]: spec for spec in specs}
     assert spec_by_name["get_project_state"]["input_schema"]["required"] == ["project_id"]
     assert spec_by_name["get_article_body"]["input_schema"]["required"] == ["article_id"]
     assert spec_by_name["search_articles_similar"]["input_schema"]["required"] == ["query_text"]
+    assert "query_text" in spec_by_name["search_projects"]["input_schema"]["properties"]
 
 
 def test_get_project_state_requires_session_factory() -> None:
@@ -208,6 +211,76 @@ def test_get_project_state_reads_project_resolution_context(
     assert GET_PROJECT_STATE_OUTPUT_TOKEN_BUDGET == 1500
 
 
+def test_search_projects_returns_compact_registry_candidates(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="901 TEST AGENT LANE LOS ANGELES CA 90013",
+        raw_addresses=["901 Test Agent Ln"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Agent Search Residences",
+        developer="Agent Search Sponsor",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+        total_units=98,
+        affordable_units=97,
+        market_rate_units=1,
+        product_type=ProductType.APARTMENT,
+    )
+    other_project = Project(
+        canonical_address="700 SOUTH FLOWER STREET LOS ANGELES CA 90017",
+        raw_addresses=["700 S Flower St"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Flower Tower",
+        developer="Other Sponsor",
+        pipeline_status=PipelineStatus.PROPOSED,
+        total_units=200,
+    )
+    postgres_session.add_all([project, other_project])
+    postgres_session.flush()
+    request = _agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="search_projects",
+        tool_input={
+            "query_text": "Agent Search Residences 901 Test Agent Lane",
+            "address": "901 Test Agent Lane",
+            "project_name": "Agent Search Residences",
+            "developer": "Agent Search Sponsor",
+        },
+        profile=NEWS_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content["total_available"] >= 1
+    assert result.content["matches"][0]["project_id"] == str(project.id)
+    assert result.content["matches"][0]["canonical_address"] == project.canonical_address
+    assert result.content["matches"][0]["score"] >= 0.9
+    assert "address_match" in result.content["matches"][0]["reasons"]
+
+
+def test_search_projects_requires_session_factory() -> None:
+    request = AgentRunRequest(
+        intake=IntakeRecord(
+            source_type="news_article",
+            intake_record_id=str(uuid.uuid4()),
+            extraction_id=uuid.uuid4(),
+        ),
+        matcher_results=(),
+        trigger_reasons=("new_candidate",),
+        profile=NEWS_AGENT_PROFILE,
+    )
+
+    with pytest.raises(AgentToolError, match="requires a session_factory"):
+        handle_search_projects({"query_text": "501 E. 5th"}, request)
+
+
 def test_get_article_body_returns_truncated_body(postgres_session: Session) -> None:
     _ensure_agent1_tables(postgres_session)
     source = _news_source()
@@ -251,18 +324,8 @@ def test_search_articles_similar_returns_compact_chunk_results(
     )
     postgres_session.add_all([source, article, project])
     postgres_session.flush()
-    evidence = Evidence(
-        project_id=project.id,
-        source_type="news_article",
-        source_tier=2,
-        ingest_method="test",
-        collected_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
-        evidence_date=date(2026, 5, 5),
-        extracted_fields={"total_units": {"value": 120, "confidence": "high"}},
-        notes="Article reported Accepted Tower.",
-    )
     extraction = _news_extraction(article)
-    postgres_session.add_all([evidence, extraction])
+    postgres_session.add(extraction)
     postgres_session.flush()
     reference = NewsProjectReference(
         article_id=article.id,
@@ -273,8 +336,19 @@ def test_search_articles_similar_returns_compact_chunk_results(
         candidate_developer="HPG",
         candidate_confidence="high",
         match_status=NewsMatchStatus.CONFIRMED.value,
-        matched_project_id=project.id,
-        matched_evidence_id=evidence.id,
+    )
+    postgres_session.add(reference)
+    postgres_session.flush()
+    evidence = Evidence(
+        project_id=project.id,
+        source_type="news_article",
+        source_record_id=str(reference.id),
+        source_tier=2,
+        ingest_method="test",
+        collected_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 5),
+        extracted_fields={"total_units": {"value": 120, "confidence": "high"}},
+        notes="Article reported Accepted Tower.",
     )
     chunk = NewsArticleChunk(
         article_id=article.id,
@@ -296,7 +370,7 @@ def test_search_articles_similar_returns_compact_chunk_results(
         model="text-embedding-3-small",
         gate_source="review_accept",
     )
-    postgres_session.add_all([reference, chunk, whole_article_chunk])
+    postgres_session.add_all([evidence, chunk, whole_article_chunk])
     postgres_session.flush()
     request = _agent_request(postgres_session, embedding_client=_FakeEmbeddingClient())
     registry = build_agent_tool_registry()

@@ -39,8 +39,8 @@ SEARCH_ARTICLES_SIMILAR_SQL = text(
         npr.candidate_address,
         npr.candidate_developer,
         npr.match_status,
-        npr.matched_project_id,
-        npr.matched_evidence_id,
+        COALESCE(npr.matched_project_id, accepted_evidence.project_id) AS matched_project_id,
+        COALESCE(npr.matched_evidence_id, accepted_evidence.id) AS matched_evidence_id,
         (c.embedding <=> CAST(:query_embedding AS vector)) AS distance
     FROM news_article_chunks c
     JOIN news_articles a ON a.id = c.article_id
@@ -48,6 +48,13 @@ SEARCH_ARTICLES_SIMILAR_SQL = text(
     LEFT JOIN news_project_references npr
       ON npr.article_id = c.article_id
      AND npr.reference_index = c.reference_index
+    LEFT JOIN LATERAL (
+        SELECT e.id, e.project_id
+        FROM evidence e
+        WHERE e.source_record_id = npr.id::text
+        ORDER BY e.collected_at DESC, e.id DESC
+        LIMIT 1
+    ) accepted_evidence ON true
     WHERE c.embedding IS NOT NULL
       AND c.superseded_at IS NULL
       AND c.model = :model

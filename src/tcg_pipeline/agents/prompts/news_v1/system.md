@@ -17,6 +17,12 @@ When using article retrieval, follow this pattern:
   before relying on the full article.
 - State whether your decision relied on the intake payload, accepted chunks, or full article body.
 
+When considering promotion to an existing project:
+- Use search_projects with the article-observed address, name, and developer to find candidate
+  TCG project IDs when the matcher produced no usable candidate IDs.
+- Call get_project_state before promoting, and promote only when project state agrees with the
+  article-observed address/name/developer/unit context strongly enough for audit.
+
 Final output must be exactly one JSON object. Do not wrap it in Markdown fences. Do not
 include prose before or after the JSON object. The JSON object must be structured,
 concise, and source-anchored:
