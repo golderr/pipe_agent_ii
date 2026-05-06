@@ -69,7 +69,9 @@ from tcg_pipeline.settings import Settings, get_settings
 
 NEWS_SOURCE_TYPE = "news_article"
 AGENT_PROMOTED_EXISTING_PROJECT_MATCH = "agent_promoted_existing_project"
+AGENT_CONFIRMED_POSSIBLE_MATCH = "agent_confirmed_possible_match"
 AGENT_PROMOTE_EXISTING_PROJECT_DECISION = "promote_existing_project"
+AGENT_CONFIRM_EXISTING_PROJECT_DECISION = "confirm_existing_project"
 ACTIVE_REVIEW_STATES = {"open", "staged"}
 REFERENCE_FIELD_TO_PROJECT_FIELD = {
     "candidate_name": "project_name",
@@ -347,12 +349,12 @@ def _run_news_agents_for_first_pass(
 ) -> dict[uuid.UUID, _NewsAgentDecision]:
     if first_pass.extraction_id is None:
         return {}
-    new_candidate_pairs = [
-        (reference, match)
+    agent_pairs = [
+        (reference, match, trigger)
         for reference, match in zip(first_pass.references, first_pass.matches, strict=True)
-        if match.status == NewsMatchStatus.NEW_CANDIDATE
+        if (trigger := _agent_trigger_for_match(match)) is not None
     ]
-    if not new_candidate_pairs:
+    if not agent_pairs:
         return {}
     client = agent_client
     if settings.agent_enabled_for_news and client is None:
@@ -364,7 +366,7 @@ def _run_news_agents_for_first_pass(
         client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
 
     decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
-    for reference, match in new_candidate_pairs:
+    for reference, match, trigger in agent_pairs:
         with session_factory() as session:
             article = session.get(NewsArticle, first_pass.article_id)
             extraction = session.get(NewsExtraction, first_pass.extraction_id)
@@ -388,7 +390,7 @@ def _run_news_agents_for_first_pass(
                 payload=payload,
             ),
             matcher_results=[matcher_payload],
-            trigger_reasons=[AgentTrigger.NEW_CANDIDATE],
+            trigger_reasons=[trigger],
             profile=NEWS_AGENT_PROFILE,
             client=client,
             settings=settings,
@@ -397,6 +399,17 @@ def _run_news_agents_for_first_pass(
         )
         decisions[reference.id] = _NewsAgentDecision(result=result)
     return decisions
+
+
+def _agent_trigger_for_match(match: NewsMatchResult) -> AgentTrigger | None:
+    if match.status == NewsMatchStatus.NEW_CANDIDATE:
+        return AgentTrigger.NEW_CANDIDATE
+    if (
+        match.status == NewsMatchStatus.POSSIBLE
+        and len(match.candidate_project_ids) > 0
+    ):
+        return AgentTrigger.POSSIBLE_MULTI_CANDIDATE
+    return None
 
 
 def _agent_intake_payload(
@@ -557,13 +570,13 @@ def _integrate_current_extraction(
             force_project_id=effective_force_project_id,
         )
         agent_decision = agent_decisions.get(reference.id)
-        promoted_match = _agent_promoted_match(
+        revised_match = _agent_revised_match(
             session,
             match=match,
             agent_decision=agent_decision,
         )
-        if promoted_match is not None:
-            match = promoted_match
+        if revised_match is not None:
+            match = revised_match
         _apply_match_to_reference(reference, match, now=now)
         stats.references_processed += 1
 
@@ -775,6 +788,26 @@ def _apply_match_to_reference(
     reference.match_decision_at = now
 
 
+def _agent_revised_match(
+    session: Session,
+    *,
+    match: NewsMatchResult,
+    agent_decision: _NewsAgentDecision | None,
+) -> NewsMatchResult | None:
+    promoted_match = _agent_promoted_match(
+        session,
+        match=match,
+        agent_decision=agent_decision,
+    )
+    if promoted_match is not None:
+        return promoted_match
+    return _agent_confirmed_possible_match(
+        session,
+        match=match,
+        agent_decision=agent_decision,
+    )
+
+
 def _agent_promoted_match(
     session: Session,
     *,
@@ -797,6 +830,8 @@ def _agent_promoted_match(
     confidence = _agent_confidence(verdict.get("confidence"))
     if confidence is None:
         return None
+    # A new_candidate has no deterministic candidate set; the agent-selected
+    # project becomes the single audited attribution candidate.
     return NewsMatchResult(
         status=NewsMatchStatus.CONFIRMED,
         match_type=AGENT_PROMOTED_EXISTING_PROJECT_MATCH,
@@ -806,6 +841,47 @@ def _agent_promoted_match(
         reason=(
             "Agent promoted deterministic new_candidate to an existing project "
             f"after tool review; agent_run_id={result.agent_run_id}."
+        ),
+        diagnostics={"agent_run_id": str(result.agent_run_id)},
+    )
+
+
+def _agent_confirmed_possible_match(
+    session: Session,
+    *,
+    match: NewsMatchResult,
+    agent_decision: _NewsAgentDecision | None,
+) -> NewsMatchResult | None:
+    if match.status != NewsMatchStatus.POSSIBLE or agent_decision is None:
+        return None
+    result = agent_decision.result
+    if result.outcome != AgentRunOutcome.COMPLETED.value:
+        return None
+    verdict = result.agent_revised_verdict
+    if not isinstance(verdict, dict):
+        return None
+    if verdict.get("decision") != AGENT_CONFIRM_EXISTING_PROJECT_DECISION:
+        return None
+    project_id = _uuid_from_agent_verdict(verdict.get("project_id"))
+    if project_id is None or project_id not in set(match.candidate_project_ids):
+        return None
+    if session.get(Project, project_id) is None:
+        return None
+    confidence = _agent_confidence(verdict.get("confidence"))
+    if confidence is None:
+        return None
+    # Type 3 chooses from the matcher candidates; preserve the full original
+    # candidate set so audit can show what the agent selected from.
+    return NewsMatchResult(
+        status=NewsMatchStatus.CONFIRMED,
+        match_type=AGENT_CONFIRMED_POSSIBLE_MATCH,
+        confidence=confidence,
+        project_id=project_id,
+        candidate_project_ids=list(match.candidate_project_ids),
+        candidates=list(match.candidates),
+        reason=(
+            "Agent confirmed one deterministic possible-match candidate after "
+            f"tool review; agent_run_id={result.agent_run_id}."
         ),
         diagnostics={"agent_run_id": str(result.agent_run_id)},
     )

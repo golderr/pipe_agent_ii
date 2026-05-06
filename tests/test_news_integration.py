@@ -67,7 +67,7 @@ class FakeNewsAgentClient:
                 output_tokens=25,
             ),
             latency_ms=100,
-            reasoning_trace="Agent reviewed deterministic new candidate against available tools.",
+            reasoning_trace="Agent reviewed deterministic matcher output against available tools.",
             evidence_consulted=[
                 {
                     "source_type": "news_article",
@@ -661,6 +661,7 @@ def test_news_integration_creates_possible_match_review_item(
     postgres_session: Session,
 ) -> None:
     _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
     source = _news_source(postgres_session, "news_paste_a_link")
     canonical_address = _canonical("2200 Possible Boulevard, Los Angeles, CA 90012")
     project = _project(
@@ -686,15 +687,23 @@ def test_news_integration_creates_possible_match_review_item(
     source_run = _source_run(source)
     postgres_session.add(source_run)
     postgres_session.flush()
+    client = FakeNewsAgentClient({"decision": "no_change"})
 
     result = run_news_integration_for_article(
         article.id,
         source_run_id=source_run.id,
         session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
         now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
     )
 
     assert result.possible == 1
+    assert client.requests
+    request = client.requests[0]
+    assert request.trigger_reasons == ("possible_multi_candidate",)
+    assert request.matcher_results[0]["status"] == NewsMatchStatus.POSSIBLE.value
+    assert request.matcher_results[0]["candidate_project_ids"] == [str(project.id)]
     postgres_session.expire_all()
     refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
     assert refreshed_reference is not None
@@ -703,6 +712,206 @@ def test_news_integration_creates_possible_match_review_item(
     assert review_item is not None
     assert review_item.item_type == ReviewItemType.POSSIBLE_MATCH
     assert review_item.payload["candidate_project_ids"] == [str(project.id)]
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["possible_multi_candidate"]
+    link = postgres_session.get(
+        AgentRunReviewItem,
+        (agent_run.id, review_item.id),
+    )
+    assert link is not None
+
+
+def test_news_possible_match_agent_can_confirm_candidate_project(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2300 Candidate Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Candidate Pick Tower",
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Candidate Pick Tower",
+                candidate_address="2300 Candidate Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_existing_project",
+            "project_id": str(project.id),
+            "confidence": 0.91,
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.possible == 0
+    assert client.requests[0].trigger_reasons == ("possible_multi_candidate",)
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
+    assert refreshed_reference.matched_project_id == project.id
+    assert refreshed_reference.match_candidates["match_type"] == (
+        "agent_confirmed_possible_match"
+    )
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.project_id == project.id
+    possible_items = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.item_type == ReviewItemType.POSSIBLE_MATCH,
+            ReviewItem.source_run_id == source_run.id,
+        )
+    ).scalars().all()
+    assert possible_items == []
+
+
+def test_news_possible_match_agent_rejects_off_list_project_id(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2400 Guarded Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Guarded Candidate Tower",
+    )
+    other_project = _project(
+        source,
+        canonical_address=_canonical("2500 Other Boulevard, Los Angeles, CA 90012"),
+        project_name="Other Agent Tower",
+    )
+    article = _article(source)
+    postgres_session.add_all([project, other_project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Guarded Candidate Tower",
+                candidate_address="2400 Guarded Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_existing_project",
+            "project_id": str(other_project.id),
+            "confidence": 0.91,
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 0
+    assert result.possible == 1
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.POSSIBLE.value
+    assert refreshed_reference.matched_project_id is None
+    review_item = postgres_session.get(ReviewItem, refreshed_reference.review_item_id)
+    assert review_item is not None
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.agent_revised_verdict == {
+        "decision": "confirm_existing_project",
+        "project_id": str(other_project.id),
+        "confidence": 0.91,
+    }
+    link = postgres_session.get(
+        AgentRunReviewItem,
+        (agent_run.id, review_item.id),
+    )
+    assert link is not None
+
+
+def test_news_possible_match_requires_live_llm_opt_in_without_injected_client(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2600 Live Guard Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Possible Live Guard Tower",
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, _reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Possible Live Guard Tower",
+                candidate_address="2600 Live Guard Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+
+    with pytest.raises(RuntimeError, match="AGENT_ALLOW_LIVE_LLM=true"):
+        run_news_integration_for_article(
+            article.id,
+            source_run_id=source_run.id,
+            session_factory=_task_session_factory(postgres_session),
+            settings=Settings(
+                agent_enabled_for_news=True,
+                agent_allow_live_llm=False,
+                news_use_legacy_pass3=False,
+            ),
+            now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        )
 
 
 def test_news_new_candidate_accept_links_orphan_evidence(

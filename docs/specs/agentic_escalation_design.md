@@ -508,7 +508,7 @@ The runner is the same code regardless of source. What varies is the `SourceProf
 
 **News payload contract.** For news, `intake.payload` is lean structured context only: title, URL, source slug, published date, extracted references, and compact matcher verdict summaries. It must not carry the full article body. Full body, accepted article chunks, registry state, and nearby project context are fetched on demand through tools so the base user message stays small across multi-turn loops.
 
-**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. The Anthropic tool-loop client shell and bounded tool registry now exist. First news integration wiring is intentionally narrow: only `new_candidate` references call the agent, and only Type 1 `promote_existing_project` can revise deterministic output in this slice.
+**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. The Anthropic tool-loop client shell and bounded tool registry now exist. First news integration wiring is intentionally narrow: `new_candidate` references can call the agent for Type 1 `promote_existing_project`; `possible` references with deterministic candidate IDs can call the agent for Type 3 `confirm_existing_project`, constrained to the matcher-provided candidate list. No-change, escalation, invalid revision payloads, and failures preserve deterministic review fallback.
 
 **Runner loop (pseudocode).**
 ```
@@ -1461,6 +1461,11 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - `agent_allow_live_llm=false` blocks construction of real agent clients; injected fake/test clients still run. Live production routing must explicitly set it true.
   - Malformed promotion confidence is rejected; missing confidence defaults to 0.93, while non-numeric or out-of-range confidence falls back to deterministic review rather than silently swapping the value.
   - `news_use_legacy_pass3=true` preserves the old Pass 3b re-extraction path for emergency fallback. Default AGENT.2 behavior is no Pass 3b; the agent handles `new_candidate` review/promotion and the deterministic review item remains the safe fallback.
+
+- **2026-05-06 (revision 31) — Possible-match Type 3 routing.**
+  - `possible` matcher outcomes with deterministic `candidate_project_ids` now route through `news_v1` using the `possible_multi_candidate` trigger.
+  - The only mutating verdict is `{"decision": "confirm_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}` and the selected project must be one of the matcher-provided candidate IDs. Off-list IDs, invalid confidence, `no_change`, `escalated`, failed, budget-rejected, timeout, and killed-by-switch outcomes all preserve the deterministic possible-match review item.
+  - Produced fallback review items are linked through `agent_run_review_items`; confirmed Type 3 matches write evidence against the selected project and use `match_type='agent_confirmed_possible_match'`.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

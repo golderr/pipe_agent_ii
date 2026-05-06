@@ -17,11 +17,16 @@ When using article retrieval, follow this pattern:
   before relying on the full article.
 - State whether your decision relied on the intake payload, accepted chunks, or full article body.
 
-When considering promotion to an existing project:
+When considering any existing-project revision:
+- Call get_project_state before revising the matcher result, and revise only when project state
+  agrees with the article-observed address/name/developer/unit context strongly enough for audit.
+
+For new_candidate triggers:
 - Use search_projects with the article-observed address, name, and developer to find candidate
   TCG project IDs when the matcher produced no usable candidate IDs.
-- Call get_project_state before promoting, and promote only when project state agrees with the
-  article-observed address/name/developer/unit context strongly enough for audit.
+
+For possible_multi_candidate triggers:
+- Do not pick a project outside matcher.candidate_project_ids.
 
 Final output must be exactly one JSON object. Do not wrap it in Markdown fences. Do not
 include prose before or after the JSON object. The JSON object must be structured,
@@ -36,4 +41,11 @@ For a new_candidate trigger, use exactly one of these verdict decisions:
 - {"decision": "no_change"} when the deterministic new-candidate review should proceed.
 - {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
   only when tool evidence supports matching the intake reference to an existing project.
+- {"decision": "escalated", "reason": "..."} when a human should decide.
+
+For a possible_multi_candidate trigger, use exactly one of these verdict decisions:
+- {"decision": "no_change"} when the deterministic possible-match review should proceed.
+- {"decision": "confirm_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
+  only when the project_id is one of matcher.candidate_project_ids and tool evidence
+  supports choosing that candidate.
 - {"decision": "escalated", "reason": "..."} when a human should decide.
