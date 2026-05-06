@@ -53,6 +53,7 @@ class SourceProfile:
     max_cost_usd: Decimal = DEFAULT_AGENT_MAX_COST_USD
     max_wallclock_seconds: int = DEFAULT_AGENT_MAX_WALLCLOCK_SECONDS
     max_output_tokens: int = DEFAULT_AGENT_MAX_OUTPUT_TOKENS
+    required_intake_fields: frozenset[str] = frozenset()
 
 
 CORE_AGENT_TOOLS = frozenset(
@@ -91,6 +92,7 @@ NEWS_AGENT_PROFILE = SourceProfile(
     capability_key="agent.news_v1",
     profile_version=NEWS_AGENT_PROFILE_VERSION,
     prompt_version=NEWS_AGENT_PROMPT_VERSION,
+    required_intake_fields=frozenset({"extraction_id"}),
 )
 SOURCE_PROFILES: Mapping[str, SourceProfile] = MappingProxyType(
     {

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import queue
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -8,6 +10,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.agents.profiles import (
@@ -18,8 +22,9 @@ from tcg_pipeline.agents.profiles import (
     validate_triggers_for_profile,
 )
 from tcg_pipeline.db.connection import get_session_factory
-from tcg_pipeline.db.models import AgentRun, AgentRunOutcome, AgentRunReviewItem
+from tcg_pipeline.db.models import AgentRun, AgentRunOutcome, AgentRunReviewItem, SystemAlert
 from tcg_pipeline.news.costs import (
+    cost_date_for,
     record_llm_cost,
     release_llm_cost_reservation,
     reserve_llm_cost,
@@ -75,6 +80,10 @@ class AgentRunResult:
     error_text: str | None
     cost_usd: Decimal
     review_item_ids: tuple[uuid.UUID, ...] = ()
+
+
+class _ClientRunTimeoutError(TimeoutError):
+    pass
 
 
 def run_agent_for_intake(
@@ -167,7 +176,46 @@ def run_agent_for_intake(
     )
     started_counter = time.perf_counter()
     try:
-        client_result = client.run(request)
+        client_result = _run_client_with_timeout(
+            client,
+            request,
+            timeout_seconds=profile.max_wallclock_seconds,
+        )
+    except _ClientRunTimeoutError as exc:
+        completed = datetime.now(UTC)
+        wallclock_seconds = max(0, int(time.perf_counter() - started_counter))
+        with resolved_session_factory() as session:
+            release_llm_cost_reservation(
+                session,
+                reserved_cost_usd=profile.max_cost_usd,
+                bucket=profile.cost_cap_bucket,
+                now=current,
+            )
+            agent_run = _persist_agent_run(
+                session,
+                intake=intake,
+                profile=profile,
+                trigger_reasons=normalized_triggers,
+                provider=client.provider,
+                model=client.model,
+                prompt_version=client.prompt_version,
+                outcome=AgentRunOutcome.FAILED_TIMEOUT.value,
+                error_text=str(exc),
+                started_at=current,
+                completed_at=completed,
+                matcher_results=matcher_results,
+                latency_ms=wallclock_seconds * 1000,
+                wallclock_seconds=wallclock_seconds,
+                review_item_ids=review_item_ids,
+            )
+            session.commit()
+            return AgentRunResult(
+                agent_run_id=agent_run.id,
+                outcome=AgentRunOutcome.FAILED_TIMEOUT.value,
+                error_text=agent_run.error_text,
+                cost_usd=Decimal("0"),
+                review_item_ids=review_item_ids,
+            )
     except Exception as exc:
         completed = datetime.now(UTC)
         wallclock_seconds = max(0, int(time.perf_counter() - started_counter))
@@ -213,6 +261,24 @@ def run_agent_for_intake(
         input_tokens_cached=client_result.usage.input_tokens_cached,
         output_tokens=client_result.usage.output_tokens,
     )
+    outcome = client_result.outcome
+    error_text = client_result.error_text
+    tool_calls_summary = client_result.tool_calls_summary or []
+    tool_call_count = len(tool_calls_summary)
+    tool_count_exceeded = tool_call_count > profile.max_tool_calls
+    cost_exceeded = cost_usd > profile.max_cost_usd
+    if tool_count_exceeded:
+        outcome = AgentRunOutcome.FAILED_ERROR.value
+        error_text = _join_error_text(
+            error_text,
+            f"tool call count {tool_call_count} exceeded max {profile.max_tool_calls}",
+        )
+    if cost_exceeded:
+        outcome = AgentRunOutcome.FAILED_BUDGET.value
+        error_text = _join_error_text(
+            error_text,
+            f"cost {cost_usd} exceeded per-run cap {profile.max_cost_usd}",
+        )
     with resolved_session_factory() as session:
         record_llm_cost(
             session,
@@ -228,6 +294,16 @@ def run_agent_for_intake(
             bucket=profile.cost_cap_bucket,
             now=current,
         )
+        if cost_exceeded:
+            _raise_agent_cost_overshoot_alert(
+                session,
+                intake=intake,
+                profile=profile,
+                provider=client.provider,
+                model=client.model,
+                cost_usd=cost_usd,
+                now=current,
+            )
         agent_run = _persist_agent_run(
             session,
             intake=intake,
@@ -236,8 +312,8 @@ def run_agent_for_intake(
             provider=client.provider,
             model=client.model,
             prompt_version=client.prompt_version,
-            outcome=client_result.outcome,
-            error_text=client_result.error_text,
+            outcome=outcome,
+            error_text=error_text,
             started_at=current,
             completed_at=completed,
             matcher_results=matcher_results,
@@ -246,7 +322,7 @@ def run_agent_for_intake(
             latency_ms=client_result.latency_ms,
             reasoning_trace=client_result.reasoning_trace,
             evidence_consulted=client_result.evidence_consulted,
-            tool_calls_summary=client_result.tool_calls_summary,
+            tool_calls_summary=tool_calls_summary,
             agent_revised_verdict=client_result.agent_revised_verdict,
             wallclock_seconds=wallclock_seconds,
             review_item_ids=review_item_ids,
@@ -254,8 +330,8 @@ def run_agent_for_intake(
         session.commit()
         return AgentRunResult(
             agent_run_id=agent_run.id,
-            outcome=client_result.outcome,
-            error_text=client_result.error_text,
+            outcome=outcome,
+            error_text=error_text,
             cost_usd=cost_usd,
             review_item_ids=review_item_ids,
         )
@@ -360,6 +436,105 @@ def _validate_intake_profile(*, intake: IntakeRecord, profile: SourceProfile) ->
             f"Profile {profile.name} expects source_type={profile.intake_source_type}; "
             f"got {intake.source_type}."
         )
+    missing_fields = sorted(
+        field_name
+        for field_name in profile.required_intake_fields
+        if getattr(intake, field_name, None) is None
+    )
+    if missing_fields:
+        raise ValueError(
+            f"Profile {profile.name} requires intake field(s): {', '.join(missing_fields)}"
+        )
+
+
+def _run_client_with_timeout(
+    client: AgentClient,
+    request: AgentRunRequest,
+    *,
+    timeout_seconds: int | float,
+) -> AgentClientResult:
+    result_queue: queue.Queue[tuple[str, AgentClientResult | BaseException]] = queue.Queue(
+        maxsize=1
+    )
+
+    def target() -> None:
+        try:
+            result_queue.put(("result", client.run(request)))
+        except BaseException as exc:  # noqa: BLE001 - propagates SDK/client failures.
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(
+        target=target,
+        name=f"agent-client-{request.profile.name}",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(max(float(timeout_seconds), 0))
+    if thread.is_alive():
+        raise _ClientRunTimeoutError(f"exceeded {timeout_seconds}s")
+    result_type, result = result_queue.get_nowait()
+    if result_type == "error":
+        raise result
+    return result
+
+
+def _raise_agent_cost_overshoot_alert(
+    session: Session,
+    *,
+    intake: IntakeRecord,
+    profile: SourceProfile,
+    provider: str,
+    model: str,
+    cost_usd: Decimal,
+    now: datetime,
+) -> None:
+    cost_date = cost_date_for(now)
+    scope = {
+        "cost_date": cost_date.isoformat(),
+        "profile_name": profile.name,
+    }
+    detail = {
+        "bucket": profile.cost_cap_bucket,
+        "cost_usd": str(cost_usd),
+        "per_run_cap_usd": str(profile.max_cost_usd),
+        "profile_name": profile.name,
+        "intake_source_type": intake.source_type,
+        "intake_record_id": intake.intake_record_id,
+        "provider": provider,
+        "model": model,
+    }
+    statement = (
+        insert(SystemAlert)
+        .values(
+            alert_key=f"agent_{profile.name}_cost_overshoot",
+            severity="high",
+            scope=scope,
+            message=f"Agent run exceeded per-run cost cap for {profile.name}.",
+            detail=detail,
+            raised_at=now,
+            last_seen_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[
+                SystemAlert.alert_key,
+                text("COALESCE(scope::text, '{}')"),
+            ],
+            index_where=text("cleared_at IS NULL"),
+            set_={
+                "severity": "high",
+                "message": f"Agent run exceeded per-run cost cap for {profile.name}.",
+                "detail": detail,
+                "last_seen_at": now,
+            },
+        )
+    )
+    session.execute(statement)
+
+
+def _join_error_text(existing: str | None, addition: str) -> str:
+    if not existing:
+        return addition
+    return f"{existing}; {addition}"
 
 
 def _agent_enabled(*, settings: Settings, profile: SourceProfile) -> bool:

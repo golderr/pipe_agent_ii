@@ -504,7 +504,7 @@ class IntakeRecord:
 
 The runner is the same code regardless of source. What varies is the `SourceProfile`: which tools the agent can call, which system prompt frames the task, which cost-cap bucket the run charges, which kill switch gates execution.
 
-**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the inert source-agnostic runner skeleton and profile registry. The runner validates triggers/source type, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. It does not yet include the real Anthropic tool-loop client or production news integration wiring.
+**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the inert source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. It does not yet include the real Anthropic tool-loop client or production news integration wiring.
 
 **Runner loop (pseudocode).**
 ```
@@ -539,9 +539,11 @@ while not budget.exhausted():
 return AgentRunFailure("budget_exhausted", trace, budget)
 ```
 
-**Per-run cost cap.** Hard ceiling $5.00 (proposal's suggestion), but normal-case target much lower — see §9.
+**Per-run cost cap.** Hard ceiling $5.00 (proposal's suggestion), but normal-case target much lower — see §9. The runner reserves this amount before the client call and performs a post-hoc priced-usage check after the call. If actual usage exceeds the per-run cap, the runner records the actual cost, writes a terminal `failed_budget` audit row, raises a `SystemAlert`, and leaves the deterministic result standing.
 
-**Wallclock cap.** 300 seconds per agent run. Latency is not a constraint for researchers; the cap exists only to bound runaway agent loops.
+**Wallclock cap.** 300 seconds per agent run. Latency is not a constraint for researchers; the cap exists only to bound runaway agent loops. The runner owns timeout enforcement around the client call; timeout writes `outcome='failed_timeout'`, releases the reservation, and leaves deterministic output standing.
+
+**Tool-count cap.** The runner owns a final sanity check that `len(tool_calls_summary) <= profile.max_tool_calls`, even though individual tools also enforce §5.4.1 output budgets internally. If the client exceeds the profile cap, the runner records the incurred cost, writes `outcome='failed_error'`, and leaves deterministic output standing.
 
 **Worker model — one job per article (Q17 / R8 decision).** Stage 2 splits today's "one scrape job ingests N articles end-to-end" pattern into two job kinds:
 - `news_scrape_discovery` — runs the discovery + fetch + Pass 1 + triage + default extraction for all articles in a scheduled batch. This is fast and bounded; today's 900s timeout is fine.
@@ -997,6 +999,7 @@ class SourceProfile:
 - Prompt path: `prompts/agent/news_v1/system.md`.
 - Cap bucket: `news` (existing daily cap row).
 - Kill switch: `agent_enabled_for_news`.
+- Required intake fields: `extraction_id` (string `intake_record_id` remains the news article id; `extraction_id` anchors the specific default extraction the agent reasoned over).
 
 Implementation path: `tcg_pipeline.agents.profiles.NEWS_AGENT_PROFILE`. Capability key: `agent.news_v1`. Current prompt scaffold path: `src/tcg_pipeline/agents/prompts/news_v1/system.md`.
 
@@ -1402,6 +1405,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Implemented terminal `agent_runs` persistence for kill-switch, daily-budget rejection, client failure, and successful injected-client paths, including `agent_run_review_items` linkage and `llm_cost_usage` rows under `agent.news_v1`.
   - Added `news_v1` system-prompt scaffold emphasizing no outside knowledge, source/tool anchoring, bounded tool summaries, and final structured output.
   - Production news ingestion remains unchanged until the real AGENT.2 client/tools and cutover wiring land.
+
+- **2026-05-05 (revision 25) — Runner-owned safety guardrails.**
+  - The runner now owns wallclock timeout enforcement around the client call. Timeout writes `outcome='failed_timeout'`, releases the reservation, and preserves deterministic behavior.
+  - The runner now performs post-hoc `tool_calls_summary` count checks and per-run cost checks. Tool-count violations write `failed_error`; cost overshoots write `failed_budget`, record actual cost, and raise a `SystemAlert`.
+  - `SourceProfile.required_intake_fields` added. `NEWS_AGENT_PROFILE` requires `extraction_id` so the agent cannot run without the default-extraction anchor.
+  - Added focused tests for timeout, tool-count violation, cost-overshoot alerting, and missing news extraction anchor.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

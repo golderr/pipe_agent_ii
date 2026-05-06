@@ -25,6 +25,7 @@ def test_news_agent_profile_contract() -> None:
     assert "pipeline_status" in profile.semantic_interpreters
     assert "date_delivery" in profile.semantic_interpreters
     assert profile.max_tool_calls == 15
+    assert profile.required_intake_fields == frozenset({"extraction_id"})
 
 
 def test_normalize_agent_triggers_accepts_enums_and_strings() -> None:
