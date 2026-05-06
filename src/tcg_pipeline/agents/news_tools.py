@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import re
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -39,6 +39,8 @@ SEARCH_ARTICLES_SIMILAR_SQL = text(
         npr.candidate_address,
         npr.candidate_developer,
         npr.match_status,
+        npr.matched_project_id,
+        npr.matched_evidence_id,
         (c.embedding <=> CAST(:query_embedding AS vector)) AS distance
     FROM news_article_chunks c
     JOIN news_articles a ON a.id = c.article_id
@@ -50,6 +52,10 @@ SEARCH_ARTICLES_SIMILAR_SQL = text(
       AND c.superseded_at IS NULL
       AND c.model = :model
       AND (:include_whole_article_chunks OR c.reference_index IS NOT NULL)
+      AND (
+          CAST(:published_after AS timestamptz) IS NULL
+          OR a.published_at >= CAST(:published_after AS timestamptz)
+      )
     ORDER BY c.embedding <=> CAST(:query_embedding AS vector)
     LIMIT :limit
     """
@@ -59,10 +65,15 @@ SEARCH_ARTICLES_SIMILAR_COUNT_SQL = text(
     """
     SELECT count(*)
     FROM news_article_chunks c
+    JOIN news_articles a ON a.id = c.article_id
     WHERE c.embedding IS NOT NULL
       AND c.superseded_at IS NULL
       AND c.model = :model
       AND (:include_whole_article_chunks OR c.reference_index IS NOT NULL)
+      AND (
+          CAST(:published_after AS timestamptz) IS NULL
+          OR a.published_at >= CAST(:published_after AS timestamptz)
+      )
     """
 )
 
@@ -78,6 +89,10 @@ def handle_search_articles_similar(
         maximum=SEARCH_ARTICLES_SIMILAR_MAX_TOP_K,
     )
     include_whole_article_chunks = bool(tool_input.get("include_whole_article_chunks") or False)
+    published_after = _optional_datetime(
+        tool_input.get("published_after"),
+        field_name="published_after",
+    )
     if request.session_factory is None:
         raise AgentToolError("Tool search_articles_similar requires a session_factory.")
 
@@ -93,6 +108,7 @@ def handle_search_articles_similar(
             "query_embedding": query_embedding,
             "model": embedding_response.model,
             "include_whole_article_chunks": include_whole_article_chunks,
+            "published_after": published_after,
             "limit": top_k,
         }
         rows = session.execute(SEARCH_ARTICLES_SIMILAR_SQL, params).mappings().all()
@@ -106,6 +122,7 @@ def handle_search_articles_similar(
         "embedding_model": embedding_response.model,
         "top_k": top_k,
         "include_whole_article_chunks": include_whole_article_chunks,
+        "published_after": _serialize(published_after),
         "total_available": total_available,
         "matches": matches,
         "query_embedding_cost_accounting": "ignored_negligible",
@@ -167,10 +184,11 @@ SEARCH_ARTICLES_SIMILAR_TOOL = AgentTool(
         "you need prior accepted articles about a project, address, developer, or source phrase. "
         "Input requires query_text. Optional top_k defaults to 5 and is capped at 10. By default "
         "whole-article context chunks are excluded; set include_whole_article_chunks only when "
-        "reference-specific chunks are insufficient. Output returns compact chunk excerpts, "
-        "article IDs, URLs, similarity, gate source, and reference metadata. If a match matters, "
-        "call get_article_body on the returned article_id before treating the full article as "
-        "evidence."
+        "reference-specific chunks are insufficient. Use published_after as an ISO date or "
+        "datetime when freshness matters. Output returns compact chunk excerpts, article IDs, "
+        "URLs, similarity, gate source, matched project/evidence IDs when available, and "
+        "reference metadata. If a match matters, call get_article_body on the returned "
+        "article_id before treating the full article as evidence."
     ),
     input_schema={
         "type": "object",
@@ -188,6 +206,10 @@ SEARCH_ARTICLES_SIMILAR_TOOL = AgentTool(
             "include_whole_article_chunks": {
                 "type": "boolean",
                 "description": "Include broad whole-article chunks. Defaults to false.",
+            },
+            "published_after": {
+                "type": "string",
+                "description": "Optional ISO date/datetime lower bound for article published_at.",
             },
         },
         "required": ["query_text"],
@@ -261,6 +283,8 @@ def _similar_article_payload(row: Any) -> dict[str, Any]:
         "candidate_address": row["candidate_address"],
         "candidate_developer": row["candidate_developer"],
         "match_status": row["match_status"],
+        "matched_project_id": _serialize(row["matched_project_id"]),
+        "matched_evidence_id": _serialize(row["matched_evidence_id"]),
     }
 
 
@@ -288,6 +312,22 @@ def _bounded_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError) as exc:
         raise AgentToolError("Tool integer parameter must be a valid integer.") from exc
     return max(1, min(parsed, maximum))
+
+
+def _optional_datetime(value: Any, *, field_name: str) -> datetime | None:
+    if value in (None, ""):
+        return None
+    text_value = str(value).strip()
+    try:
+        if "T" not in text_value and " " not in text_value:
+            parsed = datetime.combine(date.fromisoformat(text_value), datetime.min.time())
+        else:
+            parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AgentToolError(f"Tool requires {field_name} to be an ISO date or datetime.") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _vector_literal(embedding: list[float]) -> str:

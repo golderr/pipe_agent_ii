@@ -26,6 +26,9 @@ from tcg_pipeline.db.models import (
     Evidence,
     NewsArticle,
     NewsArticleChunk,
+    NewsExtraction,
+    NewsMatchStatus,
+    NewsProjectReference,
     NewsSource,
     PipelineStatus,
     ProductType,
@@ -234,8 +237,45 @@ def test_search_articles_similar_returns_compact_chunk_results(
     _ensure_agent1_tables(postgres_session)
     source = _news_source()
     article = _news_article(source, title="Accepted Tower proposed")
-    postgres_session.add_all([source, article])
+    project = Project(
+        canonical_address="123 MAIN STREET LOS ANGELES CA 90012",
+        raw_addresses=["123 Main St"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Accepted Tower",
+        developer="HPG",
+        pipeline_status=PipelineStatus.PROPOSED,
+        total_units=120,
+    )
+    postgres_session.add_all([source, article, project])
     postgres_session.flush()
+    evidence = Evidence(
+        project_id=project.id,
+        source_type="news_article",
+        source_tier=2,
+        ingest_method="test",
+        collected_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 5),
+        extracted_fields={"total_units": {"value": 120, "confidence": "high"}},
+        notes="Article reported Accepted Tower.",
+    )
+    extraction = _news_extraction(article)
+    postgres_session.add_all([evidence, extraction])
+    postgres_session.flush()
+    reference = NewsProjectReference(
+        article_id=article.id,
+        extraction_id=extraction.id,
+        reference_index=0,
+        candidate_name="Accepted Tower",
+        candidate_address="123 Main St",
+        candidate_developer="HPG",
+        candidate_confidence="high",
+        match_status=NewsMatchStatus.CONFIRMED.value,
+        matched_project_id=project.id,
+        matched_evidence_id=evidence.id,
+    )
     chunk = NewsArticleChunk(
         article_id=article.id,
         reference_index=0,
@@ -256,7 +296,7 @@ def test_search_articles_similar_returns_compact_chunk_results(
         model="text-embedding-3-small",
         gate_source="review_accept",
     )
-    postgres_session.add_all([chunk, whole_article_chunk])
+    postgres_session.add_all([reference, chunk, whole_article_chunk])
     postgres_session.flush()
     request = _agent_request(postgres_session, embedding_client=_FakeEmbeddingClient())
     registry = build_agent_tool_registry()
@@ -277,7 +317,96 @@ def test_search_articles_similar_returns_compact_chunk_results(
     assert match["reference_index"] == 0
     assert match["similarity"] == 1
     assert len(match["excerpt"]) <= 200
+    assert match["match_status"] == NewsMatchStatus.CONFIRMED.value
+    assert match["matched_project_id"] == str(project.id)
+    assert match["matched_evidence_id"] == str(evidence.id)
     assert result.summary["tool"] == "search_articles_similar"
+
+
+def test_search_articles_similar_filters_by_published_after(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent1_tables(postgres_session)
+    source = _news_source()
+    old_article = _news_article(
+        source,
+        title="Old accepted article",
+        published_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+    )
+    fresh_article = _news_article(
+        source,
+        title="Fresh accepted article",
+        published_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+    )
+    postgres_session.add_all([source, old_article, fresh_article])
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            NewsArticleChunk(
+                article_id=old_article.id,
+                reference_index=0,
+                chunk_text="Accepted Tower older article near Main Street.",
+                embedding=[1.0] + [0.0] * 1535,
+                embedded_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+                model="text-embedding-3-small",
+                gate_source="review_accept",
+            ),
+            NewsArticleChunk(
+                article_id=fresh_article.id,
+                reference_index=0,
+                chunk_text="Accepted Tower fresh article near Main Street.",
+                embedding=[1.0] + [0.0] * 1535,
+                embedded_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+                model="text-embedding-3-small",
+                gate_source="review_accept",
+            ),
+        ]
+    )
+    postgres_session.flush()
+    request = _agent_request(postgres_session, embedding_client=_FakeEmbeddingClient())
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="search_articles_similar",
+        tool_input={
+            "query_text": "Accepted Tower Main Street",
+            "published_after": "2026-05-01",
+            "top_k": 10,
+        },
+        profile=NEWS_AGENT_PROFILE,
+        request=request,
+    )
+
+    article_ids = {match["article_id"] for match in result.content["matches"]}
+    assert str(fresh_article.id) in article_ids
+    assert str(old_article.id) not in article_ids
+    assert result.content["published_after"] == "2026-05-01 00:00:00+00:00"
+    assert result.content["total_available"] == 1
+
+
+def test_search_articles_similar_rejects_invalid_published_after() -> None:
+    request = AgentRunRequest(
+        intake=IntakeRecord(
+            source_type="news_article",
+            intake_record_id=str(uuid.uuid4()),
+            extraction_id=uuid.uuid4(),
+        ),
+        matcher_results=(),
+        trigger_reasons=("new_candidate",),
+        profile=NEWS_AGENT_PROFILE,
+    )
+    registry = build_agent_tool_registry()
+
+    with pytest.raises(AgentToolError, match="published_after"):
+        registry.dispatch(
+            tool_name="search_articles_similar",
+            tool_input={
+                "query_text": "Accepted Tower Main Street",
+                "published_after": "not-a-date",
+            },
+            profile=NEWS_AGENT_PROFILE,
+            request=request,
+        )
 
 
 def test_search_articles_similar_requires_query_text() -> None:
@@ -324,7 +453,15 @@ def _ensure_agent1_tables(postgres_session: Session) -> None:
     inspector = inspect(postgres_session.bind)
     missing = [
         table_name
-        for table_name in ("news_sources", "news_articles", "news_article_chunks")
+        for table_name in (
+            "projects",
+            "evidence",
+            "news_sources",
+            "news_articles",
+            "news_extractions",
+            "news_project_references",
+            "news_article_chunks",
+        )
         if not inspector.has_table(table_name)
     ]
     if missing:
@@ -368,7 +505,13 @@ def _news_source() -> NewsSource:
     )
 
 
-def _news_article(source: NewsSource, *, title: str = "Agent article", body_text: str = "Body"):
+def _news_article(
+    source: NewsSource,
+    *,
+    title: str = "Agent article",
+    body_text: str = "Body",
+    published_at: datetime | None = None,
+):
     return NewsArticle(
         news_source_id=source.id,
         url_canonical=f"https://example.com/{uuid.uuid4().hex}",
@@ -379,8 +522,21 @@ def _news_article(source: NewsSource, *, title: str = "Agent article", body_text
         body_text=body_text,
         body_text_hash=uuid.uuid4().hex + uuid.uuid4().hex,
         title=title,
-        published_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        published_at=published_at or datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
         ingest_method="test",
+    )
+
+
+def _news_extraction(article: NewsArticle) -> NewsExtraction:
+    return NewsExtraction(
+        article_id=article.id,
+        pass_name="extraction",
+        triggered_by="test",
+        prompt_id="extract_v2",
+        prompt_version="v2",
+        prompt_hash=uuid.uuid4().hex,
+        model="claude-opus-4-7",
+        output_json={"project_references": []},
     )
 
 

@@ -21,4 +21,10 @@ Final output must be structured, concise, and source-anchored:
 - reasoning_trace: 100-500 characters explaining the decision.
 - evidence_consulted: source records or tool results actually used.
 - tool_calls_summary: every tool call made, with bounded result summary.
-- agent_revised_verdict: one final verdict, including no_change when the deterministic result stands.
+- agent_revised_verdict: one final verdict.
+
+For a new_candidate trigger, use exactly one of these verdict decisions:
+- {"decision": "no_change"} when the deterministic new-candidate review should proceed.
+- {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
+  only when tool evidence supports matching the intake reference to an existing project.
+- {"decision": "escalated", "reason": "..."} when a human should decide.

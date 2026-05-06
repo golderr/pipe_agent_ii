@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     news_embedding_timeout_seconds: float = Field(default=60.0, ge=1)
     agent_enabled_for_news: bool = True
     agent_enabled_for_permits: bool = True
+    agent_allow_live_llm: bool = False
     news_use_legacy_pass3: bool = False
 
     api_cors_origins: str = "http://localhost:3000"

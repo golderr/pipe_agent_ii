@@ -508,7 +508,7 @@ The runner is the same code regardless of source. What varies is the `SourceProf
 
 **News payload contract.** For news, `intake.payload` is lean structured context only: title, URL, source slug, published date, extracted references, and compact matcher verdict summaries. It must not carry the full article body. Full body, accepted article chunks, registry state, and nearby project context are fetched on demand through tools so the base user message stays small across multi-turn loops.
 
-**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. The Anthropic tool-loop client shell and bounded tool registry now exist; real data-backed tool handlers and production news integration wiring are still deferred.
+**Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. The Anthropic tool-loop client shell and bounded tool registry now exist. First news integration wiring is intentionally narrow: only `new_candidate` references call the agent, and only Type 1 `promote_existing_project` can revise deterministic output in this slice.
 
 **Runner loop (pseudocode).**
 ```
@@ -565,7 +565,7 @@ The discovery job enqueues integration jobs after Pass 2 completes; integration 
 
 Tools are categorized so each source profile can declare exactly which subset its agent runs may call. The runner enforces the subset; tools outside the profile are not visible to the agent.
 
-**Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. The first DB-backed tools are live: `get_project_state` reads `Project`, `project_field_resolution`, `project_latest_evidence`, and referenced evidence metadata through `request.session_factory`; `search_articles_similar` embeds a query and searches accepted `news_article_chunks`; `get_article_body` fetches stored article text after search narrows to an article.
+**Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. The first DB-backed tools are live: `get_project_state` reads `Project`, `project_field_resolution`, `project_latest_evidence`, and referenced evidence metadata through `request.session_factory`; `search_articles_similar` embeds a query and searches accepted `news_article_chunks`; `get_article_body` fetches stored article text after search narrows to an article. `search_articles_similar` supports a `published_after` freshness filter and returns matched project/evidence IDs when the accepted reference was already attributed, so the agent can follow a similar article into `get_project_state`.
 
 Registry truncation is the last-resort safety net. Real tools should self-limit first (top-K, compact row summaries, explicit `total_results`) so the agent still receives useful partial results rather than a generic truncation notice.
 
@@ -587,7 +587,7 @@ Registry truncation is the last-resort safety net. Real tools should self-limit 
 
 - **`search_articles_by_project(project_id, limit=20)`** — Joins `news_project_references` → `news_articles`, filters to references where `match_status = confirmed` AND associated review decision is `accept` (or auto-applied). Returns article URL, title, published_at, key extracted fields.
 
-- **`search_articles_similar(query_text, market=None, since=None, limit=10)`** — pgvector cosine similarity over the article-chunk embedding index. Filters to per-reference-accepted entries (per Q13). Returns top-K with similarity score, article metadata, accepted reference fields.
+- **`search_articles_similar(query_text, published_after=None, include_whole_article_chunks=false, limit=10)`** — pgvector cosine similarity over the article-chunk embedding index. Filters to per-reference-accepted entries (per Q13); optional `published_after` ISO date/datetime keeps recall fresh when stale articles are less useful than recent corroboration. Returns top-K with similarity score, article metadata, accepted reference fields, and matched project/evidence IDs when available.
 
 - **`get_article_body(article_id, max_chars=6000)`** — Fetches stored `news_articles.body_text` for a specific article after chunk search narrows candidates. Returns metadata + body excerpt only; no raw HTML. Hard `max_chars` cap 12000.
 
@@ -611,7 +611,7 @@ Per-run cost cap is meaningless if tools dump unbounded context back into the ag
 | `get_article_body` | ≤3500 tokens | Fetches stored body text for one article after chunk search narrows candidates. Defaults to 6000 chars, hard cap 12000 chars, no raw HTML. |
 | `get_recent_evidence` | ≤1500 tokens | Top 10 rows by default. Each row summarized to ≤150 tokens (source_type, evidence_date, key extracted_fields, ≤80-char notes excerpt). |
 | `search_articles_by_project` | ≤2000 tokens | Top 20 articles. Each entry: URL, title, published_at, ≤100-char extracted-summary line. |
-| `search_articles_similar` | ≤2500 tokens | Top 5 matches by default, hard cap 10. Each entry: similarity score, URL, title, published_at, ≤200-char excerpt. |
+| `search_articles_similar` | ≤2500 tokens | Top 5 matches by default, hard cap 10. Each entry: similarity score, URL, title, published_at, matched project/evidence IDs when available, ≤200-char excerpt. Optional `published_after` narrows stale-heavy indexes. |
 | `get_developer_projects` | ≤1500 tokens | Top 30 projects. Each entry: project_id, name, status, last_evidence_date, total_units. |
 | `get_nearby_projects` | ≤2000 tokens | Top 20 results within radius. Each entry: project_id, name, developer, status, **distance_feet**, last_updated, ≤80-char recent-evidence summary. |
 | `get_permits_for_parcel` | ≤1500 tokens | Top 20 permits. Each entry: permit_number, type, issue_date, ≤80-char work_description excerpt, valuation. |
@@ -961,6 +961,8 @@ If permits are cost-runaway, the news bucket is unaffected. Worst-case overshoot
 - `agent_enabled_for_news: bool` (default `true`) — when `false`, news intake falls back to default-extraction-only (no Pass 3a/3b, no agent reasoning).
 - `agent_enabled_for_permits: bool` (default `true`) — when `false`, permit intake falls back to today's deterministic `match_raw_record` path with no agent involvement.
 - `news_use_legacy_pass3: bool` (default `false`) — emergency-only fallback that re-routes news through the imported legacy Pass 3a/3b code (preserved as `extraction_legacy.py`). Used only if AGENT.2 has a regression that default-only mode can't paper over. Documented in Edit 1 above.
+
+**Live LLM opt-in.** `agent_allow_live_llm: bool` defaults to `false`. News integration may run with injected fake/test clients, but it will not construct a real Anthropic agent client unless this flag is explicitly true. Production workers must set it before live agent routing; tests and local development fail fast instead of accidentally spending LLM credits.
 
 The flags are read at agent-runner entry. Flipping `agent_enabled_for_permits` (or `agent_enabled_for_news`) to `false` takes effect on the next job; in-flight jobs complete normally.
 
@@ -1446,10 +1448,18 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 
 - **2026-05-05 (revision 29) — News retrieval tools complete the search-then-fetch pattern.**
   - `search_articles_similar` and `get_article_body` added in the same slice so the agent's first retrieval workflow is complete: search accepted chunks, narrow article candidates, then fetch stored body text only when needed.
-  - `search_articles_similar` uses the existing OpenAI news embedding client, searches active non-superseded `news_article_chunks`, excludes whole-article chunks by default, caps `top_k` at 10, and returns ≤200-char excerpts with article IDs/URLs/source metadata/gate source.
+  - `search_articles_similar` uses the existing OpenAI news embedding client, searches active non-superseded `news_article_chunks`, excludes whole-article chunks by default, caps `top_k` at 10, supports an optional `published_after` freshness filter, and returns ≤200-char excerpts with article IDs/URLs/source metadata/gate source plus matched project/evidence IDs when available.
   - `get_article_body` fetches title, URL, source slug, published date, and stored body text excerpt for one article; default 6000 chars, hard cap 12000 chars, no raw HTML.
   - News agent prompt updated to require the search-then-fetch pattern and to distinguish chunk evidence from full-body evidence.
   - Researcher decision: query-embedding cost for `search_articles_similar` is intentionally ignored as negligible and does not write cost rows.
+
+- **2026-05-05 (revision 30) — First narrow news trigger wiring.**
+  - `news/integration.py` now routes deterministic `new_candidate` matcher outcomes through the `news_v1` agent profile before writing final evidence/review output, unless `news_use_legacy_pass3=true`.
+  - First mutation contract is deliberately narrow: agent `{"decision": "promote_existing_project", "project_id": "<uuid>"}` can convert a deterministic `new_candidate` into a confirmed match to an existing project; `no_change`, `escalated`, failed, budget-rejected, timeout, and killed-by-switch outcomes all fall back to the deterministic new-candidate review item.
+  - Review items created after an agent run are linked back through `agent_run_review_items`; promoted matches carry the `agent_run_id` in matcher diagnostics and link any resulting status-change review item.
+  - `agent_allow_live_llm=false` blocks construction of real agent clients; injected fake/test clients still run. Live production routing must explicitly set it true.
+  - Malformed promotion confidence is rejected; missing confidence defaults to 0.93, while non-numeric or out-of-range confidence falls back to deterministic review rather than silently swapping the value.
+  - `news_use_legacy_pass3=true` preserves the old Pass 3b re-extraction path for emergency fallback. Default AGENT.2 behavior is no Pass 3b; the agent handles `new_candidate` review/promotion and the deterministic review item remains the safe fallback.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

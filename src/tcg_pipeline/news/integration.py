@@ -8,11 +8,22 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from tcg_pipeline.agents.client import build_anthropic_agent_client
+from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE, AgentTrigger
+from tcg_pipeline.agents.runner import (
+    AgentClient,
+    AgentRunResult,
+    IntakeRecord,
+    run_agent_for_intake,
+)
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.evidence import serialize_json, write_evidence
 from tcg_pipeline.db.models import (
+    AgentRunOutcome,
+    AgentRunReviewItem,
     AgeRestriction,
     Evidence,
     NewsArticle,
@@ -54,8 +65,11 @@ from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
 )
+from tcg_pipeline.settings import Settings, get_settings
 
 NEWS_SOURCE_TYPE = "news_article"
+AGENT_PROMOTED_EXISTING_PROJECT_MATCH = "agent_promoted_existing_project"
+AGENT_PROMOTE_EXISTING_PROJECT_DECISION = "promote_existing_project"
 ACTIVE_REVIEW_STATES = {"open", "staged"}
 REFERENCE_FIELD_TO_PROJECT_FIELD = {
     "candidate_name": "project_name",
@@ -145,6 +159,7 @@ class _ConfirmedReference:
     reference: NewsProjectReference
     match: NewsMatchResult
     evidence: Evidence
+    agent_run_id: uuid.UUID | None = None
 
 
 @dataclass(slots=True)
@@ -163,9 +178,12 @@ def run_news_integration_for_article(
     session_factory: sessionmaker[Session] | None = None,
     reextraction_runner: ReextractionRunner | None = None,
     reextraction_client: ExtractionLLMClient | None = None,
+    agent_client: AgentClient | None = None,
+    settings: Settings | None = None,
     now: datetime | None = None,
 ) -> NewsIntegrationResult:
     resolved_session_factory = session_factory or get_session_factory()
+    resolved_settings = settings or get_settings()
     current = now or datetime.now(UTC)
     first_pass = _load_current_references_and_matches(
         resolved_session_factory,
@@ -182,7 +200,10 @@ def run_news_integration_for_article(
         )
 
     pass3b_result: NewsExtractionRunResult | None = None
-    pass3b_triggered = _should_run_pass3b(first_pass)
+    pass3b_triggered = (
+        resolved_settings.news_use_legacy_pass3 and _should_run_pass3b(first_pass)
+    )
+    agent_decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
     if pass3b_triggered:
         runner = reextraction_runner or run_news_reextraction_for_article
         pass3b_result = runner(
@@ -192,6 +213,16 @@ def run_news_integration_for_article(
             prior_extraction_id=first_pass.extraction_id,
             session_factory=resolved_session_factory,
             client=reextraction_client,
+            now=current,
+        )
+    else:
+        agent_decisions = _run_news_agents_for_first_pass(
+            resolved_session_factory,
+            first_pass=first_pass,
+            source_run_id=source_run_id,
+            force_project_id=force_project_id,
+            settings=resolved_settings,
+            agent_client=agent_client,
             now=current,
         )
 
@@ -204,6 +235,7 @@ def run_news_integration_for_article(
             pass3b_triggered=pass3b_triggered,
             pass3b_result=pass3b_result,
             prior_extraction_id=first_pass.extraction_id if pass3b_triggered else None,
+            agent_decisions=agent_decisions,
             now=current,
         )
         session.commit()
@@ -219,6 +251,11 @@ class _FirstPassMatchSet:
     skipped_reason: str | None = None
     current_extraction_triggered_by: str | None = None
     force_project_id_dropped_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _NewsAgentDecision:
+    result: AgentRunResult
 
 
 def _load_current_references_and_matches(
@@ -298,6 +335,171 @@ def _pass3b_context(first_pass: _FirstPassMatchSet) -> dict[str, Any]:
     }
 
 
+def _run_news_agents_for_first_pass(
+    session_factory: sessionmaker[Session],
+    *,
+    first_pass: _FirstPassMatchSet,
+    source_run_id: uuid.UUID | None,
+    force_project_id: uuid.UUID | None,
+    settings: Settings,
+    agent_client: AgentClient | None,
+    now: datetime,
+) -> dict[uuid.UUID, _NewsAgentDecision]:
+    if first_pass.extraction_id is None:
+        return {}
+    new_candidate_pairs = [
+        (reference, match)
+        for reference, match in zip(first_pass.references, first_pass.matches, strict=True)
+        if match.status == NewsMatchStatus.NEW_CANDIDATE
+    ]
+    if not new_candidate_pairs:
+        return {}
+    client = agent_client
+    if settings.agent_enabled_for_news and client is None:
+        if not settings.agent_allow_live_llm:
+            raise RuntimeError(
+                "AGENT_ALLOW_LIVE_LLM=true is required before news integration "
+                "constructs a live agent LLM client."
+            )
+        client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
+
+    decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
+    for reference, match in new_candidate_pairs:
+        with session_factory() as session:
+            article = session.get(NewsArticle, first_pass.article_id)
+            extraction = session.get(NewsExtraction, first_pass.extraction_id)
+            current_reference = session.get(NewsProjectReference, reference.id)
+            if article is None or extraction is None or current_reference is None:
+                raise RuntimeError("News agent references missing article/extraction/reference.")
+            payload = _agent_intake_payload(
+                article=article,
+                extraction=extraction,
+                reference=current_reference,
+                match=match,
+                force_project_id=force_project_id,
+            )
+            matcher_payload = _agent_matcher_payload(reference=current_reference, match=match)
+        result = run_agent_for_intake(
+            IntakeRecord(
+                source_type=NEWS_SOURCE_TYPE,
+                intake_record_id=str(first_pass.article_id),
+                extraction_id=first_pass.extraction_id,
+                source_run_id=source_run_id,
+                payload=payload,
+            ),
+            matcher_results=[matcher_payload],
+            trigger_reasons=[AgentTrigger.NEW_CANDIDATE],
+            profile=NEWS_AGENT_PROFILE,
+            client=client,
+            settings=settings,
+            session_factory=session_factory,
+            now=now,
+        )
+        decisions[reference.id] = _NewsAgentDecision(result=result)
+    return decisions
+
+
+def _agent_intake_payload(
+    *,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    reference: NewsProjectReference,
+    match: NewsMatchResult,
+    force_project_id: uuid.UUID | None,
+) -> dict[str, Any]:
+    source = article.source
+    return {
+        "article": {
+            "article_id": str(article.id),
+            "title": article.title,
+            "url": article.url_canonical,
+            "source_slug": source.slug if source is not None else None,
+            "published_at": article.published_at.isoformat() if article.published_at else None,
+        },
+        "extraction": {
+            "extraction_id": str(extraction.id),
+            "prompt_id": extraction.prompt_id,
+            "prompt_version": extraction.prompt_version,
+            "triggered_by": extraction.triggered_by,
+        },
+        "reference": _agent_reference_payload(article=article, reference=reference),
+        "matcher": _agent_matcher_payload(reference=reference, match=match),
+        "force_project_id": str(force_project_id) if force_project_id is not None else None,
+        "body_access": "Use get_article_body(article_id) if full article text is needed.",
+    }
+
+
+def _agent_reference_payload(
+    *,
+    article: NewsArticle,
+    reference: NewsProjectReference,
+) -> dict[str, Any]:
+    return {
+        "reference_id": str(reference.id),
+        "reference_index": reference.reference_index,
+        "candidate_name": reference.candidate_name,
+        "candidate_address": reference.candidate_address,
+        "canonical_address": canonical_address_for_reference(article, reference),
+        "candidate_developer": reference.candidate_developer,
+        "candidate_unit_total": reference.candidate_unit_total,
+        "candidate_unit_affordable": reference.candidate_unit_affordable,
+        "candidate_unit_market_rate": reference.candidate_unit_market_rate,
+        "candidate_product_type": reference.candidate_product_type,
+        "candidate_age_restriction": reference.candidate_age_restriction,
+        "candidate_status_signal": reference.candidate_status_signal,
+        "candidate_delivery_year_text": reference.candidate_delivery_year_text,
+        "candidate_delivery_year_normalized": serialize_json(
+            reference.candidate_delivery_year_normalized
+        ),
+        "candidate_neighborhood": reference.candidate_neighborhood,
+        "candidate_confidence": reference.candidate_confidence,
+        "candidate_identifiers": serialize_json(reference.candidate_identifiers or {}),
+        "candidate_signal_flags": serialize_json(reference.candidate_signal_flags or {}),
+        "mapped_fields": _field_values(_news_extracted_fields(article, reference)),
+        "passage_excerpts": _compact_passage_excerpts(reference.passage_excerpts),
+    }
+
+
+def _agent_matcher_payload(
+    *,
+    reference: NewsProjectReference,
+    match: NewsMatchResult,
+) -> dict[str, Any]:
+    return {
+        "reference_id": str(reference.id),
+        "reference_index": reference.reference_index,
+        "status": match.status.value,
+        "match_type": match.match_type,
+        "confidence": match.confidence,
+        "project_id": str(match.project_id) if match.project_id is not None else None,
+        "candidate_project_ids": [str(project_id) for project_id in match.candidate_project_ids],
+        "reason": match.reason,
+        "candidates": match.candidates_payload(),
+    }
+
+
+def _compact_passage_excerpts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        passage = _clean_text(item.get("passage"))
+        if passage is not None and len(passage) > 300:
+            passage = passage[:297].rstrip() + "..."
+        compact.append(
+            {
+                "field": item.get("field"),
+                "value": serialize_json(item.get("value")),
+                "passage": passage,
+                "offset_start": item.get("offset_start"),
+                "offset_end": item.get("offset_end"),
+            }
+        )
+    return compact
+
+
 def _integrate_current_extraction(
     session: Session,
     *,
@@ -307,6 +509,7 @@ def _integrate_current_extraction(
     pass3b_triggered: bool,
     pass3b_result: NewsExtractionRunResult | None,
     prior_extraction_id: uuid.UUID | None,
+    agent_decisions: dict[uuid.UUID, _NewsAgentDecision],
     now: datetime,
 ) -> NewsIntegrationResult:
     article = session.get(NewsArticle, article_id)
@@ -353,6 +556,14 @@ def _integrate_current_extraction(
             reference=reference,
             force_project_id=effective_force_project_id,
         )
+        agent_decision = agent_decisions.get(reference.id)
+        promoted_match = _agent_promoted_match(
+            session,
+            match=match,
+            agent_decision=agent_decision,
+        )
+        if promoted_match is not None:
+            match = promoted_match
         _apply_match_to_reference(reference, match, now=now)
         stats.references_processed += 1
 
@@ -383,6 +594,11 @@ def _integrate_current_extraction(
                     reference=reference,
                     match=match,
                     evidence=evidence,
+                    agent_run_id=(
+                        agent_decision.result.agent_run_id
+                        if agent_decision is not None
+                        else None
+                    ),
                 )
             )
             continue
@@ -400,6 +616,12 @@ def _integrate_current_extraction(
                 item_type=ReviewItemType.POSSIBLE_MATCH,
             )
             reference.review_item_id = item.id
+            if agent_decision is not None:
+                _link_agent_run_review_item(
+                    session,
+                    agent_run_id=agent_decision.result.agent_run_id,
+                    review_item_id=item.id,
+                )
             _count_review_item(stats, created)
             continue
 
@@ -417,6 +639,12 @@ def _integrate_current_extraction(
                 item_type=ReviewItemType.NEW_CANDIDATE,
             )
             reference.review_item_id = item.id
+            if agent_decision is not None:
+                _link_agent_run_review_item(
+                    session,
+                    agent_run_id=agent_decision.result.agent_run_id,
+                    review_item_id=item.id,
+                )
             _count_review_item(stats, created)
 
     session.flush()
@@ -545,6 +773,77 @@ def _apply_match_to_reference(
     reference.match_reason = match.reason
     reference.match_candidates = match.candidates_payload()
     reference.match_decision_at = now
+
+
+def _agent_promoted_match(
+    session: Session,
+    *,
+    match: NewsMatchResult,
+    agent_decision: _NewsAgentDecision | None,
+) -> NewsMatchResult | None:
+    if match.status != NewsMatchStatus.NEW_CANDIDATE or agent_decision is None:
+        return None
+    result = agent_decision.result
+    if result.outcome != AgentRunOutcome.COMPLETED.value:
+        return None
+    verdict = result.agent_revised_verdict
+    if not isinstance(verdict, dict):
+        return None
+    if verdict.get("decision") != AGENT_PROMOTE_EXISTING_PROJECT_DECISION:
+        return None
+    project_id = _uuid_from_agent_verdict(verdict.get("project_id"))
+    if project_id is None or session.get(Project, project_id) is None:
+        return None
+    confidence = _agent_confidence(verdict.get("confidence"))
+    if confidence is None:
+        return None
+    return NewsMatchResult(
+        status=NewsMatchStatus.CONFIRMED,
+        match_type=AGENT_PROMOTED_EXISTING_PROJECT_MATCH,
+        confidence=confidence,
+        project_id=project_id,
+        candidate_project_ids=[project_id],
+        reason=(
+            "Agent promoted deterministic new_candidate to an existing project "
+            f"after tool review; agent_run_id={result.agent_run_id}."
+        ),
+        diagnostics={"agent_run_id": str(result.agent_run_id)},
+    )
+
+
+def _uuid_from_agent_verdict(value: Any) -> uuid.UUID | None:
+    if value in (None, ""):
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_confidence(value: Any) -> float | None:
+    if value in (None, ""):
+        # High confidence band, but not near-certainty; the agent supplied no score.
+        return 0.93
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if confidence < 0 or confidence > 1:
+        return None
+    return confidence
+
+
+def _link_agent_run_review_item(
+    session: Session,
+    *,
+    agent_run_id: uuid.UUID,
+    review_item_id: uuid.UUID,
+) -> None:
+    session.execute(
+        insert(AgentRunReviewItem)
+        .values(agent_run_id=agent_run_id, review_item_id=review_item_id)
+        .on_conflict_do_nothing()
+    )
 
 
 def _write_news_evidence(
@@ -866,6 +1165,12 @@ def _upsert_status_change_review_items(
         )
         if field_context["reference"] is not None:
             field_context["reference"].review_item_id = review_item.id
+        if field_context["agent_run_id"] is not None:
+            _link_agent_run_review_item(
+                session,
+                agent_run_id=field_context["agent_run_id"],
+                review_item_id=review_item.id,
+            )
         if created:
             created_count += 1
     return created_count
@@ -891,6 +1196,7 @@ def _field_reference_context(
         "match": selected.match if selected is not None else None,
         "evidence_ids": evidence_ids,
         "winning_evidence_id": winning_evidence_id,
+        "agent_run_id": selected.agent_run_id if selected is not None else None,
         "resolution_winning_evidence_id": resolution_winning_evidence_id,
         "rule_applied": field_resolution.rule_applied if field_resolution is not None else None,
         "resolution_confidence": (
