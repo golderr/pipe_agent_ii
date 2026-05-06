@@ -50,6 +50,8 @@ class AgentRunRequest:
     matcher_results: tuple[dict[str, Any], ...]
     trigger_reasons: tuple[str, ...]
     profile: SourceProfile
+    session_factory: sessionmaker[Session] | None = None
+    settings: Settings | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +175,8 @@ def run_agent_for_intake(
         matcher_results=tuple(_json_safe(result) for result in matcher_results),
         trigger_reasons=normalized_triggers,
         profile=profile,
+        session_factory=resolved_session_factory,
+        settings=resolved_settings,
     )
     started_counter = time.perf_counter()
     try:

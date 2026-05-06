@@ -169,3 +169,66 @@ def test_anthropic_agent_client_returns_failed_error_for_invalid_final_json() ->
 
     assert result.outcome == AgentRunOutcome.FAILED_ERROR.value
     assert result.error_text == "Agent final response was not valid JSON."
+
+
+def test_anthropic_agent_client_rejects_unrecognized_final_outcome() -> None:
+    fake = FakeAnthropic(
+        [
+            _response(
+                stop_reason="end_turn",
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=json.dumps({"outcome": "escalated_to_review"}),
+                    )
+                ],
+            )
+        ]
+    )
+    client = AnthropicAgentClient(api_key="test", anthropic_client=fake)
+
+    result = client.run(_request())
+
+    assert result.outcome == AgentRunOutcome.FAILED_ERROR.value
+    assert result.error_text == "Agent emitted unrecognized outcome 'escalated_to_review'."
+
+
+def test_anthropic_agent_client_stops_after_max_iterations() -> None:
+    fake = FakeAnthropic(
+        [
+            _response(
+                stop_reason="tool_use",
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="toolu_1",
+                        name="search_articles_similar",
+                        input={"query_text": "Example"},
+                    )
+                ],
+            ),
+            _response(
+                stop_reason="tool_use",
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="toolu_2",
+                        name="search_articles_similar",
+                        input={"query_text": "Example again"},
+                    )
+                ],
+            ),
+        ]
+    )
+    client = AnthropicAgentClient(
+        api_key="test",
+        anthropic_client=fake,
+        tool_registry=_tool_registry(),
+        max_iterations=2,
+    )
+
+    result = client.run(_request())
+
+    assert result.outcome == AgentRunOutcome.FAILED_ERROR.value
+    assert result.error_text == "Agent exceeded max iterations 2."
+    assert len(fake.messages.calls) == 2

@@ -504,6 +504,10 @@ class IntakeRecord:
 
 The runner is the same code regardless of source. What varies is the `SourceProfile`: which tools the agent can call, which system prompt frames the task, which cost-cap bucket the run charges, which kill switch gates execution.
 
+**Tool dependency contract.** The runner builds an `AgentRunRequest` for the client and tools. That request carries the resolved `session_factory` and `settings`; tool handlers read those dependencies from the request rather than closure-binding DB access at each registration site. This keeps the tool signature source-agnostic while letting DB-backed tools query state.
+
+**News payload contract.** For news, `intake.payload` is lean structured context only: title, URL, source slug, published date, extracted references, and compact matcher verdict summaries. It must not carry the full article body. Full body, accepted article chunks, registry state, and nearby project context are fetched on demand through tools so the base user message stays small across multi-turn loops.
+
 **Implementation slice (2026-05-05).** `src/tcg_pipeline/agents/` now contains the source-agnostic runner skeleton and profile registry. The runner validates triggers/source type and profile-required intake fields, honors profile kill switches, reserves/trues-up daily cost under profile capability keys such as `agent.news_v1`, persists terminal `agent_runs` rows for killed-by-switch, failed-budget, failed-timeout, failed-error, and injected-client success paths, and links produced review items through `agent_run_review_items`. The Anthropic tool-loop client shell and bounded tool registry now exist; real data-backed tool handlers and production news integration wiring are still deferred.
 
 **Runner loop (pseudocode).**
@@ -562,6 +566,8 @@ The discovery job enqueues integration jobs after Pass 2 completes; integration 
 Tools are categorized so each source profile can declare exactly which subset its agent runs may call. The runner enforces the subset; tools outside the profile are not visible to the agent.
 
 **Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. Current handlers are scaffolding/injected tests only; the real DB-backed handlers land next.
+
+Registry truncation is the last-resort safety net. Real tools should self-limit first (top-K, compact row summaries, explicit `total_results`) so the agent still receives useful partial results rather than a generic truncation notice.
 
 #### Core tools (always available, regardless of source)
 
@@ -1419,6 +1425,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - Added `AgentToolRegistry` / `AgentTool` primitives. The registry exposes only profile-allowed tools, rejects unregistered/disallowed calls, enforces hard output budgets with truncation metadata, and records compact tool-call summaries for `agent_runs.tool_calls_summary`.
   - Added fake-Anthropic and fake-tool tests for successful tool-loop execution, unknown-tool failure, invalid-final-JSON failure, allowed-tool exposure, and output truncation.
   - Production news ingestion remains unchanged; the next slices add real DB-backed tool handlers and wire news trigger decisions into the runner.
+
+- **2026-05-05 (revision 27) — Tool dependency and payload contracts before DB-backed tools.**
+  - `AgentRunRequest` now carries the runner-resolved `session_factory` and `settings`, giving DB-backed tools a single source-agnostic dependency path instead of closure-binding dependencies at every registration site.
+  - `AnthropicAgentClient` validates final outcomes before the runner persists them. Only `completed` and `escalated` are accepted client outcomes; unrecognized strings become `failed_error` with an explicit parse/contract message.
+  - News `intake.payload` convention is lean context only. Full article bodies and retrieval context must come through tools to avoid growing the base user message across every tool-loop turn.
+  - Added tests for max-iteration loop failure, unrecognized final outcome handling, and runner-to-tool dependency propagation.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

@@ -192,6 +192,8 @@ def test_run_agent_for_intake_persists_success_and_review_link(
     postgres_session.flush()
     profile = _test_profile(max_cost_usd=Decimal("0.01"))
     client = FakeAgentClient()
+    settings = Settings(agent_enabled_for_news=True)
+    factory = _session_factory(postgres_session)
 
     result = run_agent_for_intake(
         _intake(),
@@ -200,8 +202,8 @@ def test_run_agent_for_intake_persists_success_and_review_link(
         profile=profile,
         client=client,
         produced_review_item_ids=[review_item.id],
-        settings=Settings(agent_enabled_for_news=True),
-        session_factory=_session_factory(postgres_session),
+        settings=settings,
+        session_factory=factory,
         now=FIXED_NOW,
     )
 
@@ -209,6 +211,8 @@ def test_run_agent_for_intake_persists_success_and_review_link(
     assert result.cost_usd == Decimal("0.001000")
     assert client.request is not None
     assert client.request.profile.name == "news_v1"
+    assert client.request.session_factory is factory
+    assert client.request.settings is settings
     postgres_session.expire_all()
     agent_run = postgres_session.get(AgentRun, result.agent_run_id)
     assert agent_run is not None

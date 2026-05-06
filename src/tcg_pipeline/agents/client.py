@@ -21,6 +21,12 @@ from tcg_pipeline.news.llm import (
 from tcg_pipeline.settings import Settings, get_settings
 
 AGENT_TEMPERATURE = 0
+CLIENT_FINAL_OUTCOMES = frozenset(
+    {
+        AgentRunOutcome.COMPLETED.value,
+        AgentRunOutcome.ESCALATED.value,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,8 +125,19 @@ class AnthropicAgentClient:
                         error_text="Agent final response was not valid JSON.",
                         tool_calls_summary=tool_calls_summary,
                     )
+                outcome = _client_final_outcome(parsed.get("outcome"))
+                if outcome is None:
+                    return _failed_result(
+                        usage=usage,
+                        latency_ms=_elapsed_ms(started_at),
+                        error_text=(
+                            "Agent emitted unrecognized outcome "
+                            f"'{parsed.get('outcome')}'."
+                        ),
+                        tool_calls_summary=tool_calls_summary,
+                    )
                 return AgentClientResult(
-                    outcome=str(parsed.get("outcome") or AgentRunOutcome.COMPLETED.value),
+                    outcome=outcome,
                     usage=usage,
                     latency_ms=_elapsed_ms(started_at),
                     reasoning_trace=_string_or_none(parsed.get("reasoning_trace")),
@@ -259,6 +276,15 @@ def _parse_final_json(text: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _client_final_outcome(value: Any) -> str | None:
+    if value in (None, ""):
+        return AgentRunOutcome.COMPLETED.value
+    outcome = str(value).strip()
+    if outcome in CLIENT_FINAL_OUTCOMES:
+        return outcome
+    return None
 
 
 def _block_value(block: Any, key: str) -> Any:
