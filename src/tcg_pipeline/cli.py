@@ -273,6 +273,12 @@ def news_paste_link_smoke(
         "Running paste-link smoke against "
         f"{database_label}"
     )
+    typer.echo(
+        "Agent flags: "
+        f"AGENT_ENABLED_FOR_NEWS={settings.agent_enabled_for_news} | "
+        f"AGENT_ALLOW_LIVE_LLM={settings.agent_allow_live_llm} | "
+        f"NEWS_USE_LEGACY_PASS3={settings.news_use_legacy_pass3}"
+    )
 
     payload = ResearchArticleCreateRequest(
         url=url,
