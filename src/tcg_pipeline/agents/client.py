@@ -21,7 +21,9 @@ from tcg_pipeline.news.llm import (
 )
 from tcg_pipeline.settings import Settings, get_settings
 
-AGENT_TEMPERATURE = 0
+# Claude Opus 4.7 rejects explicit temperature on the Messages API. Omit it so
+# each agent turn does not pay a failed-request retry before the real call.
+AGENT_TEMPERATURE: int | float | None = None
 CLIENT_FINAL_OUTCOMES = frozenset(
     {
         AgentRunOutcome.COMPLETED.value,

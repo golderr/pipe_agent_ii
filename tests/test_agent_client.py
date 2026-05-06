@@ -124,6 +124,7 @@ def test_anthropic_agent_client_runs_tool_loop_and_parses_final_json() -> None:
     assert result.usage.output_tokens == 10
     assert result.tool_calls_summary[0]["tool"] == "search_articles_similar"
     assert fake.messages.calls[0]["max_tokens"] == 1234
+    assert "temperature" not in fake.messages.calls[0]
     assert fake.messages.calls[0]["tools"][0]["name"] == "search_articles_similar"
     tool_result_message = fake.messages.calls[1]["messages"][-1]
     assert tool_result_message["role"] == "user"
