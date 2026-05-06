@@ -8,6 +8,7 @@ from typing import Any
 import anthropic
 
 from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE, SourceProfile
+from tcg_pipeline.agents.project_tools import build_agent_tool_registry
 from tcg_pipeline.agents.runner import AgentClientResult, AgentRunRequest
 from tcg_pipeline.agents.tools import AgentToolError, AgentToolRegistry
 from tcg_pipeline.db.models import AgentRunOutcome
@@ -173,7 +174,7 @@ def build_anthropic_agent_client(
         api_key=resolved_settings.anthropic_api_key,
         profile=profile,
         model=profile.default_model,
-        tool_registry=tool_registry,
+        tool_registry=tool_registry or build_agent_tool_registry(),
     )
 
 
@@ -279,9 +280,9 @@ def _parse_final_json(text: str) -> dict[str, Any] | None:
 
 
 def _client_final_outcome(value: Any) -> str | None:
-    if value in (None, ""):
+    if value is None:
         return AgentRunOutcome.COMPLETED.value
-    outcome = str(value).strip()
+    outcome = str(value).strip().lower()
     if outcome in CLIENT_FINAL_OUTCOMES:
         return outcome
     return None

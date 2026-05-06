@@ -565,9 +565,11 @@ The discovery job enqueues integration jobs after Pass 2 completes; integration 
 
 Tools are categorized so each source profile can declare exactly which subset its agent runs may call. The runner enforces the subset; tools outside the profile are not visible to the agent.
 
-**Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. Current handlers are scaffolding/injected tests only; the real DB-backed handlers land next.
+**Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. `get_project_state` is the first DB-backed tool: it reads `Project`, `project_field_resolution`, `project_latest_evidence`, and referenced evidence metadata through `request.session_factory`. Other DB-backed handlers land next.
 
 Registry truncation is the last-resort safety net. Real tools should self-limit first (top-K, compact row summaries, explicit `total_results`) so the agent still receives useful partial results rather than a generic truncation notice.
+
+**Tool-internal cost accounting.** Tool-internal model calls are charged to the same profile capability and per-run reservation that triggered the agent. For news this means future query-embedding/re-ranking calls inside tools roll into `agent.news_v1`, not `news/article_embedding`, because they are part of the agent's reasoning run. Pure DB tools such as `get_project_state` have no extra LLM spend.
 
 #### Core tools (always available, regardless of source)
 
@@ -603,10 +605,10 @@ Per-run cost cap is meaningless if tools dump unbounded context back into the ag
 
 | Tool | Output budget | Truncation behavior |
 |------|--------------:|---------------------|
-| `get_project_state` | ≤500 tokens | Returns resolved values + provenance + confidence. No raw evidence. |
+| `get_project_state` | ≤1500 tokens | Returns resolved values + provenance + confidence. No raw evidence. |
 | `get_recent_evidence` | ≤1500 tokens | Top 10 rows by default. Each row summarized to ≤150 tokens (source_type, evidence_date, key extracted_fields, ≤80-char notes excerpt). |
 | `search_articles_by_project` | ≤2000 tokens | Top 20 articles. Each entry: URL, title, published_at, ≤100-char extracted-summary line. |
-| `search_articles_similar` | ≤2000 tokens | Top 10 matches. Each entry: similarity score, URL, title, published_at, ≤100-char excerpt. |
+| `search_articles_similar` | ≤2500 tokens | Top 5 matches by default, hard cap 10. Each entry: similarity score, URL, title, published_at, ≤200-char excerpt. |
 | `get_developer_projects` | ≤1500 tokens | Top 30 projects. Each entry: project_id, name, status, last_evidence_date, total_units. |
 | `get_nearby_projects` | ≤2000 tokens | Top 20 results within radius. Each entry: project_id, name, developer, status, **distance_feet**, last_updated, ≤80-char recent-evidence summary. |
 | `get_permits_for_parcel` | ≤1500 tokens | Top 20 permits. Each entry: permit_number, type, issue_date, ≤80-char work_description excerpt, valuation. |
@@ -1431,6 +1433,13 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - `AnthropicAgentClient` validates final outcomes before the runner persists them. Only `completed` and `escalated` are accepted client outcomes; unrecognized strings become `failed_error` with an explicit parse/contract message.
   - News `intake.payload` convention is lean context only. Full article bodies and retrieval context must come through tools to avoid growing the base user message across every tool-loop turn.
   - Added tests for max-iteration loop failure, unrecognized final outcome handling, and runner-to-tool dependency propagation.
+
+- **2026-05-05 (revision 28) — First DB-backed agent tool.**
+  - `get_project_state` implemented as the first real tool handler. It reads `Project`, `project_field_resolution`, `project_latest_evidence`, and referenced evidence metadata through `AgentRunRequest.session_factory`, returning compact project state and field-level provenance without raw evidence bodies.
+  - `build_agent_tool_registry()` now registers `get_project_state`; `build_anthropic_agent_client()` uses that registry by default when a caller does not inject one.
+  - Tool-output budgets updated before retrieval tools land: `get_project_state` ≤1500 tokens; future `search_articles_similar` ≤2500 tokens with self-limited top-K/excerpts.
+  - Tool-internal model calls will charge to the same profile capability/reservation as the agent run (for news, `agent.news_v1`), while pure DB tools have no extra LLM spend.
+  - Outcome parsing hardened: case-insensitive accepted outcomes, empty-string outcome rejected as malformed.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

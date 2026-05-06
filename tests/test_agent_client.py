@@ -193,6 +193,49 @@ def test_anthropic_agent_client_rejects_unrecognized_final_outcome() -> None:
     assert result.error_text == "Agent emitted unrecognized outcome 'escalated_to_review'."
 
 
+def test_anthropic_agent_client_normalizes_final_outcome_case() -> None:
+    fake = FakeAnthropic(
+        [
+            _response(
+                stop_reason="end_turn",
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=json.dumps({"outcome": "Completed"}),
+                    )
+                ],
+            )
+        ]
+    )
+    client = AnthropicAgentClient(api_key="test", anthropic_client=fake)
+
+    result = client.run(_request())
+
+    assert result.outcome == AgentRunOutcome.COMPLETED.value
+
+
+def test_anthropic_agent_client_rejects_empty_final_outcome() -> None:
+    fake = FakeAnthropic(
+        [
+            _response(
+                stop_reason="end_turn",
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=json.dumps({"outcome": ""}),
+                    )
+                ],
+            )
+        ]
+    )
+    client = AnthropicAgentClient(api_key="test", anthropic_client=fake)
+
+    result = client.run(_request())
+
+    assert result.outcome == AgentRunOutcome.FAILED_ERROR.value
+    assert result.error_text == "Agent emitted unrecognized outcome ''."
+
+
 def test_anthropic_agent_client_stops_after_max_iterations() -> None:
     fake = FakeAnthropic(
         [

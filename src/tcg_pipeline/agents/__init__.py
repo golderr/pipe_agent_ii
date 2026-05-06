@@ -12,6 +12,11 @@ from tcg_pipeline.agents.profiles import (
     SourceProfile,
     get_source_profile,
 )
+from tcg_pipeline.agents.project_tools import (
+    GET_PROJECT_STATE_TOOL,
+    build_agent_tool_registry,
+    handle_get_project_state,
+)
 from tcg_pipeline.agents.runner import (
     AgentClient,
     AgentClientResult,
@@ -30,6 +35,7 @@ from tcg_pipeline.agents.tools import (
 __all__ = [
     "AnthropicAgentClient",
     "AnthropicAgentClientConfig",
+    "GET_PROJECT_STATE_TOOL",
     "NEWS_AGENT_PROFILE",
     "AgentClient",
     "AgentClientResult",
@@ -43,7 +49,9 @@ __all__ = [
     "SemanticInterpreterProfile",
     "SourceProfile",
     "ToolDispatchResult",
+    "build_agent_tool_registry",
     "build_anthropic_agent_client",
     "get_source_profile",
+    "handle_get_project_state",
     "run_agent_for_intake",
 ]
