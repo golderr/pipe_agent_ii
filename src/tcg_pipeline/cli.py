@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 
 from tcg_pipeline.collectors.base import CollectionMode, CollectionRequest
 from tcg_pipeline.collectors.factory import build_collector
@@ -251,7 +251,6 @@ def news_paste_link_smoke(
     """Run the paste-a-link pipeline without using the frontend."""
     from fastapi import HTTPException
 
-    from tcg_pipeline.api.auth import AuthenticatedUser
     from tcg_pipeline.api.routers.research import enqueue_paste_a_link_article
     from tcg_pipeline.api.schemas import ResearchArticleCreateRequest
     from tcg_pipeline.db.models import (
@@ -285,15 +284,10 @@ def news_paste_link_smoke(
         force_project_id=force_project_id,
         note=note,
     )
-    user = AuthenticatedUser(
-        user_id=uuid.UUID(int=0),
-        email="codex-smoke@local",
-        role="service_role",
-        claims={"sub": str(uuid.UUID(int=0)), "email": "codex-smoke@local"},
-    )
 
     try:
         with get_session_factory()() as session:
+            user = _smoke_authenticated_user(session, settings)
             article, job, existing_article = enqueue_paste_a_link_article(
                 session,
                 payload=payload,
@@ -355,6 +349,53 @@ def news_paste_link_smoke(
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+
+def _smoke_authenticated_user(session, settings):
+    from tcg_pipeline.api.auth import AuthenticatedUser
+
+    rows = session.execute(
+        text(
+            """
+            SELECT id::text AS id, email
+            FROM auth.users
+            ORDER BY created_at ASC, id ASC
+            LIMIT 50
+            """
+        )
+    ).mappings().all()
+    if not rows:
+        raise RuntimeError(
+            "paste-link-smoke requires at least one Supabase auth.users row so "
+            "source_run audit FKs remain valid."
+        )
+
+    allowed_emails = {
+        email.strip().lower()
+        for email in (settings.allowed_emails or "").split(",")
+        if email.strip()
+    }
+    selected = None
+    if allowed_emails:
+        selected = next(
+            (
+                row
+                for row in rows
+                if row.get("email") and str(row["email"]).strip().lower() in allowed_emails
+            ),
+            None,
+        )
+    if selected is None:
+        selected = rows[0]
+
+    user_id = uuid.UUID(str(selected["id"]))
+    email = str(selected["email"]) if selected.get("email") else None
+    return AuthenticatedUser(
+        user_id=user_id,
+        email=email,
+        role=settings.api_required_role,
+        claims={"sub": str(user_id), "email": email},
+    )
 
 
 @app.command()

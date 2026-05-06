@@ -28,6 +28,17 @@ class _ScalarResult:
         return self._rows
 
 
+class _MappingResult:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> _MappingResult:
+        return self
+
+    def all(self) -> list[dict[str, object]]:
+        return self._rows
+
+
 class _FakeSession:
     def __init__(self, store: SimpleNamespace) -> None:
         self._store = store
@@ -59,6 +70,28 @@ class _FakeSession:
         if self._execute_count == 3:
             return _ScalarResult(self._store.review_items)
         return _ScalarResult([])
+
+
+def test_smoke_authenticated_user_prefers_allowed_auth_user() -> None:
+    allowed_user_id = uuid.uuid4()
+    other_user_id = uuid.uuid4()
+    session = SimpleNamespace(
+        execute=lambda _statement: _MappingResult(
+            [
+                {"id": str(other_user_id), "email": "other@example.com"},
+                {"id": str(allowed_user_id), "email": "ng@theconcordgroup.com"},
+            ]
+        )
+    )
+
+    user = cli_module._smoke_authenticated_user(
+        session,
+        Settings(allowed_emails="ng@theconcordgroup.com", api_required_role="authenticated"),
+    )
+
+    assert user.user_id == allowed_user_id
+    assert user.email == "ng@theconcordgroup.com"
+    assert user.role == "authenticated"
 
 
 def test_news_paste_link_smoke_cli_invokes_api_and_worker(
@@ -113,6 +146,14 @@ def test_news_paste_link_smoke_cli_invokes_api_and_worker(
     def fake_run_news_paste_a_link_job(scrape_job_id: uuid.UUID) -> None:
         calls["worker_job_id"] = scrape_job_id
 
+    def fake_smoke_authenticated_user(_session: _FakeSession, _settings: Settings) -> object:
+        return SimpleNamespace(
+            user_id=uuid.UUID("965d0397-5ff7-4a83-a717-b3d3f7bdd0d4"),
+            email="ng@theconcordgroup.com",
+            role="authenticated",
+            claims={},
+        )
+
     monkeypatch.setattr(
         cli_module,
         "get_settings",
@@ -124,6 +165,11 @@ def test_news_paste_link_smoke_cli_invokes_api_and_worker(
         ),
     )
     monkeypatch.setattr(cli_module, "get_session_factory", lambda: fake_session_factory)
+    monkeypatch.setattr(
+        cli_module,
+        "_smoke_authenticated_user",
+        fake_smoke_authenticated_user,
+    )
     monkeypatch.setattr(research, "enqueue_paste_a_link_article", fake_enqueue_paste_a_link_article)
     monkeypatch.setattr(news_jobs, "run_news_paste_a_link_job", fake_run_news_paste_a_link_job)
 
@@ -144,7 +190,7 @@ def test_news_paste_link_smoke_cli_invokes_api_and_worker(
     assert calls["payload_url"] == "https://la.urbanize.city/post/cli-smoke"
     assert calls["payload_note"] == "test note"
     assert calls["force_project_id"] == force_project_id
-    assert calls["user_email"] == "codex-smoke@local"
+    assert calls["user_email"] == "ng@theconcordgroup.com"
     assert calls["worker_job_id"] == job_id
     assert "Running paste-link smoke against postgresql://user:***@example.com/tcg" in (
         result.output
