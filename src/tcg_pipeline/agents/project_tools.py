@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select, text
 
 from tcg_pipeline.agents.runner import AgentRunRequest
-from tcg_pipeline.agents.tools import AgentTool, AgentToolError, AgentToolRegistry, AgentToolResult
+from tcg_pipeline.agents.tools import AgentTool, AgentToolError, AgentToolResult
 from tcg_pipeline.db.models import Evidence, Project
 
 GET_PROJECT_STATE_OUTPUT_TOKEN_BUDGET = 1500
@@ -71,10 +71,6 @@ PROJECT_LATEST_EVIDENCE_SQL = text(
     WHERE project_id = CAST(:project_id AS uuid)
     """
 )
-
-
-def build_agent_tool_registry() -> AgentToolRegistry:
-    return AgentToolRegistry({GET_PROJECT_STATE_TOOL.name: GET_PROJECT_STATE_TOOL})
 
 
 def handle_get_project_state(

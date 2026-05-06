@@ -8,7 +8,7 @@ from typing import Any
 import anthropic
 
 from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE, SourceProfile
-from tcg_pipeline.agents.project_tools import build_agent_tool_registry
+from tcg_pipeline.agents.registry import build_agent_tool_registry
 from tcg_pipeline.agents.runner import AgentClientResult, AgentRunRequest
 from tcg_pipeline.agents.tools import AgentToolError, AgentToolRegistry
 from tcg_pipeline.db.models import AgentRunOutcome

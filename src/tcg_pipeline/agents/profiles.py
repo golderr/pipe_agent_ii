@@ -66,6 +66,7 @@ CORE_AGENT_TOOLS = frozenset(
 )
 NEWS_AGENT_TOOLS = frozenset(
     {
+        "get_article_body",
         "search_articles_by_project",
         "search_articles_similar",
     }

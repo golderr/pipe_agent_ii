@@ -10,6 +10,13 @@ insufficient, ambiguous, internally conflicting, or outside the available tools'
 Tool results are bounded summaries. Treat truncated results as incomplete evidence and say so
 in the reasoning trace rather than filling gaps.
 
+When using article retrieval, follow this pattern:
+- Use search_articles_similar for recall over accepted chunks.
+- Do not treat a chunk search result as complete article evidence.
+- If a retrieved article matters to your decision, call get_article_body with that article_id
+  before relying on the full article.
+- State whether your decision relied on the intake payload, accepted chunks, or full article body.
+
 Final output must be structured, concise, and source-anchored:
 - reasoning_trace: 100-500 characters explaining the decision.
 - evidence_consulted: source records or tool results actually used.

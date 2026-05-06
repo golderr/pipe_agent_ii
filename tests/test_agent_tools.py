@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE
 from tcg_pipeline.agents.project_tools import (
     GET_PROJECT_STATE_OUTPUT_TOKEN_BUDGET,
-    build_agent_tool_registry,
     handle_get_project_state,
 )
+from tcg_pipeline.agents.registry import build_agent_tool_registry
 from tcg_pipeline.agents.runner import AgentRunRequest, IntakeRecord
 from tcg_pipeline.agents.tools import (
     AgentTool,
@@ -24,12 +24,16 @@ from tcg_pipeline.agents.tools import (
 from tcg_pipeline.db.models import (
     AgeRestriction,
     Evidence,
+    NewsArticle,
+    NewsArticleChunk,
+    NewsSource,
     PipelineStatus,
     ProductType,
     Project,
     ResolutionLog,
     StatusConfidence,
 )
+from tcg_pipeline.news.embeddings import EmbeddingResponse
 from tcg_pipeline.settings import Settings
 
 
@@ -94,8 +98,15 @@ def test_default_tool_registry_includes_get_project_state() -> None:
 
     specs = registry.tool_specs_for_profile(NEWS_AGENT_PROFILE)
 
-    assert [spec["name"] for spec in specs] == ["get_project_state"]
-    assert specs[0]["input_schema"]["required"] == ["project_id"]
+    assert [spec["name"] for spec in specs] == [
+        "get_article_body",
+        "get_project_state",
+        "search_articles_similar",
+    ]
+    spec_by_name = {spec["name"]: spec for spec in specs}
+    assert spec_by_name["get_project_state"]["input_schema"]["required"] == ["project_id"]
+    assert spec_by_name["get_article_body"]["input_schema"]["required"] == ["article_id"]
+    assert spec_by_name["search_articles_similar"]["input_schema"]["required"] == ["query_text"]
 
 
 def test_get_project_state_requires_session_factory() -> None:
@@ -194,6 +205,103 @@ def test_get_project_state_reads_project_resolution_context(
     assert GET_PROJECT_STATE_OUTPUT_TOKEN_BUDGET == 1500
 
 
+def test_get_article_body_returns_truncated_body(postgres_session: Session) -> None:
+    _ensure_agent1_tables(postgres_session)
+    source = _news_source()
+    article = _news_article(source, body_text="Sentence one.\n\nSentence two. " + "A" * 100)
+    postgres_session.add_all([source, article])
+    postgres_session.flush()
+    request = _agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_article_body",
+        tool_input={"article_id": str(article.id), "max_chars": 32},
+        profile=NEWS_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content["article_id"] == str(article.id)
+    assert result.content["source_slug"] == source.slug
+    assert result.content["truncated"] is True
+    assert result.content["body_text"].endswith("...")
+    assert "\n" not in result.content["body_text"]
+
+
+def test_search_articles_similar_returns_compact_chunk_results(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent1_tables(postgres_session)
+    source = _news_source()
+    article = _news_article(source, title="Accepted Tower proposed")
+    postgres_session.add_all([source, article])
+    postgres_session.flush()
+    chunk = NewsArticleChunk(
+        article_id=article.id,
+        reference_index=0,
+        chunk_text="Accepted Tower would include 120 apartments near Main Street." * 5,
+        chunk_offset_start=0,
+        chunk_offset_end=80,
+        embedding=[1.0] + [0.0] * 1535,
+        embedded_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        model="text-embedding-3-small",
+        gate_source="review_accept",
+    )
+    whole_article_chunk = NewsArticleChunk(
+        article_id=article.id,
+        reference_index=None,
+        chunk_text="Whole article context should be excluded by default.",
+        embedding=[1.0] + [0.0] * 1535,
+        embedded_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        model="text-embedding-3-small",
+        gate_source="review_accept",
+    )
+    postgres_session.add_all([chunk, whole_article_chunk])
+    postgres_session.flush()
+    request = _agent_request(postgres_session, embedding_client=_FakeEmbeddingClient())
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="search_articles_similar",
+        tool_input={"query_text": "Accepted Tower Main Street", "top_k": 5},
+        profile=NEWS_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content["query_embedding_cost_accounting"] == "ignored_negligible"
+    assert result.content["total_available"] >= 1
+    match = next(
+        item for item in result.content["matches"] if item["article_id"] == str(article.id)
+    )
+    assert match["article_id"] == str(article.id)
+    assert match["reference_index"] == 0
+    assert match["similarity"] == 1
+    assert len(match["excerpt"]) <= 200
+    assert result.summary["tool"] == "search_articles_similar"
+
+
+def test_search_articles_similar_requires_query_text() -> None:
+    request = AgentRunRequest(
+        intake=IntakeRecord(
+            source_type="news_article",
+            intake_record_id=str(uuid.uuid4()),
+            extraction_id=uuid.uuid4(),
+        ),
+        matcher_results=(),
+        trigger_reasons=("new_candidate",),
+        profile=NEWS_AGENT_PROFILE,
+    )
+    registry = build_agent_tool_registry()
+
+    with pytest.raises(AgentToolError, match="query_text"):
+        registry.dispatch(
+            tool_name="search_articles_similar",
+            tool_input={"query_text": ""},
+            profile=NEWS_AGENT_PROFILE,
+            request=request,
+        )
+
+
 def _ensure_project_state_views(postgres_session: Session) -> None:
     inspector = inspect(postgres_session.bind)
     missing_tables = [
@@ -210,3 +318,82 @@ def _ensure_project_state_views(postgres_session: Session) -> None:
     missing = missing_tables + missing_views
     if missing:
         pytest.skip(f"Apply Phase B read-model migrations before running tool tests: {missing}")
+
+
+def _ensure_agent1_tables(postgres_session: Session) -> None:
+    inspector = inspect(postgres_session.bind)
+    missing = [
+        table_name
+        for table_name in ("news_sources", "news_articles", "news_article_chunks")
+        if not inspector.has_table(table_name)
+    ]
+    if missing:
+        pytest.skip(f"Apply AGENT.1 migrations before running news tool tests: {missing}")
+
+
+def _agent_request(
+    postgres_session: Session,
+    *,
+    embedding_client=None,
+) -> AgentRunRequest:
+    factory = sessionmaker(
+        bind=postgres_session.get_bind(),
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    return AgentRunRequest(
+        intake=IntakeRecord(
+            source_type="news_article",
+            intake_record_id=str(uuid.uuid4()),
+            extraction_id=uuid.uuid4(),
+        ),
+        matcher_results=(),
+        trigger_reasons=("new_candidate",),
+        profile=NEWS_AGENT_PROFILE,
+        session_factory=factory,
+        settings=Settings(agent_enabled_for_news=True, openai_api_key="test"),
+        embedding_client=embedding_client,
+    )
+
+
+def _news_source() -> NewsSource:
+    slug = f"agent-tool-{uuid.uuid4().hex}"
+    return NewsSource(
+        id=uuid.uuid4(),
+        slug=slug,
+        name="Agent Tool Test",
+        base_url="https://example.com",
+        collector_class="TestCollector",
+    )
+
+
+def _news_article(source: NewsSource, *, title: str = "Agent article", body_text: str = "Body"):
+    return NewsArticle(
+        news_source_id=source.id,
+        url_canonical=f"https://example.com/{uuid.uuid4().hex}",
+        url_original="https://example.com/original",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status="fetched",
+        triage_status="relevant",
+        body_text=body_text,
+        body_text_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        title=title,
+        published_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        ingest_method="test",
+    )
+
+
+class _FakeEmbeddingClient:
+    model = "text-embedding-3-small"
+    provider = "openai"
+
+    def embed_texts(self, texts):  # type: ignore[no-untyped-def]
+        assert texts == ["Accepted Tower Main Street"]
+        return EmbeddingResponse(
+            embeddings=([1.0] + [0.0] * 1535,),
+            model=self.model,
+            provider=self.provider,
+            input_tokens=5,
+            latency_ms=1,
+        )

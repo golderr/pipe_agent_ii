@@ -565,11 +565,11 @@ The discovery job enqueues integration jobs after Pass 2 completes; integration 
 
 Tools are categorized so each source profile can declare exactly which subset its agent runs may call. The runner enforces the subset; tools outside the profile are not visible to the agent.
 
-**Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. `get_project_state` is the first DB-backed tool: it reads `Project`, `project_field_resolution`, `project_latest_evidence`, and referenced evidence metadata through `request.session_factory`. Other DB-backed handlers land next.
+**Implementation slice (2026-05-05).** `AgentToolRegistry` exposes only profile-allowed tools, dispatches registered handlers, enforces per-tool output budgets with truncation metadata, and records compact call summaries. `AnthropicAgentClient` loads the profile system prompt, calls Anthropic Messages with tool specs, feeds tool results back into the loop, aggregates usage across turns, and parses the final structured JSON decision. The first DB-backed tools are live: `get_project_state` reads `Project`, `project_field_resolution`, `project_latest_evidence`, and referenced evidence metadata through `request.session_factory`; `search_articles_similar` embeds a query and searches accepted `news_article_chunks`; `get_article_body` fetches stored article text after search narrows to an article.
 
 Registry truncation is the last-resort safety net. Real tools should self-limit first (top-K, compact row summaries, explicit `total_results`) so the agent still receives useful partial results rather than a generic truncation notice.
 
-**Tool-internal cost accounting.** Tool-internal model calls are charged to the same profile capability and per-run reservation that triggered the agent. For news this means future query-embedding/re-ranking calls inside tools roll into `agent.news_v1`, not `news/article_embedding`, because they are part of the agent's reasoning run. Pure DB tools such as `get_project_state` have no extra LLM spend.
+**Tool-internal cost accounting.** Researcher decision 2026-05-05: ignore `search_articles_similar` query-embedding cost as negligible. It intentionally does not reserve or record `llm_cost_usage` rows. Future non-negligible tool-internal model calls, such as reranking, must make an explicit accounting decision before shipping. Pure DB tools such as `get_project_state` and `get_article_body` have no extra LLM spend.
 
 #### Core tools (always available, regardless of source)
 
@@ -589,6 +589,8 @@ Registry truncation is the last-resort safety net. Real tools should self-limit 
 
 - **`search_articles_similar(query_text, market=None, since=None, limit=10)`** — pgvector cosine similarity over the article-chunk embedding index. Filters to per-reference-accepted entries (per Q13). Returns top-K with similarity score, article metadata, accepted reference fields.
 
+- **`get_article_body(article_id, max_chars=6000)`** — Fetches stored `news_articles.body_text` for a specific article after chunk search narrows candidates. Returns metadata + body excerpt only; no raw HTML. Hard `max_chars` cap 12000.
+
 #### Permit-specific tools (Stage 3 / AGENT.3)
 
 - **`get_permits_for_parcel(parcel_id)`** — Reads `evidence` rows where `source_type LIKE 'ladbs_%'` AND raw_data references the given APN, regardless of which project they're attributed to. Returns permit_number, permit_type, issue_date, work_description, valuation, applicant.
@@ -606,6 +608,7 @@ Per-run cost cap is meaningless if tools dump unbounded context back into the ag
 | Tool | Output budget | Truncation behavior |
 |------|--------------:|---------------------|
 | `get_project_state` | ≤1500 tokens | Returns resolved values + provenance + confidence. No raw evidence. |
+| `get_article_body` | ≤3500 tokens | Fetches stored body text for one article after chunk search narrows candidates. Defaults to 6000 chars, hard cap 12000 chars, no raw HTML. |
 | `get_recent_evidence` | ≤1500 tokens | Top 10 rows by default. Each row summarized to ≤150 tokens (source_type, evidence_date, key extracted_fields, ≤80-char notes excerpt). |
 | `search_articles_by_project` | ≤2000 tokens | Top 20 articles. Each entry: URL, title, published_at, ≤100-char extracted-summary line. |
 | `search_articles_similar` | ≤2500 tokens | Top 5 matches by default, hard cap 10. Each entry: similarity score, URL, title, published_at, ≤200-char excerpt. |
@@ -1437,9 +1440,16 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 - **2026-05-05 (revision 28) — First DB-backed agent tool.**
   - `get_project_state` implemented as the first real tool handler. It reads `Project`, `project_field_resolution`, `project_latest_evidence`, and referenced evidence metadata through `AgentRunRequest.session_factory`, returning compact project state and field-level provenance without raw evidence bodies.
   - `build_agent_tool_registry()` now registers `get_project_state`; `build_anthropic_agent_client()` uses that registry by default when a caller does not inject one.
-  - Tool-output budgets updated before retrieval tools land: `get_project_state` ≤1500 tokens; future `search_articles_similar` ≤2500 tokens with self-limited top-K/excerpts.
-  - Tool-internal model calls will charge to the same profile capability/reservation as the agent run (for news, `agent.news_v1`), while pure DB tools have no extra LLM spend.
+  - Tool-output budgets updated before retrieval tools land: `get_project_state` ≤1500 tokens; `search_articles_similar` target ≤2500 tokens with self-limited top-K/excerpts.
+  - Pure DB tools have no extra LLM spend; query-embedding accounting was settled in revision 29 before `search_articles_similar` shipped.
   - Outcome parsing hardened: case-insensitive accepted outcomes, empty-string outcome rejected as malformed.
+
+- **2026-05-05 (revision 29) — News retrieval tools complete the search-then-fetch pattern.**
+  - `search_articles_similar` and `get_article_body` added in the same slice so the agent's first retrieval workflow is complete: search accepted chunks, narrow article candidates, then fetch stored body text only when needed.
+  - `search_articles_similar` uses the existing OpenAI news embedding client, searches active non-superseded `news_article_chunks`, excludes whole-article chunks by default, caps `top_k` at 10, and returns ≤200-char excerpts with article IDs/URLs/source metadata/gate source.
+  - `get_article_body` fetches title, URL, source slug, published date, and stored body text excerpt for one article; default 6000 chars, hard cap 12000 chars, no raw HTML.
+  - News agent prompt updated to require the search-then-fetch pattern and to distinguish chunk evidence from full-body evidence.
+  - Researcher decision: query-embedding cost for `search_articles_similar` is intentionally ignored as negligible and does not write cost rows.
 
 - **2026-05-05 (revision 13) — Initial slim default extraction prompt implementation.**
   - Initial slice removed `render_news_glossary` from `render_extraction_prompt` and sent only the extraction system template plus signal-flag registry as cacheable system blocks.

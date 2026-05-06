@@ -52,6 +52,7 @@ class AgentRunRequest:
     profile: SourceProfile
     session_factory: sessionmaker[Session] | None = None
     settings: Settings | None = None
+    embedding_client: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)
