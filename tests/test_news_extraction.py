@@ -1055,6 +1055,123 @@ def test_run_news_extraction_for_article_does_not_reextract_without_trigger(
     ).scalar_one_or_none() is None
 
 
+def test_run_news_extraction_for_article_skips_low_confidence_pass3a_by_default(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, _prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return _llm_response(_payload(candidate_confidence="low"))
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        settings=Settings(news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.calls == 1
+    assert result.extraction_id is not None
+    assert result.reextraction_id is None
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_article is not None
+    assert refreshed_article.current_extraction_id == result.extraction_id
+    assert refreshed_article.current_extraction_version == 1
+    assert postgres_session.execute(
+        select(NewsExtraction).where(
+            NewsExtraction.article_id == article.id,
+            NewsExtraction.pass_name == NewsExtractionPass.REEXTRACTION.value,
+        )
+    ).scalar_one_or_none() is None
+    assert postgres_session.execute(
+        select(LLMCostUsage).where(
+            LLMCostUsage.bucket == "news",
+            LLMCostUsage.cost_date == date(2026, 4, 29),
+            LLMCostUsage.capability == NewsExtractionPass.REEXTRACTION.value,
+            LLMCostUsage.provider == "anthropic",
+            LLMCostUsage.model == "claude-opus-4-7",
+        )
+    ).scalar_one_or_none() is None
+
+
+def test_run_news_extraction_for_article_runs_low_confidence_pass3a_when_legacy_enabled(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                assert prompt.prompt_id == "extract_v2"
+                return _llm_response(_payload(candidate_confidence="low"))
+            assert prompt.prompt_id == "reextract_v1"
+            assert "pass2_low_confidence" in prompt.user_text
+            return _llm_response(_payload(candidate_confidence="medium"))
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        settings=Settings(news_use_legacy_pass3=True),
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.calls == 2
+    assert result.extraction_id is not None
+    assert result.reextraction_id is not None
+    assert result.reextraction_triggered_by == "pass2_low_confidence"
+    assert result.reextraction_parse_status == NewsExtractionParseStatus.OK.value
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_article is not None
+    assert refreshed_article.current_extraction_id == result.reextraction_id
+    assert refreshed_article.current_extraction_version == 2
+    reextraction = postgres_session.get(NewsExtraction, result.reextraction_id)
+    assert reextraction is not None
+    assert reextraction.pass_name == NewsExtractionPass.REEXTRACTION.value
+    assert reextraction.triggered_by == "pass2_low_confidence"
+    assert reextraction.diagnostic["pass3a_context"]["low_confidence"][0]["fields"]
+
+
 def test_run_news_extraction_for_article_skips_pass3a_when_cost_cap_blocks(
     postgres_session: Session,
 ) -> None:

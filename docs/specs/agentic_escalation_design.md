@@ -1472,6 +1472,11 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
   - First live smoke completed on 2026-05-06: Rosa's Place possible-match candidate was confirmed to the matcher-provided project ID after `get_project_state`, with no fallback review item.
   - The Anthropic 400 visible during that local paste-link smoke was the known extraction temperature-deprecation retry path, not an agent-loop 400; future agent-turn 400s should still be investigated with provider response bodies.
 
+- **2026-05-06 (revision 34) — Interim low-confidence Pass 3a cost gate.**
+  - Default extraction skips legacy Pass 3a re-extraction for `pass2_low_confidence` when `news_use_legacy_pass3=false`; the audited `news_v1` low-confidence agent path now owns that case.
+  - Structural-conflict Pass 3a re-extraction remains active until the harder-trigger / contradiction rewrite step moves those cases into the agent layer.
+  - Setting `news_use_legacy_pass3=true` restores legacy low-confidence re-extraction for emergency fallback during AGENT.2 development.
+
 - **2026-05-06 (revision 33) — Output-quality retry path implemented.**
   - `extract_retry_v1` is now the active non-agent retry prompt for default-extraction `parse_error`, `schema_invalid`, `refused`, and `truncated` outcomes.
   - The retry path makes at most two attempts, persists rows with `pass='extract_retry'`, records spend under `capability='extract_retry'`, and includes the previous parse status/error/output in the retry prompt while keeping the glossary out of the prompt.

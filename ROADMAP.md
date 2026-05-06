@@ -365,6 +365,8 @@ AGENT.2 low-confidence reproducibility note, 2026-05-06: organic `candidate_conf
 
 AGENT.2 output-quality retry note, 2026-05-06: `extract_retry_v1` is the non-agent replacement for the old output-quality Pass 3a branch. Initial `parse_error`, `schema_invalid`, `refused`, and `truncated` extraction results get up to two retry attempts with stronger formatting guidance, persisted as `pass='extract_retry'` rows and costed under the distinct `extract_retry` capability. Successful retries become the article's current extraction; exhausted retries preserve the failure path for review/escalation instead of entering the agent loop.
 
+AGENT.2 interim Pass 3a low-confidence gate, 2026-05-06: default extraction no longer runs legacy Pass 3a re-extraction for `pass2_low_confidence` when `news_use_legacy_pass3=false`; integration handles low-confidence references through the audited `news_v1` agent path with deterministic fallback. Pass 3a structural-conflict re-extraction remains active until the harder trigger / contradiction rewrite step, and `news_use_legacy_pass3=true` still restores legacy low-confidence re-extraction for emergency fallback.
+
 AGENT.2 sub-sequence, 2026-05-06: the AGENT.2 row above describes total scope as a paragraph; the build sequence below is the authoritative ordering. Steps already done are marked. Steps not yet done preserve deterministic fallback while behind the existing kill switches.
 
 1. `promote_existing_project` paste-a-link smoke. **Done** (Rosa's Place, 2026-05-06).

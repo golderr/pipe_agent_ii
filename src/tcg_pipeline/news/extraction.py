@@ -482,6 +482,7 @@ def run_news_extraction_for_article(
         prior_result=result,
         client=extraction_client,
         session_factory=resolved_session_factory,
+        settings=resolved_settings,
         now=current,
     )
     if pass3a_result is None:
@@ -652,6 +653,7 @@ def _maybe_run_pass3a_reextraction(
     prior_result: NewsExtractionRunResult,
     client: ExtractionLLMClient,
     session_factory: sessionmaker[Session],
+    settings: Settings,
     now: datetime,
 ) -> NewsExtractionRunResult | None:
     if prior_result.extraction_id is None:
@@ -663,6 +665,11 @@ def _maybe_run_pass3a_reextraction(
             raise RuntimeError("Pass 3a re-extraction references missing rows.")
         decision = decide_pass3a_reextraction(article, prior_extraction)
         if decision is None:
+            return None
+        if (
+            decision.triggered_by == PASS3A_TRIGGER_LOW_CONFIDENCE
+            and not settings.news_use_legacy_pass3
+        ):
             return None
         rendered_prompt = render_reextraction_prompt(
             session,
