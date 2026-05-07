@@ -308,7 +308,7 @@ def test_news_integration_semantic_strong_status_auto_promotes(
         _semantic_payload(
             reference_id=reference.id,
             reason_code="news_topped_out",
-            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            canonical_value="topped_out",
             confidence="high",
         )
     )
@@ -350,6 +350,76 @@ def test_news_integration_semantic_strong_status_auto_promotes(
     assert evidence.extracted_fields["pipeline_status"]["semantic"][
         "promotes_status_alone"
     ] is True
+
+
+def test_news_integration_semantic_move_ins_event_token_promotes_complete(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("4321 Move In Way, Los Angeles, CA 90026")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Move In Tower",
+        total_units=100,
+    )
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Move In Tower",
+                candidate_address="4321 Move In Way, Los Angeles, CA 90026",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_first_move_ins",
+            canonical_value="first_move_ins",
+            confidence="high",
+        )
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.semantic_result is not None
+    assert result.semantic_result.parse_status == NewsExtractionParseStatus.OK.value
+    postgres_session.expire_all()
+    refreshed_project = postgres_session.get(Project, project.id)
+    assert refreshed_project is not None
+    assert refreshed_project.pipeline_status == PipelineStatus.COMPLETE
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.extracted_fields["pipeline_status"]["value"] == (
+        PipelineStatus.COMPLETE.value
+    )
 
 
 def test_news_integration_semantic_uncorroborated_status_creates_review_item(

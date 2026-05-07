@@ -277,10 +277,27 @@ def _coerce_pipeline_status(value: Any) -> PipelineStatus | None:
         return value
     if value is None:
         return None
-    try:
-        return PipelineStatus(str(value))
-    except ValueError:
+    text = str(value).strip()
+    if not text:
         return None
+    try:
+        return PipelineStatus(text)
+    except ValueError:
+        pass
+    normalized = _pipeline_status_key(text)
+    for status in PipelineStatus:
+        if normalized in {
+            _pipeline_status_key(status.value),
+            _pipeline_status_key(status.name),
+        }:
+            return status
+    return None
+
+
+def _pipeline_status_key(value: str) -> str:
+    return "_".join(
+        "".join(character.lower() if character.isalnum() else " " for character in value).split()
+    )
 
 
 def _requires_review(

@@ -150,6 +150,23 @@ SEMANTIC_REVIEW_ITEM_TYPES = {
     "multi_tenure_review": ReviewItemType.MULTI_TENURE_REVIEW,
     "project_cancellation_review": ReviewItemType.PROJECT_CANCELLATION_REVIEW,
 }
+SEMANTIC_STATUS_REASON_VALUES = {
+    "news_topped_out": PipelineStatus.UNDER_CONSTRUCTION,
+    "news_framing_complete": PipelineStatus.UNDER_CONSTRUCTION,
+    "news_concrete_pour": PipelineStatus.UNDER_CONSTRUCTION,
+    "news_construction_midpoint": PipelineStatus.UNDER_CONSTRUCTION,
+    "news_vertical_construction": PipelineStatus.UNDER_CONSTRUCTION,
+    "news_groundbreaking_unverified_low_quality_permit_jurisdiction": (
+        PipelineStatus.UNDER_CONSTRUCTION
+    ),
+    "news_status_uncorroborated_high_quality_permit_jurisdiction": (
+        PipelineStatus.UNDER_CONSTRUCTION
+    ),
+    "news_ribbon_cutting": PipelineStatus.COMPLETE,
+    "news_first_move_ins": PipelineStatus.COMPLETE,
+    "news_officially_opened": PipelineStatus.COMPLETE,
+    "news_construction_complete": PipelineStatus.COMPLETE,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1472,7 +1489,11 @@ def _apply_semantic_interpretations_to_fields(
         if reason.signal_only or interpretation.canonical_value is None:
             wrapped.pop(interpretation.field_name, None)
             continue
-        value = _semantic_project_value(interpretation.field_name, interpretation.canonical_value)
+        value = _semantic_project_value(
+            interpretation.field_name,
+            interpretation.canonical_value,
+            reason=reason,
+        )
         if not _has_value(value):
             wrapped.pop(interpretation.field_name, None)
             continue
@@ -1492,12 +1513,17 @@ def _apply_semantic_interpretations_to_fields(
         wrapped[interpretation.field_name] = payload
 
 
-def _semantic_project_value(field_name: str, value: Any) -> Any:
+def _semantic_project_value(
+    field_name: str,
+    value: Any,
+    *,
+    reason: ReasonCode | None = None,
+) -> Any:
     if field_name == "pipeline_status":
-        try:
-            return PipelineStatus(str(value)).value
-        except ValueError:
-            return value
+        status = _coerce_semantic_pipeline_status(value)
+        if status is None and reason is not None:
+            status = SEMANTIC_STATUS_REASON_VALUES.get(reason.code)
+        return status.value if status is not None else value
     if field_name == "product_type":
         return _product_type_value(str(value)) or value
     if field_name == "age_restriction":
@@ -1518,6 +1544,34 @@ def _semantic_project_value(field_name: str, value: Any) -> Any:
         text = _clean_text(value)
         return text[:10] if text is not None else None
     return value
+
+
+def _coerce_semantic_pipeline_status(value: Any) -> PipelineStatus | None:
+    if isinstance(value, PipelineStatus):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return PipelineStatus(text)
+    except ValueError:
+        pass
+    normalized = _semantic_status_key(text)
+    for status in PipelineStatus:
+        if normalized in {
+            _semantic_status_key(status.value),
+            _semantic_status_key(status.name),
+        }:
+            return status
+    return None
+
+
+def _semantic_status_key(value: str) -> str:
+    return "_".join(
+        "".join(character.lower() if character.isalnum() else " " for character in value).split()
+    )
 
 
 def _semantic_highlights(
@@ -2027,6 +2081,12 @@ def _semantic_review_proposed_value(
 ) -> Any:
     if reason.review_item_template == "project_cancellation_review":
         return PipelineStatus.INACTIVE.value
+    if reason.field_name == "pipeline_status":
+        status = _coerce_semantic_pipeline_status(interpretation.canonical_value)
+        if status is None:
+            status = SEMANTIC_STATUS_REASON_VALUES.get(reason.code)
+        if status is not None:
+            return status.value
     return serialize_json(interpretation.canonical_value)
 
 

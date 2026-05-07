@@ -1,9 +1,9 @@
 # Semantic Interpretation Layer Design
 
-> **Status:** Design — not yet implemented.
+> **Status:** In implementation - Pass 2c news path built and live-smoked; Render cutover still gated.
 > **Implementation owner:** AGENT.2 sub-sequence step 7.
 > **Implementation contract for:** the shared semantic field interpretation layer specified in `agentic_escalation_design.md` §5.1.1.
-> **Last updated:** 2026-05-07 (revision 8 — first live-smoke findings)
+> **Last updated:** 2026-05-07 (revision 9 - broader live-smoke findings)
 
 ---
 
@@ -207,7 +207,10 @@ measured `$0.198341` for one article after candidate-project context and the
 5,000-token output cap were enabled. Use about `$0.20/article` as the near-term
 planning baseline (about `$30/day` at 150 LA articles/day; about `$200/day` at
 1,000 articles/day) until the broader smoke suite and D.M/J.2 telemetry provide
-a larger sample.
+a larger sample. The first broader controlled suite used shorter synthetic
+articles and cost `$0.402036` across 9 Pass 2c calls; keep the `$0.20/article`
+baseline for real scheduled articles until production telemetry has a larger
+sample.
 
 **Tools:** none. Pass 2c does not call tools. All required context arrives as input.
 
@@ -226,6 +229,13 @@ The model emits the tense classification in `metadata.tense` of each `SemanticIn
 ### 4.3 Strong physical signals — promote in every jurisdiction
 
 The system prompt instructs the model that the following signals describe demonstrable vertical construction or delivery and are unambiguous. When the model identifies one in `past_concurrent` or `historical_dated` tense, it emits an interpretation with `canonical_value=Under Construction` (or `Complete` for delivery signals), `confidence=high`, `requires_corroboration=false`, and the corresponding reason code. Strong-signal interpretations bypass jurisdiction-policy gating.
+
+Live smoke showed that Opus can occasionally put the observed event token in
+`canonical_value` (for example `topped_out` or `first_move_ins`) while selecting
+the correct status reason code. The prompt still asks for canonical TCG status
+values, but the integrator treats the reason code as authoritative for
+`pipeline_status` normalization and writes canonical project evidence
+(`Under Construction` / `Complete`) plus canonical review proposed values.
 
 **Strong vertical signals** (status → Under Construction; reason codes per the registry):
 - "topped out" / "topping out" / "topped off" → `news_topped_out`, signal flag `topped_out=true`.
@@ -986,3 +996,7 @@ Testing for the LLM-backed Pass 2c interpreter follows the same pattern as the e
   - `NEWS_SEMANTIC_MAX_TOKENS=2500` produced a cleanly audited `truncated` row; the semantic output cap is now `5000`. Render `NEWS_EXTRACT_MAX_TOKENS` was also aligned to the existing code/docs target of `5000`.
   - Measured Pass 2c cost for the successful smoke was `$0.198341`, replacing the earlier `$0.05-0.10/article` estimate with a near-term `$0.20/article` planning baseline until broader smoke and telemetry provide a larger sample.
   - The broader §10 step 6 smoke suite remains the acceptance gate before flipping `NEWS_USE_LEGACY_SEMANTIC=false` on Render.
+- **2026-05-07 (revision 9)** - Broader controlled smoke findings:
+  - The broader suite passed 10 checks over 9 live Pass 2c calls: strong `topped_out` -> Under Construction, low/default-policy `broke_ground` -> Under Construction, forward-looking groundbreaking -> signal only, `first_move_ins` -> Complete, mixed tenure -> `multi_tenure_review`, three-article LA dedup -> one high-priority `news_status_uncorroborated` item with count 3, and glossary-gap/unmappable handling.
+  - Total measured semantic cost for that suite was `$0.402036`; the test used short synthetic articles, so the `$0.20/article` baseline remains the safer scheduled-article planning value.
+  - Event-token canonical values from the model (`topped_out`, `first_move_ins`) are normalized by reason-code mapping before project evidence/review proposed values are written.

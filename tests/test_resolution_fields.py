@@ -80,6 +80,31 @@ def test_resolve_status_promotes_to_under_construction_from_permit_and_inspectio
     assert resolution.confidence.value == "high"
 
 
+def test_resolve_status_accepts_semantic_status_slug() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.PROPOSED
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 5, 7),
+        extracted_fields={
+            "pipeline_status": {
+                "value": "under_construction",
+                "confidence": "high",
+                "semantic": {
+                    "reason_code": "news_topped_out",
+                    "promotes_status_alone": True,
+                },
+            },
+        },
+    )
+
+    resolution = resolve_status([news_evidence], project)
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    assert resolution.rule_applied == "highest_status_wins"
+
+
 def test_resolve_units_uses_most_recent_evidence() -> None:
     project = _build_project()
     older = _build_evidence(
