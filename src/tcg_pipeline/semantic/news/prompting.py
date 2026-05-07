@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,11 @@ def assemble_interpret_system_prompt(
         market_glossary=glossary,
         system_blocks=tuple(blocks),
     )
+
+
+def load_interpret_schema(base_schema_path: Path | None = None) -> dict:
+    path = base_schema_path or PROMPT_ROOT / INTERPRET_PROMPT_ID / "schema.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def render_reason_code_registry_for_prompt(reason_codes: Iterable[ReasonCode]) -> str:

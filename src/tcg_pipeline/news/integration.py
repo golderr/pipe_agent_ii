@@ -32,6 +32,8 @@ from tcg_pipeline.db.models import (
     NewsExtractionPass,
     NewsMatchStatus,
     NewsProjectReference,
+    NewsSemanticInterpretation,
+    PipelineStatus,
     Priority,
     ProductType,
     Project,
@@ -65,6 +67,20 @@ from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
 )
+from tcg_pipeline.semantic.jurisdiction import (
+    default_jurisdiction_policy,
+    load_jurisdiction_policy,
+)
+from tcg_pipeline.semantic.news.pass2c import (
+    NewsSemanticInterpretationRunResult,
+    Pass2cClient,
+    load_current_semantic_interpretation_row,
+    run_news_semantic_interpretation_for_extraction,
+    semantic_interpretations_from_output_json,
+)
+from tcg_pipeline.semantic.news.prompting import assemble_interpret_system_prompt
+from tcg_pipeline.semantic.reason_codes import ReasonCode, ReasonCodeRegistry
+from tcg_pipeline.semantic.types import SemanticInterpretation
 from tcg_pipeline.settings import Settings, get_settings
 
 NEWS_SOURCE_TYPE = "news_article"
@@ -100,6 +116,40 @@ LOW_CONFIDENCE_REFERENCE_FIELDS = {
     "date_delivery": "candidate_delivery_year_normalized",
     "candidate_address": "candidate_address",
 }
+SEMANTIC_PROJECT_STATE_FIELDS = (
+    "project_name",
+    "canonical_address",
+    "developer",
+    "rent_or_sale",
+    "product_type",
+    "age_restriction",
+    "total_units",
+    "affordable_units",
+    "market_rate_units",
+    "workforce_units",
+    "pipeline_status",
+    "date_delivery",
+    "status_date",
+    "last_evidence_date",
+)
+SEMANTIC_CANONICAL_FIELDS = {
+    "pipeline_status",
+    "total_units",
+    "affordable_units",
+    "market_rate_units",
+    "workforce_units",
+    "product_type",
+    "age_restriction",
+    "date_delivery",
+    "developer",
+    "rent_or_sale",
+    "candidate_identifiers",
+}
+SEMANTIC_REVIEW_ITEM_TYPES = {
+    "news_status_uncorroborated": ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+    "multi_tenure_review": ReviewItemType.MULTI_TENURE_REVIEW,
+    "project_cancellation_review": ReviewItemType.PROJECT_CANCELLATION_REVIEW,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +169,7 @@ class NewsIntegrationResult:
     status_change_review_items: int = 0
     pass3b_triggered: bool = False
     pass3b_result: NewsExtractionRunResult | None = None
+    semantic_result: NewsSemanticInterpretationRunResult | None = None
     skipped_reason: str | None = None
     force_project_id_dropped_reason: str | None = None
 
@@ -149,6 +200,20 @@ class NewsIntegrationResult:
                 self.pass3b_result.skipped_reason if self.pass3b_result else None
             ),
             "pass3b_error_text": self.pass3b_result.error_text if self.pass3b_result else None,
+            "semantic_interpretation_id": (
+                str(self.semantic_result.semantic_interpretation_id)
+                if self.semantic_result and self.semantic_result.semantic_interpretation_id
+                else None
+            ),
+            "semantic_parse_status": (
+                self.semantic_result.parse_status if self.semantic_result else None
+            ),
+            "semantic_skipped_reason": (
+                self.semantic_result.skipped_reason if self.semantic_result else None
+            ),
+            "semantic_interpretation_count": (
+                self.semantic_result.interpretation_count if self.semantic_result else 0
+            ),
             "force_project_id_dropped_reason": self.force_project_id_dropped_reason,
         }
 
@@ -180,6 +245,15 @@ class _ProjectIntegrationContext:
     references: list[_ConfirmedReference] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class _SemanticIntegrationContext:
+    row: NewsSemanticInterpretation | None = None
+    reason_registry: ReasonCodeRegistry | None = None
+    by_reference_id: dict[uuid.UUID, tuple[SemanticInterpretation, ...]] = field(
+        default_factory=dict
+    )
+
+
 ReextractionRunner = Callable[..., NewsExtractionRunResult]
 
 
@@ -192,6 +266,7 @@ def run_news_integration_for_article(
     reextraction_runner: ReextractionRunner | None = None,
     reextraction_client: ExtractionLLMClient | None = None,
     agent_client: AgentClient | None = None,
+    semantic_client: Pass2cClient | None = None,
     settings: Settings | None = None,
     now: datetime | None = None,
 ) -> NewsIntegrationResult:
@@ -237,6 +312,15 @@ def run_news_integration_for_article(
             now=current,
         )
 
+    semantic_result = _run_pass2c_for_current_extraction(
+        resolved_session_factory,
+        article_id=article_id,
+        force_project_id=force_project_id,
+        settings=resolved_settings,
+        client=semantic_client,
+        now=current,
+    )
+
     with resolved_session_factory() as session:
         result = _integrate_current_extraction(
             session,
@@ -247,10 +331,47 @@ def run_news_integration_for_article(
             pass3b_result=pass3b_result,
             prior_extraction_id=first_pass.extraction_id if pass3b_triggered else None,
             agent_decisions=agent_decisions,
+            use_legacy_semantic=resolved_settings.news_use_legacy_semantic,
+            semantic_result=semantic_result,
             now=current,
         )
         session.commit()
         return result
+
+
+def _run_pass2c_for_current_extraction(
+    session_factory: sessionmaker[Session],
+    *,
+    article_id: uuid.UUID,
+    force_project_id: uuid.UUID | None,
+    settings: Settings,
+    client: Pass2cClient | None,
+    now: datetime,
+) -> NewsSemanticInterpretationRunResult | None:
+    if settings.news_use_legacy_semantic:
+        return None
+    match_set = _load_current_references_and_matches(
+        session_factory,
+        article_id=article_id,
+        force_project_id=force_project_id,
+    )
+    if match_set.skipped_reason is not None or match_set.extraction_id is None:
+        return None
+    with session_factory() as session:
+        project_context, recent_evidence = _semantic_prompt_context(
+            session,
+            references=match_set.references,
+            matches=match_set.matches,
+        )
+    return run_news_semantic_interpretation_for_extraction(
+        match_set.extraction_id,
+        settings=settings,
+        client=client,
+        session_factory=session_factory,
+        project_context=project_context,
+        recent_evidence=recent_evidence,
+        now=now,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +441,110 @@ def _should_run_pass3b(first_pass: _FirstPassMatchSet) -> bool:
     if first_pass.current_extraction_triggered_by == PASS3B_TRIGGER_NEW_CANDIDATE:
         return False
     return any(match.status == NewsMatchStatus.NEW_CANDIDATE for match in first_pass.matches)
+
+
+def _semantic_prompt_context(
+    session: Session,
+    *,
+    references: tuple[NewsProjectReference, ...],
+    matches: tuple[NewsMatchResult, ...],
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    project_context: list[dict[str, Any]] = []
+    recent_evidence: list[dict[str, Any]] = []
+    seen_project_ids: set[uuid.UUID] = set()
+    for reference, match in zip(references, matches, strict=True):
+        if match.project_id is None:
+            continue
+        project = session.get(Project, match.project_id)
+        if project is None:
+            continue
+        project_context.append(
+            {
+                "reference_id": str(reference.id),
+                "reference_index": reference.reference_index,
+                "match_status": match.status.value,
+                "match_confidence": match.confidence,
+                "project_id": str(project.id),
+                "jurisdiction_slug": (
+                    project.jurisdiction_ref.slug
+                    if project.jurisdiction_ref is not None
+                    else None
+                ),
+                "jurisdiction_name": (
+                    project.jurisdiction_ref.name
+                    if project.jurisdiction_ref is not None
+                    else None
+                ),
+                "jurisdiction_policy": _project_jurisdiction_policy_payload(project),
+                "project_state": _project_state_payload(project),
+            }
+        )
+        if project.id in seen_project_ids:
+            continue
+        seen_project_ids.add(project.id)
+        recent_evidence.extend(_recent_evidence_payloads(session, project_id=project.id))
+    return tuple(project_context), tuple(recent_evidence)
+
+
+def _project_jurisdiction_policy_payload(project: Project) -> dict[str, Any]:
+    jurisdiction = project.jurisdiction_ref
+    policy = (
+        load_jurisdiction_policy(jurisdiction.slug)
+        if jurisdiction is not None
+        else default_jurisdiction_policy()
+    )
+    return {
+        "jurisdiction_slug": jurisdiction.slug if jurisdiction is not None else None,
+        "jurisdiction_name": jurisdiction.name if jurisdiction is not None else None,
+        "policy_scope": "matched_project",
+        **policy.as_prompt_payload(),
+    }
+
+
+def _project_state_payload(project: Project) -> dict[str, Any]:
+    return {
+        field_name: serialize_json(getattr(project, field_name, None))
+        for field_name in SEMANTIC_PROJECT_STATE_FIELDS
+    }
+
+
+def _recent_evidence_payloads(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    rows = (
+        session.execute(
+            select(Evidence)
+            .where(
+                Evidence.project_id == project_id,
+                Evidence.superseded_at.is_(None),
+            )
+            .order_by(
+                Evidence.evidence_date.desc().nullslast(),
+                Evidence.collected_at.desc(),
+                Evidence.id.desc(),
+            )
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "project_id": str(project_id),
+            "evidence_id": str(evidence.id),
+            "source_type": evidence.source_type,
+            "source_tier": evidence.source_tier,
+            "evidence_date": evidence.evidence_date.isoformat()
+            if evidence.evidence_date is not None
+            else None,
+            "collected_at": evidence.collected_at.isoformat(),
+            "extracted_fields": serialize_json(evidence.extracted_fields or {}),
+        }
+        for evidence in rows
+    ]
 
 
 def _pass3b_context(first_pass: _FirstPassMatchSet) -> dict[str, Any]:
@@ -551,6 +776,8 @@ def _integrate_current_extraction(
     pass3b_result: NewsExtractionRunResult | None,
     prior_extraction_id: uuid.UUID | None,
     agent_decisions: dict[uuid.UUID, _NewsAgentDecision],
+    use_legacy_semantic: bool,
+    semantic_result: NewsSemanticInterpretationRunResult | None,
     now: datetime,
 ) -> NewsIntegrationResult:
     article = session.get(NewsArticle, article_id)
@@ -589,6 +816,16 @@ def _integrate_current_extraction(
     confirmed_by_project: dict[uuid.UUID, _ProjectIntegrationContext] = defaultdict(
         _ProjectIntegrationContext
     )
+    semantic_context = (
+        _load_semantic_context_for_extraction(
+            session,
+            article=article,
+            extraction=extraction,
+            references=references,
+        )
+        if not use_legacy_semantic
+        else _SemanticIntegrationContext()
+    )
 
     for reference in references:
         match = match_news_reference(
@@ -619,6 +856,9 @@ def _integrate_current_extraction(
             reference=reference,
             match=match,
             project_id=match.project_id if match.status == NewsMatchStatus.CONFIRMED else None,
+            semantic_interpretations=semantic_context.by_reference_id.get(reference.id, ()),
+            semantic_interpretation_row=semantic_context.row,
+            reason_registry=semantic_context.reason_registry,
             now=now,
         )
         if inserted:
@@ -630,6 +870,21 @@ def _integrate_current_extraction(
 
         if match.status == NewsMatchStatus.CONFIRMED and match.project_id is not None:
             stats.confirmed += 1
+            semantic_created, semantic_updated = _upsert_semantic_review_items(
+                session,
+                project_id=match.project_id,
+                source_run=source_run,
+                article=article,
+                extraction=extraction,
+                reference=reference,
+                evidence=evidence,
+                interpretations=semantic_context.by_reference_id.get(reference.id, ()),
+                semantic_interpretation_row=semantic_context.row,
+                reason_registry=semantic_context.reason_registry,
+                now=now,
+            )
+            stats.review_items_created += semantic_created
+            stats.review_items_updated += semantic_updated
             confirmed_by_project[match.project_id].references.append(
                 _ConfirmedReference(
                     reference=reference,
@@ -729,6 +984,7 @@ def _integrate_current_extraction(
         status_change_review_items=stats.status_change_review_items,
         pass3b_triggered=pass3b_triggered,
         pass3b_result=pass3b_result,
+        semantic_result=semantic_result,
         force_project_id_dropped_reason=force_project_id_dropped_reason,
     )
 
@@ -951,6 +1207,91 @@ def _link_agent_run_review_item(
     )
 
 
+def _load_semantic_context_for_extraction(
+    session: Session,
+    *,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    references: list[NewsProjectReference],
+) -> _SemanticIntegrationContext:
+    row = load_current_semantic_interpretation_row(session, extraction.id)
+    if row is None:
+        return _SemanticIntegrationContext()
+    registry = _semantic_reason_registry_for_article(article)
+    interpretations = semantic_interpretations_from_output_json(
+        row.output_json,
+        registry=registry,
+    )
+    return _SemanticIntegrationContext(
+        row=row,
+        reason_registry=registry,
+        by_reference_id=_group_semantic_interpretations_by_reference(
+            interpretations,
+            references=references,
+        ),
+    )
+
+
+def _semantic_reason_registry_for_article(article: NewsArticle) -> ReasonCodeRegistry:
+    source = article.source
+    market_slug = (
+        source.market.slug
+        if source is not None and source.market is not None
+        else "unscoped"
+    )
+    return assemble_interpret_system_prompt(market_slug).reason_code_registry
+
+
+def _group_semantic_interpretations_by_reference(
+    interpretations: tuple[SemanticInterpretation, ...],
+    *,
+    references: list[NewsProjectReference],
+) -> dict[uuid.UUID, tuple[SemanticInterpretation, ...]]:
+    if not interpretations:
+        return {}
+    reference_by_id = {str(reference.id): reference.id for reference in references}
+    reference_by_index = {
+        reference.reference_index: reference.id for reference in references
+    }
+    grouped: dict[uuid.UUID, list[SemanticInterpretation]] = defaultdict(list)
+    for interpretation in interpretations:
+        reference_id = _semantic_reference_id(
+            interpretation,
+            reference_by_id=reference_by_id,
+            reference_by_index=reference_by_index,
+        )
+        if reference_id is None and len(references) == 1:
+            reference_id = references[0].id
+        if reference_id is None:
+            continue
+        grouped[reference_id].append(interpretation)
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def _semantic_reference_id(
+    interpretation: SemanticInterpretation,
+    *,
+    reference_by_id: dict[str, uuid.UUID],
+    reference_by_index: dict[int, uuid.UUID],
+) -> uuid.UUID | None:
+    for payload in (interpretation.metadata, interpretation.signal_flags):
+        raw_reference_id = _clean_text(
+            payload.get("reference_id")
+            or payload.get("source_reference_id")
+            or payload.get("pass2b_reference_id")
+        )
+        if raw_reference_id is not None and raw_reference_id in reference_by_id:
+            return reference_by_id[raw_reference_id]
+        raw_reference_index = payload.get("reference_index")
+        try:
+            reference_index = int(raw_reference_index)
+        except (TypeError, ValueError):
+            continue
+        if reference_index in reference_by_index:
+            return reference_by_index[reference_index]
+    return None
+
+
 def _write_news_evidence(
     session: Session,
     *,
@@ -959,6 +1300,9 @@ def _write_news_evidence(
     reference: NewsProjectReference,
     match: NewsMatchResult,
     project_id: uuid.UUID | None,
+    semantic_interpretations: tuple[SemanticInterpretation, ...] = (),
+    semantic_interpretation_row: NewsSemanticInterpretation | None = None,
+    reason_registry: ReasonCodeRegistry | None = None,
     now: datetime,
 ) -> tuple[Evidence, bool]:
     if reference.matched_evidence_id is not None:
@@ -968,8 +1312,18 @@ def _write_news_evidence(
                 existing.project_id = project_id
             return existing, False
 
-    raw_data = _news_raw_data(article=article, extraction=extraction, reference=reference)
-    extracted_fields = _news_extracted_fields(article, reference)
+    raw_data = _news_raw_data(
+        article=article,
+        extraction=extraction,
+        reference=reference,
+        semantic_interpretation_row=semantic_interpretation_row,
+    )
+    extracted_fields = _news_extracted_fields(
+        article,
+        reference,
+        semantic_interpretations=semantic_interpretations,
+        reason_registry=reason_registry,
+    )
     write_result = write_evidence(
         session,
         project_id=project_id,
@@ -986,7 +1340,10 @@ def _write_news_evidence(
     evidence = write_result.evidence
     if evidence is None:
         raise RuntimeError("News evidence write did not return an evidence row.")
-    evidence.signal_flags = reference.candidate_signal_flags or None
+    evidence.signal_flags = _merged_signal_flags(
+        reference.candidate_signal_flags or {},
+        semantic_interpretations=semantic_interpretations,
+    )
     session.flush()
     return evidence, write_result.inserted
 
@@ -996,6 +1353,7 @@ def _news_raw_data(
     article: NewsArticle,
     extraction: NewsExtraction,
     reference: NewsProjectReference,
+    semantic_interpretation_row: NewsSemanticInterpretation | None = None,
 ) -> dict[str, Any]:
     source = article.source
     return {
@@ -1015,12 +1373,30 @@ def _news_raw_data(
         "prompt_version": extraction.prompt_version,
         "match_status": reference.match_status,
         "match_confidence": reference.match_confidence,
+        "semantic_interpretation_id": (
+            str(semantic_interpretation_row.id)
+            if semantic_interpretation_row is not None
+            else None
+        ),
+        "semantic_prompt_id": (
+            semantic_interpretation_row.prompt_id
+            if semantic_interpretation_row is not None
+            else None
+        ),
+        "semantic_prompt_version": (
+            semantic_interpretation_row.prompt_version
+            if semantic_interpretation_row is not None
+            else None
+        ),
     }
 
 
 def _news_extracted_fields(
     article: NewsArticle,
     reference: NewsProjectReference,
+    *,
+    semantic_interpretations: tuple[SemanticInterpretation, ...] = (),
+    reason_registry: ReasonCodeRegistry | None = None,
 ) -> dict[str, dict[str, Any]]:
     confidence = reference.candidate_confidence
     fields: dict[str, Any] = {
@@ -1049,7 +1425,111 @@ def _news_extracted_fields(
         highlights = highlights_by_field.get(field_name)
         if highlights:
             wrapped[field_name]["highlights"] = highlights
+    if semantic_interpretations and reason_registry is not None:
+        _apply_semantic_interpretations_to_fields(
+            wrapped,
+            semantic_interpretations=semantic_interpretations,
+            reason_registry=reason_registry,
+        )
     return wrapped
+
+
+def _apply_semantic_interpretations_to_fields(
+    wrapped: dict[str, dict[str, Any]],
+    *,
+    semantic_interpretations: tuple[SemanticInterpretation, ...],
+    reason_registry: ReasonCodeRegistry,
+) -> None:
+    for interpretation in semantic_interpretations:
+        reason = reason_registry.by_code.get(interpretation.reason_code)
+        if reason is None or interpretation.field_name not in SEMANTIC_CANONICAL_FIELDS:
+            continue
+        if reason.signal_only or interpretation.canonical_value is None:
+            wrapped.pop(interpretation.field_name, None)
+            continue
+        value = _semantic_project_value(interpretation.field_name, interpretation.canonical_value)
+        if not _has_value(value):
+            wrapped.pop(interpretation.field_name, None)
+            continue
+        payload = {
+            "value": serialize_json(value),
+            "confidence": interpretation.confidence,
+            "semantic": {
+                "reason_code": interpretation.reason_code,
+                "requires_corroboration": interpretation.requires_corroboration,
+                "promotes_status_alone": reason.promotes_status_alone,
+                "review_item_template": reason.review_item_template,
+            },
+        }
+        highlights = _semantic_highlights(interpretation)
+        if highlights:
+            payload["highlights"] = highlights
+        wrapped[interpretation.field_name] = payload
+
+
+def _semantic_project_value(field_name: str, value: Any) -> Any:
+    if field_name == "pipeline_status":
+        try:
+            return PipelineStatus(str(value)).value
+        except ValueError:
+            return value
+    if field_name == "product_type":
+        return _product_type_value(str(value)) or value
+    if field_name == "age_restriction":
+        return _age_restriction_value(str(value)) or value
+    if field_name in {
+        "total_units",
+        "affordable_units",
+        "market_rate_units",
+        "workforce_units",
+    }:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    if field_name == "date_delivery":
+        if isinstance(value, date):
+            return value.isoformat()
+        text = _clean_text(value)
+        return text[:10] if text is not None else None
+    return value
+
+
+def _semantic_highlights(
+    interpretation: SemanticInterpretation,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "field": anchor.field_name or interpretation.field_name,
+            "value": serialize_json(interpretation.canonical_value),
+            "passage": anchor.text,
+            "offset_start": anchor.offset_start,
+            "offset_end": anchor.offset_end,
+            "reason_code": interpretation.reason_code,
+        }
+        for anchor in interpretation.source_anchors
+    ]
+
+
+def _merged_signal_flags(
+    candidate_signal_flags: dict[str, Any],
+    *,
+    semantic_interpretations: tuple[SemanticInterpretation, ...],
+) -> dict[str, Any] | None:
+    merged = dict(candidate_signal_flags)
+    semantic_flags = []
+    for interpretation in semantic_interpretations:
+        if interpretation.signal_flags:
+            semantic_flags.append(
+                {
+                    "field_name": interpretation.field_name,
+                    "reason_code": interpretation.reason_code,
+                    "signal_flags": serialize_json(interpretation.signal_flags),
+                }
+            )
+    if semantic_flags:
+        merged["semantic_interpretations"] = semantic_flags
+    return merged or None
 
 
 def _highlights_by_project_field(
@@ -1065,6 +1545,8 @@ def _highlights_by_project_field(
         reference_field = str(excerpt.get("field") or "")
         project_field = REFERENCE_FIELD_TO_PROJECT_FIELD.get(reference_field)
         if project_field is None:
+            if reference_field not in FIELD_TO_REFERENCE_FIELD:
+                continue
             project_field = reference_field
         highlights[project_field].append(
             {
@@ -1279,6 +1761,311 @@ def _upsert_status_change_review_items(
         if created:
             created_count += 1
     return created_count
+
+
+def _upsert_semantic_review_items(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    source_run: SourceRun,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    reference: NewsProjectReference,
+    evidence: Evidence,
+    interpretations: tuple[SemanticInterpretation, ...],
+    semantic_interpretation_row: NewsSemanticInterpretation | None,
+    reason_registry: ReasonCodeRegistry | None,
+    now: datetime,
+) -> tuple[int, int]:
+    if reason_registry is None or semantic_interpretation_row is None:
+        return 0, 0
+    project = session.get(Project, project_id)
+    if project is None:
+        return 0, 0
+    created_count = 0
+    updated_count = 0
+    for interpretation in interpretations:
+        reason = reason_registry.by_code.get(interpretation.reason_code)
+        if reason is None or reason.review_item_template is None:
+            continue
+        item_type = SEMANTIC_REVIEW_ITEM_TYPES.get(reason.review_item_template)
+        if item_type is None:
+            continue
+        proposed_value = _semantic_review_proposed_value(reason, interpretation)
+        payload = _semantic_review_payload(
+            project=project,
+            article=article,
+            extraction=extraction,
+            reference=reference,
+            evidence=evidence,
+            interpretation=interpretation,
+            reason=reason,
+            semantic_interpretation_row=semantic_interpretation_row,
+            proposed_value=proposed_value,
+        )
+        item, created = _upsert_semantic_review_item(
+            session,
+            project=project,
+            source_run=source_run,
+            item_type=item_type,
+            field_name=interpretation.field_name,
+            reason_code=interpretation.reason_code,
+            proposed_value=proposed_value,
+            priority=_semantic_review_priority(item_type),
+            payload=payload,
+            evidence=evidence,
+            now=now,
+        )
+        reference.review_item_id = item.id
+        if created:
+            created_count += 1
+        else:
+            updated_count += 1
+    return created_count, updated_count
+
+
+def _upsert_semantic_review_item(
+    session: Session,
+    *,
+    project: Project,
+    source_run: SourceRun,
+    item_type: ReviewItemType,
+    field_name: str,
+    reason_code: str,
+    proposed_value: Any,
+    priority: Priority,
+    payload: dict[str, Any],
+    evidence: Evidence,
+    now: datetime,
+) -> tuple[ReviewItem, bool]:
+    existing = _find_existing_semantic_review_item(
+        session,
+        project_id=project.id,
+        item_type=item_type,
+        field_name=field_name,
+        reason_code=reason_code,
+        proposed_value=proposed_value,
+    )
+    if existing is not None:
+        existing.source_run_id = source_run.id
+        existing.priority = _merged_semantic_review_priority(
+            priority,
+            existing_payload=existing.payload,
+            incoming_payload=payload,
+        )
+        existing.winning_evidence_id = evidence.id
+        existing.payload = _merge_semantic_review_payload(existing.payload, payload)
+        existing.updated_at = now
+        return existing, False
+    item = ReviewItem(
+        project_id=project.id,
+        source_run_id=source_run.id,
+        item_type=item_type,
+        status=ReviewItemStatus.OPEN,
+        state=ReviewItemStatus.OPEN.value,
+        priority=priority,
+        field_name=field_name,
+        winning_evidence_id=evidence.id,
+        payload=payload,
+    )
+    session.add(item)
+    session.flush()
+    return item, True
+
+
+def _find_existing_semantic_review_item(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    item_type: ReviewItemType,
+    field_name: str,
+    reason_code: str,
+    proposed_value: Any,
+) -> ReviewItem | None:
+    rows = (
+        session.execute(
+            select(ReviewItem)
+            .where(
+                ReviewItem.project_id == project_id,
+                ReviewItem.item_type == item_type,
+                ReviewItem.field_name == field_name,
+                ReviewItem.state.in_(ACTIVE_REVIEW_STATES),
+            )
+            .order_by(ReviewItem.created_at.asc(), ReviewItem.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    normalized_proposed = serialize_json(proposed_value)
+    for item in rows:
+        payload = item.payload if isinstance(item.payload, dict) else {}
+        if (
+            payload.get("reason_code") == reason_code
+            and payload.get("proposed_value") == normalized_proposed
+        ):
+            return item
+    return None
+
+
+def _semantic_review_payload(
+    *,
+    project: Project,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    reference: NewsProjectReference,
+    evidence: Evidence,
+    interpretation: SemanticInterpretation,
+    reason: ReasonCode,
+    semantic_interpretation_row: NewsSemanticInterpretation,
+    proposed_value: Any,
+) -> dict[str, Any]:
+    proposed = serialize_json(proposed_value)
+    evidence_id = str(evidence.id)
+    article_id = str(article.id)
+    return {
+        "origin": "semantic_pass2c",
+        "field_name": interpretation.field_name,
+        "reason_code": interpretation.reason_code,
+        "reason_label": reason.label,
+        "review_item_template": reason.review_item_template,
+        "current_value": serialize_json(getattr(project, interpretation.field_name, None)),
+        "proposed_value": proposed,
+        "semantic_interpretation_id": str(semantic_interpretation_row.id),
+        "semantic_prompt_id": semantic_interpretation_row.prompt_id,
+        "semantic_prompt_version": semantic_interpretation_row.prompt_version,
+        "source_record_id": str(reference.id),
+        "evidence_ids": [evidence_id],
+        "winning_evidence_id": evidence_id,
+        "article_ids": [article_id],
+        "independent_news_article_count": 1,
+        "system_recommendation": _semantic_system_recommendation(
+            reason,
+            proposed_value=proposed,
+            article_count=1,
+        ),
+        "semantic_interpretation": _semantic_interpretation_payload(interpretation),
+        "news_context": _news_context(
+            article=article,
+            extraction=extraction,
+            reference=reference,
+            field_name=interpretation.field_name,
+            evidence_id=evidence.id,
+        ),
+    }
+
+
+def _merge_semantic_review_payload(
+    existing_payload: Any,
+    incoming_payload: dict[str, Any],
+) -> dict[str, Any]:
+    existing = existing_payload if isinstance(existing_payload, dict) else {}
+    merged = dict(incoming_payload)
+    merged["evidence_ids"] = _merge_text_values(
+        existing.get("evidence_ids"),
+        incoming_payload.get("evidence_ids"),
+    )
+    merged["article_ids"] = _merge_text_values(
+        existing.get("article_ids"),
+        incoming_payload.get("article_ids"),
+    )
+    merged["independent_news_article_count"] = len(merged["article_ids"])
+    merged["source_record_ids"] = _merge_text_values(
+        existing.get("source_record_ids") or existing.get("source_record_id"),
+        incoming_payload.get("source_record_id"),
+    )
+    merged["system_recommendation"] = _semantic_system_recommendation(
+        None,
+        proposed_value=merged.get("proposed_value"),
+        article_count=merged["independent_news_article_count"],
+    )
+    return merged
+
+
+def _merged_semantic_review_priority(
+    priority: Priority,
+    *,
+    existing_payload: Any,
+    incoming_payload: dict[str, Any],
+) -> Priority:
+    article_ids = _merge_text_values(
+        (existing_payload or {}).get("article_ids") if isinstance(existing_payload, dict) else None,
+        incoming_payload.get("article_ids"),
+    )
+    if len(article_ids) >= 3:
+        return Priority.HIGH
+    return priority
+
+
+def _semantic_review_proposed_value(
+    reason: ReasonCode,
+    interpretation: SemanticInterpretation,
+) -> Any:
+    if reason.review_item_template == "project_cancellation_review":
+        return PipelineStatus.INACTIVE.value
+    return serialize_json(interpretation.canonical_value)
+
+
+def _semantic_review_priority(item_type: ReviewItemType) -> Priority:
+    if item_type == ReviewItemType.PROJECT_CANCELLATION_REVIEW:
+        return Priority.HIGH
+    return Priority.MEDIUM
+
+
+def _semantic_system_recommendation(
+    reason: ReasonCode | None,
+    *,
+    proposed_value: Any,
+    article_count: int,
+) -> dict[str, Any]:
+    if reason is not None and reason.review_item_template == "project_cancellation_review":
+        action = "researcher_confirm_inactive"
+    elif article_count >= 3:
+        action = "researcher_review_recommended"
+    else:
+        action = "keep_current_until_corroborated_or_researcher_confirms"
+    return {
+        "action": action,
+        "proposed_value": proposed_value,
+        "independent_news_article_count": article_count,
+    }
+
+
+def _semantic_interpretation_payload(
+    interpretation: SemanticInterpretation,
+) -> dict[str, Any]:
+    return {
+        "field_name": interpretation.field_name,
+        "canonical_value": serialize_json(interpretation.canonical_value),
+        "confidence": interpretation.confidence,
+        "reason_code": interpretation.reason_code,
+        "signal_flags": serialize_json(interpretation.signal_flags),
+        "source_anchors": [
+            {
+                "text": anchor.text,
+                "offset_start": anchor.offset_start,
+                "offset_end": anchor.offset_end,
+                "field_name": anchor.field_name,
+                "metadata": serialize_json(anchor.metadata),
+            }
+            for anchor in interpretation.source_anchors
+        ],
+        "requires_corroboration": interpretation.requires_corroboration,
+        "metadata": serialize_json(interpretation.metadata),
+    }
+
+
+def _merge_text_values(*groups: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        values = group if isinstance(group, list | tuple | set) else [group]
+        for value in values:
+            text = _clean_text(value)
+            if text is None or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+    return merged
 
 
 def _field_reference_context(

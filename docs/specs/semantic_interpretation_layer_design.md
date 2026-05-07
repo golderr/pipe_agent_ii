@@ -187,7 +187,7 @@ The news status interpreter is implemented as **Pass 2c**: a single-shot Opus 4.
 - The article body / passages.
 - Pass 2b's structured candidates with anchors.
 - The market glossary addendum (loaded from `config/markets/<slug>/semantic_glossary.yaml` for the article's market).
-- The current jurisdiction policy values (`permit_data_quality`, `news_status_promotion_policy`).
+- Matched project context, including the matched project's jurisdiction policy values (`permit_data_quality`, `news_status_promotion_policy`). The project jurisdiction owns status-promotion policy; article-source jurisdiction is only a fallback for unmatched/new-candidate references.
 - The current project state and recent-evidence summary.
 
 **Output:** a JSON array of `SemanticInterpretation` records conforming to the schema in §3.1, enforced via structured-output schema. The model returns one or more interpretations per field domain (status, product_type, age_restriction, date_delivery, unit buckets, tenure, address, name, identifiers, developer-roles, status-nuance), with reason codes drawn from the registry.
@@ -701,8 +701,8 @@ permit_data_quality_notes: |
 ```
 
 ```yaml
-# config/jurisdictions/santa_monica.yaml
-slug: santa_monica
+# config/jurisdictions/city_of_santa_monica.yaml
+slug: city_of_santa_monica
 permit_data_quality: low
 news_status_promotion_policy: auto_promote_unverified
 permit_data_quality_notes: |
@@ -718,8 +718,8 @@ The two policies are:
 
 ### 6.2 Defaults
 
-- New jurisdictions added to `config/jurisdictions/` default to `permit_data_quality: low`, `news_status_promotion_policy: auto_promote_unverified`. The new-market onboarding checklist (Phase I.1) requires explicit acknowledgement of the default.
-- Missing jurisdiction config file → loader fails fast at startup with a clear error directing the operator to create the file.
+- New jurisdictions default to `permit_data_quality: low`, `news_status_promotion_policy: auto_promote_unverified` when no explicit policy file exists. The new-market onboarding checklist (Phase I.1) requires explicit acknowledgement of the default and should add a policy file before launch.
+- Missing jurisdiction config file → loader returns the low-quality default and marks the prompt payload with `policy_source: default`.
 
 ### 6.3 Upgrade criteria (low → high)
 
@@ -964,3 +964,12 @@ Testing for the LLM-backed Pass 2c interpreter follows the same pattern as the e
   - Glossary loader validates section-specific `tcg_*` canonical keys so typoed canonical mappings fail at load time while non-`tcg_*` supplementary metadata remains allowed.
   - Pass 2c audit persistence is locked as a separate `news_semantic_interpretations` table linked to the source `news_extractions.id`, keeping extraction and semantic-interpretation prompt lineages separate.
   - Render cutover posture remains conservative: `NEWS_USE_LEGACY_SEMANTIC=true` on API and worker until controlled smoke passes, with semantic model/provider/token settings kept in parity across both services.
+- **2026-05-07 (revision 6)** - Jurisdiction policy loader and Pass 2c hardening:
+  - Current jurisdiction policy YAML files added for LA City (`high` / `wait_for_permit_corroboration`) and Santa Monica (`low` / `auto_promote_unverified`).
+  - Missing jurisdiction policy now defaults to `low` / `auto_promote_unverified` and is surfaced in the prompt payload as `policy_source: default`.
+  - Pass 2c parser records root-array recovery diagnostics and recognizes Anthropic/OpenAI truncation stop-reason vocabulary.
+- **2026-05-07 (revision 7)** - News integration cutover wiring:
+  - When `news_use_legacy_semantic=false`, news integration runs Pass 2c after matching, passes matched project state, matched-project jurisdiction policy, and bounded recent evidence into the prompt, persists the audit row, and maps current semantic interpretations into evidence/review flow.
+  - Strong semantic status reason codes can mark evidence as `promotes_status_alone`; the status resolver honors that marker for news-backed auto-promotion.
+  - Semantic review-item templates create/update structured `news_status_uncorroborated`, `multi_tenure_review`, and `project_cancellation_review` items with `semantic_interpretation_id` in payloads.
+  - Article-source jurisdiction policy is retained only as `fallback_jurisdiction_policy` for unmatched/new-candidate references, which preserves correct LA behavior for unscoped sources such as Urbanize LA.

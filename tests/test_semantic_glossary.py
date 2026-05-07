@@ -155,6 +155,9 @@ status_phrases:
     )
 
     assert prompt.capability_key == NEWS_SEMANTIC_CAPABILITY
+    assert prompt.system_blocks[0] == "BASE TCG RUBRIC"
+    assert prompt.system_blocks[1].startswith("Reason-code registry:")
+    assert MARKET_GLOSSARY_DELIMITER in prompt.system_blocks
     assert prompt.system_text.index("BASE TCG RUBRIC") < prompt.system_text.index(
         "Reason-code registry:"
     )

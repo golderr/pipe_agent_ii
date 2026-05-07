@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -15,6 +16,8 @@ from tcg_pipeline.db.models import (
     AgentRunReviewItem,
     Evidence,
     IdentifierType,
+    Jurisdiction,
+    Market,
     NewsArticle,
     NewsExtraction,
     NewsExtractionParseStatus,
@@ -45,6 +48,7 @@ from tcg_pipeline.news.integration import (
 )
 from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
 from tcg_pipeline.resolution.fields import FieldResolution
+from tcg_pipeline.semantic.news.pass2c import RenderedInterpretPrompt, SemanticLLMResponse
 from tcg_pipeline.settings import Settings
 
 
@@ -78,6 +82,32 @@ class FakeNewsAgentClient:
             ],
             tool_calls_summary=[],
             agent_revised_verdict=self.verdict,
+        )
+
+
+class FakeSemanticClient:
+    provider = LLM_PROVIDER_ANTHROPIC
+    model = DEFAULT_EXTRACTION_MODEL
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.prompts: list[RenderedInterpretPrompt] = []
+
+    def interpret(self, prompt: RenderedInterpretPrompt) -> SemanticLLMResponse:
+        self.prompts.append(prompt)
+        return SemanticLLMResponse(
+            payload=self.payload,
+            text="{}",
+            model=self.model,
+            provider=self.provider,
+            usage=LLMUsage(
+                input_tokens_uncached=100,
+                input_tokens_cache_creation=0,
+                input_tokens_cached=20,
+                output_tokens=30,
+            ),
+            latency_ms=123,
+            stop_reason=None,
         )
 
 
@@ -242,6 +272,266 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
         )
     ).scalars()
     assert all(len(item.payload.get("changes") or []) <= 1 for item in all_status_items)
+
+
+def test_news_integration_semantic_strong_status_auto_promotes(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("1234 Semantic Boulevard, Los Angeles, CA 90026")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Semantic Tower",
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Semantic Tower",
+                candidate_address="1234 Semantic Boulevard, Los Angeles, CA 90026",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_topped_out",
+            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            confidence="high",
+        )
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.semantic_result is not None
+    assert result.semantic_result.parse_status == NewsExtractionParseStatus.OK.value
+    assert len(semantic_client.prompts) == 1
+    prompt_payload = _json_payload(semantic_client.prompts[0].user_text)
+    assert prompt_payload["project_context"][0]["project_id"] == str(project.id)
+    postgres_session.expire_all()
+    refreshed_project = postgres_session.get(Project, project.id)
+    assert refreshed_project is not None
+    assert refreshed_project.pipeline_status == PipelineStatus.UNDER_CONSTRUCTION
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.extracted_fields["pipeline_status"]["value"] == (
+        PipelineStatus.UNDER_CONSTRUCTION.value
+    )
+    assert evidence.extracted_fields["pipeline_status"]["semantic"]["reason_code"] == (
+        "news_topped_out"
+    )
+    assert evidence.extracted_fields["pipeline_status"]["semantic"][
+        "promotes_status_alone"
+    ] is True
+
+
+def test_news_integration_semantic_uncorroborated_status_creates_review_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("9876 Groundbreak Avenue, Los Angeles, CA 90026")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Groundbreak Tower",
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Groundbreak Tower",
+                candidate_address="9876 Groundbreak Avenue, Los Angeles, CA 90026",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_status_uncorroborated_high_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            confidence="medium",
+            requires_corroboration=True,
+        )
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.review_items_created >= 1
+    assert result.semantic_result is not None
+    postgres_session.expire_all()
+    refreshed_project = postgres_session.get(Project, project.id)
+    assert refreshed_project is not None
+    assert refreshed_project.pipeline_status == PipelineStatus.PROPOSED
+    item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+        )
+    ).scalar_one()
+    assert item.priority == Priority.MEDIUM
+    assert item.payload["reason_code"] == (
+        "news_status_uncorroborated_high_quality_permit_jurisdiction"
+    )
+    assert item.payload["proposed_value"] == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert item.payload["semantic_interpretation_id"] == str(
+        result.semantic_result.semantic_interpretation_id
+    )
+    assert item.payload["system_recommendation"]["action"] == (
+        "keep_current_until_corroborated_or_researcher_confirms"
+    )
+
+
+def test_news_integration_semantic_prompt_uses_matched_project_jurisdiction(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    source.market = None
+    source.jurisdiction = None
+    source.market_id = None
+    source.jurisdiction_id = None
+    la_jurisdiction = _jurisdiction(postgres_session, "city_of_los_angeles")
+    canonical_address = _canonical("4321 Policy Way, Los Angeles, CA 90026")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Policy Tower",
+        developer="Atlas Development",
+        total_units=100,
+    )
+    project.market_ref = la_jurisdiction.market
+    project.market_id = la_jurisdiction.market_id
+    project.jurisdiction_ref = la_jurisdiction
+    project.jurisdiction_id = la_jurisdiction.id
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Policy Tower",
+                candidate_address="4321 Policy Way, Los Angeles, CA 90026",
+                candidate_developer="Atlas Development",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_status_uncorroborated_high_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            confidence="medium",
+            requires_corroboration=True,
+        )
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.semantic_result is not None
+    prompt_payload = _json_payload(semantic_client.prompts[0].user_text)
+    assert prompt_payload["fallback_jurisdiction_policy"]["policy_source"] == "default"
+    assert prompt_payload["fallback_jurisdiction_policy"]["policy_scope"] == (
+        "article_source_fallback"
+    )
+    assert prompt_payload["fallback_jurisdiction_policy"]["permit_data_quality"] == "low"
+    assert prompt_payload["project_context"][0]["project_id"] == str(project.id)
+    assert prompt_payload["project_context"][0]["jurisdiction_slug"] == (
+        "city_of_los_angeles"
+    )
+    assert prompt_payload["project_context"][0]["jurisdiction_policy"][
+        "permit_data_quality"
+    ] == "high"
+    assert prompt_payload["project_context"][0]["jurisdiction_policy"]["policy_scope"] == (
+        "matched_project"
+    )
+    assert prompt_payload["project_context"][0]["jurisdiction_policy"][
+        "news_status_promotion_policy"
+    ] == "wait_for_permit_corroboration"
+    postgres_session.expire_all()
+    refreshed_project = postgres_session.get(Project, project.id)
+    assert refreshed_project is not None
+    assert refreshed_project.pipeline_status == PipelineStatus.PROPOSED
+    item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+        )
+    ).scalar_one()
+    assert item.payload["semantic_interpretation_id"] == str(
+        result.semantic_result.semantic_interpretation_id
+    )
 
 
 def test_news_field_context_omits_news_winner_when_non_news_evidence_wins() -> None:
@@ -1635,6 +1925,15 @@ def _ensure_agent2_tables(postgres_session: Session) -> None:
         pytest.skip(f"Apply AGENT.2 migrations before running agent integration tests: {missing}")
 
 
+def _ensure_semantic_news_integration_tables(postgres_session: Session) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    inspector = inspect(postgres_session.bind)
+    required_tables = {"news_semantic_interpretations", "llm_cost_usage"}
+    missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
+    if missing:
+        pytest.skip(f"Apply semantic Pass 2c migrations before running tests: {missing}")
+
+
 def _news_source(postgres_session: Session, slug: str) -> NewsSource:
     source = postgres_session.execute(
         select(NewsSource).where(NewsSource.slug == slug)
@@ -1642,6 +1941,30 @@ def _news_source(postgres_session: Session, slug: str) -> NewsSource:
     if source is None:
         pytest.skip(f"Apply Phase D source seed migration before running tests: {slug}.")
     return source
+
+
+def _jurisdiction(postgres_session: Session, slug: str) -> Jurisdiction:
+    jurisdiction = postgres_session.execute(
+        select(Jurisdiction).where(Jurisdiction.slug == slug)
+    ).scalar_one_or_none()
+    if jurisdiction is not None:
+        return jurisdiction
+    market = postgres_session.execute(
+        select(Market).where(Market.slug == "los_angeles")
+    ).scalar_one_or_none()
+    if market is None:
+        market = Market(slug="los_angeles", name="Los Angeles", state="CA")
+        postgres_session.add(market)
+        postgres_session.flush()
+    jurisdiction = Jurisdiction(
+        slug=slug,
+        name="City of Los Angeles",
+        state="CA",
+        market=market,
+    )
+    postgres_session.add(jurisdiction)
+    postgres_session.flush()
+    return jurisdiction
 
 
 def _canonical(raw_address: str) -> str:
@@ -1851,3 +2174,45 @@ def _reference_payload(
         "registry_developer_id": None,
         "registry_project_id": registry_project_id,
     }
+
+
+def _semantic_payload(
+    *,
+    reference_id: uuid.UUID,
+    reason_code: str,
+    canonical_value: str | None,
+    confidence: str,
+    requires_corroboration: bool = False,
+) -> dict:
+    return {
+        "interpretations": [
+            {
+                "field_name": "pipeline_status",
+                "canonical_value": canonical_value,
+                "confidence": confidence,
+                "reason_code": reason_code,
+                "signal_flags": {},
+                "source_anchors": [
+                    {
+                        "text": "the tower has topped out",
+                        "offset_start": 10,
+                        "offset_end": 34,
+                        "field_name": "pipeline_status",
+                        "metadata": {},
+                    }
+                ],
+                "requires_corroboration": requires_corroboration,
+                "metadata": {
+                    "tense": "past_concurrent",
+                    "reference_id": str(reference_id),
+                },
+            }
+        ],
+        "diagnostic": {"fixture": True},
+    }
+
+
+def _json_payload(value: str) -> dict:
+    payload = json.loads(value)
+    assert isinstance(payload, dict)
+    return payload

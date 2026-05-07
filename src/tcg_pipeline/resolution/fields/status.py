@@ -220,6 +220,8 @@ def _can_promote_to_under_construction(
 ) -> bool:
     if observation.evidence.source_tier == 1:
         return True
+    if _semantic_promotes_status_alone(observation):
+        return True
     if permit_observations:
         return True
 
@@ -230,6 +232,17 @@ def _can_promote_to_under_construction(
         and candidate.evidence.source_tier > 1
     }
     return len(matching_non_gov_sources) >= 2
+
+
+def _semantic_promotes_status_alone(observation: FieldObservation) -> bool:
+    extracted = observation.evidence.extracted_fields or {}
+    field_payload = extracted.get(observation.field_name)
+    if not isinstance(field_payload, dict):
+        return False
+    semantic_payload = field_payload.get("semantic")
+    if not isinstance(semantic_payload, dict):
+        return False
+    return semantic_payload.get("promotes_status_alone") is True
 
 
 def _status_confidence(

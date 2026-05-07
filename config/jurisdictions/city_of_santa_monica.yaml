@@ -1,0 +1,7 @@
+slug: city_of_santa_monica
+permit_data_quality: low
+news_status_promotion_policy: auto_promote_unverified
+permit_data_quality_notes: |
+  Santa Monica structured permit/status feeds are not yet validated as a
+  high-quality construction-status corroboration source in this pipeline.
+  Ambiguous construction news may promote with explicit unverified-news context.

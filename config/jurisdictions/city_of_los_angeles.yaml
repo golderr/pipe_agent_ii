@@ -1,0 +1,9 @@
+slug: city_of_los_angeles
+permit_data_quality: high
+news_status_promotion_policy: wait_for_permit_corroboration
+permit_data_quality_validated_at: "2026-05-06"
+permit_data_quality_notes: |
+  LADBS permit, permit-activity, inspection, and certificate-of-occupancy feeds
+  provide high-quality status corroboration for City of Los Angeles projects.
+  Ambiguous construction-start language should normally wait for permit or
+  inspection corroboration unless the article contains a strong physical signal.
