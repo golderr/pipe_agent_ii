@@ -85,6 +85,7 @@ PASS3A_REFERENCE_FIELD_MAP = {
     "total_units": "candidate_unit_total",
     "affordable_units": "candidate_unit_affordable",
     "market_rate_units": "candidate_unit_market_rate",
+    "workforce_units": "candidate_unit_workforce",
     "developer": "candidate_developer",
     "date_delivery": "candidate_delivery_year_normalized",
     "candidate_address": "candidate_address",
@@ -93,7 +94,7 @@ MAX_PASS3A_CONTEXT_ITEMS = 20
 PASS3A_FIELD_WINDOW_PADDING = 40
 PASS3A_UNIT_TOLERANCE = 5
 PASS3A_UNIT_FIELDS = frozenset(
-    {"total_units", "affordable_units", "market_rate_units"}
+    {"total_units", "affordable_units", "market_rate_units", "workforce_units"}
 )
 ADDRESS_CITY_BY_SCOPE_SLUG = {
     "los_angeles": "Los Angeles",
@@ -162,8 +163,7 @@ class AddressConflictContext:
 class ExtractionLLMClient(Protocol):
     model: str
 
-    def extract(self, prompt: RenderedPrompt) -> ExtractionLLMResponse:
-        ...
+    def extract(self, prompt: RenderedPrompt) -> ExtractionLLMResponse: ...
 
 
 class AnthropicExtractionClient:
@@ -214,9 +214,7 @@ class AnthropicExtractionClient:
             elif block_type == "text":
                 text_parts.append(getattr(block, "text", ""))
         raw_text = (
-            json.dumps(payload, sort_keys=True)
-            if payload is not None
-            else "\n".join(text_parts)
+            json.dumps(payload, sort_keys=True) if payload is not None else "\n".join(text_parts)
         )
         return ExtractionLLMResponse(
             payload=payload,
@@ -315,6 +313,7 @@ class ProjectReferencePayload(BaseModel):
     candidate_unit_total: int | None = Field(default=None, ge=0)
     candidate_unit_affordable: int | None = Field(default=None, ge=0)
     candidate_unit_market_rate: int | None = Field(default=None, ge=0)
+    candidate_unit_workforce: int | None = Field(default=None, ge=0)
     candidate_product_type: (
         Literal["apartment", "condo", "townhome", "single_family", "micro_co_living", "other"]
         | None
@@ -1269,6 +1268,8 @@ def _signal_passage_fields(signal: dict[str, Any]) -> set[str]:
             return set()
         kind = str(structural.get("kind") or "")
         if kind in {"affordable", "low_income", "workforce", "moderate_income"}:
+            if kind == "workforce":
+                return {"candidate_unit_workforce"}
             return {"candidate_unit_affordable"}
         if kind == "market_rate":
             return {"candidate_unit_market_rate"}
@@ -1386,7 +1387,15 @@ def _structural_signal_conflict(
         count = structural.get("count")
         if count is None:
             return None
-        if kind in {"affordable", "low_income", "workforce", "moderate_income"}:
+        if kind == "workforce":
+            return _value_conflict(
+                "workforce_units",
+                signal,
+                reference.get("candidate_unit_workforce"),
+                structural_value=count,
+                reference_index=reference_index,
+            )
+        if kind in {"affordable", "low_income", "moderate_income"}:
             return _value_conflict(
                 "affordable_units",
                 signal,
@@ -1436,9 +1445,7 @@ def _addresses_equivalent(
     if isinstance(raw_match, str) and _contains_normalized_text(extracted_address, raw_match):
         return True
     structural = signal.get("canonical")
-    structural_value = (
-        structural.get("canonical_address") if isinstance(structural, dict) else None
-    )
+    structural_value = structural.get("canonical_address") if isinstance(structural, dict) else None
     normalized_structural = None
     if isinstance(raw_match, str) and raw_match.strip():
         normalized_structural = normalize_address(
@@ -1503,9 +1510,7 @@ def _address_conflict_context(article: NewsArticle) -> AddressConflictContext:
     source = article.source
     market_slug = source.market.slug if source is not None and source.market is not None else None
     jurisdiction_slug = (
-        source.jurisdiction.slug
-        if source is not None and source.jurisdiction is not None
-        else None
+        source.jurisdiction.slug if source is not None and source.jurisdiction is not None else None
     )
     # Phase H should move city defaults into market config. Until then, keep the
     # known-city fallback explicit so Santa Monica does not silently use LA.
@@ -1561,9 +1566,7 @@ def _values_equivalent(field_name: str, structural_value: Any, extracted_value: 
         extracted_int = _int_or_none(extracted_value)
         if structural_int is not None and extracted_int is not None:
             return abs(structural_int - extracted_int) <= PASS3A_UNIT_TOLERANCE
-    return _normalized_compare_value(structural_value) == _normalized_compare_value(
-        extracted_value
-    )
+    return _normalized_compare_value(structural_value) == _normalized_compare_value(extracted_value)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -1577,9 +1580,7 @@ def _int_or_none(value: Any) -> int | None:
 def _trim_pass3a_context(context: dict[str, Any]) -> dict[str, Any]:
     trimmed = dict(context)
     trimmed["conflicts"] = list(trimmed.get("conflicts") or [])[:MAX_PASS3A_CONTEXT_ITEMS]
-    trimmed["low_confidence"] = list(trimmed.get("low_confidence") or [])[
-        :MAX_PASS3A_CONTEXT_ITEMS
-    ]
+    trimmed["low_confidence"] = list(trimmed.get("low_confidence") or [])[:MAX_PASS3A_CONTEXT_ITEMS]
     return trimmed
 
 
@@ -1652,6 +1653,7 @@ def _reference_from_payload(
         candidate_unit_total=payload.get("candidate_unit_total"),
         candidate_unit_affordable=payload.get("candidate_unit_affordable"),
         candidate_unit_market_rate=payload.get("candidate_unit_market_rate"),
+        candidate_unit_workforce=payload.get("candidate_unit_workforce"),
         candidate_product_type=payload.get("candidate_product_type"),
         candidate_age_restriction=payload.get("candidate_age_restriction"),
         candidate_status_signal=payload.get("candidate_status_signal"),
@@ -1660,7 +1662,8 @@ def _reference_from_payload(
             payload.get("candidate_delivery_year_normalized")
         ),
         candidate_signal_flags=payload.get("candidate_signal_flags") or {},
-        candidate_identifiers=payload.get("candidate_identifiers") or {
+        candidate_identifiers=payload.get("candidate_identifiers")
+        or {
             "case_number": [],
             "permit_number": [],
             "apn": [],

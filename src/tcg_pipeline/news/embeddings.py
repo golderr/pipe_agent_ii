@@ -141,6 +141,7 @@ class GatedNewsReference:
     candidate_unit_total: int | None
     candidate_unit_affordable: int | None
     candidate_unit_market_rate: int | None
+    candidate_unit_workforce: int | None
     candidate_product_type: str | None
     candidate_age_restriction: str | None
     candidate_status_signal: str | None
@@ -511,9 +512,7 @@ def filter_unchanged_active_chunk_specs(
         model=model,
     )
     return tuple(
-        spec
-        for spec in chunk_specs
-        if active_chunk_texts.get(_chunk_key(spec)) != spec.chunk_text
+        spec for spec in chunk_specs if active_chunk_texts.get(_chunk_key(spec)) != spec.chunk_text
     )
 
 
@@ -658,6 +657,7 @@ def _gated_reference_from_rows(
         candidate_unit_total=reference.candidate_unit_total,
         candidate_unit_affordable=reference.candidate_unit_affordable,
         candidate_unit_market_rate=reference.candidate_unit_market_rate,
+        candidate_unit_workforce=reference.candidate_unit_workforce,
         candidate_product_type=reference.candidate_product_type,
         candidate_age_restriction=reference.candidate_age_restriction,
         candidate_status_signal=reference.candidate_status_signal,
@@ -700,6 +700,7 @@ def _field_lines(reference: GatedNewsReference) -> list[str]:
         ("Total units", reference.candidate_unit_total),
         ("Affordable units", reference.candidate_unit_affordable),
         ("Market-rate units", reference.candidate_unit_market_rate),
+        ("Workforce units", reference.candidate_unit_workforce),
         ("Product type", reference.candidate_product_type),
         ("Age restriction", reference.candidate_age_restriction),
         ("Status signal", reference.candidate_status_signal),

@@ -71,6 +71,7 @@ def test_ingest_workbook_builds_project_records_and_history(tmp_path: Path) -> N
                 "RentFS": "Rental",
                 "MRUnits": 150,
                 "AffUnits": 25,
+                "WorkforceUnits": 8,
                 "TotUnits": 175,
                 "Acres": 1.5,
                 "RetailSF": 5000,
@@ -124,15 +125,13 @@ def test_ingest_workbook_builds_project_records_and_history(tmp_path: Path) -> N
     ]
     assert project.previous_names == ["Sunset Palladium"]
     assert project.total_units == 175
+    assert project.workforce_units == 8
     assert project.lat == 34.0972
     assert project.lng == -118.3201
     assert project.status_date == date(2026, 4, 1)
     assert project.last_editor == "NG"
     assert project.last_edit_date == date(2026, 4, 10)
-    assert {
-        note.note_type: note.body
-        for note in record.project_notes
-    } == {
+    assert {note.note_type: note.body for note in record.project_notes} == {
         "researcher_notes": "Survived appeal.",
         "personal_notes": "Follow up next cycle.",
         "change_notes": "Added updated unit count.",
@@ -151,6 +150,7 @@ def test_ingest_workbook_builds_project_records_and_history(tmp_path: Path) -> N
     ]
     assert record.source_record.source_record_id == "23.00001"
     assert record.source_record.source_url == "https://planning.lacity.gov/case"
+    assert record.source_record.mapped_fields["workforce_units"] == 8
 
     staged_relationship = result.staged_relationships[0]
     assert staged_relationship.project_identifier_value == "23.00001"
@@ -429,6 +429,7 @@ def _ordered_headers(rows: list[dict[str, object]]) -> list[str]:
         "RentFS",
         "MRUnits",
         "AffUnits",
+        "WorkforceUnits",
         "TotUnits",
         "Acres",
         "RetailSF",

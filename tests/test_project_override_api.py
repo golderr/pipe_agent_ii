@@ -197,13 +197,14 @@ def test_set_project_override_rejects_invalid_value(postgres_session: Session) -
         ("age_restriction", "Senior", "Senior"),
         ("date_delivery", "2027-07-01", "2027-07-01"),
         ("developer", "  Example Development  ", "Example Development"),
+        ("workforce_units", "12", 12),
     ],
 )
 def test_set_project_override_coerces_supported_core_values(
     postgres_session: Session,
     field_name: str,
     value: str,
-    expected: str,
+    expected: Any,
 ) -> None:
     _ensure_override_api_tables(postgres_session)
     project = _project(f"914 {field_name} WAY LOS ANGELES CA 90012")
@@ -237,6 +238,7 @@ def test_set_project_override_coerces_supported_core_values(
         ("date_delivery", "2026/04/26", "date_delivery must be a YYYY-MM-DD date."),
         ("developer", "   ", "developer must be a non-empty string."),
         ("total_units", 212.7, "total_units must be a non-negative integer."),
+        ("workforce_units", -1, "workforce_units must be a non-negative integer."),
     ],
 )
 def test_set_project_override_rejects_invalid_core_values(

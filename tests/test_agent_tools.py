@@ -227,6 +227,7 @@ def test_search_projects_returns_compact_registry_candidates(
         total_units=98,
         affordable_units=97,
         market_rate_units=1,
+        workforce_units=0,
         product_type=ProductType.APARTMENT,
     )
     other_project = Project(
@@ -261,6 +262,7 @@ def test_search_projects_returns_compact_registry_candidates(
     assert result.content["total_available"] >= 1
     assert result.content["matches"][0]["project_id"] == str(project.id)
     assert result.content["matches"][0]["canonical_address"] == project.canonical_address
+    assert result.content["matches"][0]["workforce_units"] == 0
     assert result.content["matches"][0]["score"] >= 0.9
     assert "address_match" in result.content["matches"][0]["reasons"]
 

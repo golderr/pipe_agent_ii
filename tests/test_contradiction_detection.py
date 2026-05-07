@@ -80,20 +80,28 @@ def test_detect_project_contradictions_creates_and_updates_single_active_item(
         },
     )
     postgres_session.flush()
-    active_items = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.project_id == project.id,
-            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
-            ReviewItem.state.in_(["open", "staged"]),
+    active_items = (
+        postgres_session.execute(
+            select(ReviewItem).where(
+                ReviewItem.project_id == project.id,
+                ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+                ReviewItem.state.in_(["open", "staged"]),
+            )
         )
-    ).scalars().all()
-    invalidated_items = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.project_id == project.id,
-            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
-            ReviewItem.state == "invalidated",
+        .scalars()
+        .all()
+    )
+    invalidated_items = (
+        postgres_session.execute(
+            select(ReviewItem).where(
+                ReviewItem.project_id == project.id,
+                ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+                ReviewItem.state == "invalidated",
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     assert second_result.created_count == 1
     assert second_result.updated_count == 0
@@ -222,6 +230,7 @@ def test_detect_project_contradictions_uses_developer_registry_aliases(
 def test_unit_string_and_integer_values_do_not_contradict_when_equal() -> None:
     assert values_contradict("total_units", "120", 120) is False
     assert values_contradict("total_units", "120", "126") is True
+    assert values_contradict("workforce_units", "12", 12) is False
 
 
 def test_pipeline_status_supporting_evidence_uses_resolved_status_values(
@@ -433,8 +442,7 @@ def _resolution(
             "candidate_rule_applied": "most_recent_wins",
             "candidate_confidence": "medium",
             "candidate_evidence_ids": [
-                str(evidence_id)
-                for evidence_id in (candidate_evidence_ids or [uuid.uuid4()])
+                str(evidence_id) for evidence_id in (candidate_evidence_ids or [uuid.uuid4()])
             ],
             "candidate_evidence_date": "2026-05-01",
             "candidate_evidence_frontier": {

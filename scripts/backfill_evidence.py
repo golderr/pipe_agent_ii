@@ -52,6 +52,7 @@ PIPEDREAM_SNAPSHOT_FIELDS = (
     "total_units",
     "market_rate_units",
     "affordable_units",
+    "workforce_units",
     "pct_studio",
     "pct_1bed",
     "pct_2bed",
@@ -145,12 +146,16 @@ def _backfill_source_record_evidence(
     *,
     result: BackfillEvidenceResult,
 ) -> BackfillEvidenceResult:
-    source_records = session.execute(
-        select(ProjectSourceRecord).order_by(
-            ProjectSourceRecord.first_seen_at,
-            ProjectSourceRecord.id,
+    source_records = (
+        session.execute(
+            select(ProjectSourceRecord).order_by(
+                ProjectSourceRecord.first_seen_at,
+                ProjectSourceRecord.id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for source_record in source_records:
         source_type = get_logical_source_type(source_record.source_name)
         if source_type == "pipedream":
@@ -216,19 +221,25 @@ def _backfill_pipedream_snapshots(
         source_record.project_id: source_record
         for source_record in session.execute(
             select(ProjectSourceRecord).where(ProjectSourceRecord.source_name == "pipedream")
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     }
     project_ids = set(pipedream_id_by_project_id) | set(pipedream_source_record_by_project_id)
-    created_project_ids = session.execute(
-        select(Project.id).where(Project.created_by == PIPEDREAM_CREATED_BY)
-    ).scalars().all()
+    created_project_ids = (
+        session.execute(select(Project.id).where(Project.created_by == PIPEDREAM_CREATED_BY))
+        .scalars()
+        .all()
+    )
     project_ids.update(created_project_ids)
     if not project_ids:
         return result
 
-    projects = session.execute(
-        select(Project).where(Project.id.in_(sorted(project_ids, key=str)))
-    ).scalars().all()
+    projects = (
+        session.execute(select(Project).where(Project.id.in_(sorted(project_ids, key=str))))
+        .scalars()
+        .all()
+    )
     for project in projects:
         source_record = pipedream_source_record_by_project_id.get(project.id)
         source_record_id = pipedream_id_by_project_id.get(project.id)
@@ -264,8 +275,7 @@ def _backfill_pipedream_snapshots(
                 raw_data_hash=raw_data_hash,
                 extracted_fields=extracted_fields or None,
                 notes=(
-                    "Synthesized from pipedream-seeded project snapshot "
-                    "during evidence backfill."
+                    "Synthesized from pipedream-seeded project snapshot during evidence backfill."
                 ),
             )
         )

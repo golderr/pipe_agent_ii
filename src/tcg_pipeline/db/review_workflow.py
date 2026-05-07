@@ -54,6 +54,7 @@ CHANGELOG_PRIORITY_BY_FIELD = {
     "total_units": Priority.MEDIUM,
     "affordable_units": Priority.MEDIUM,
     "market_rate_units": Priority.MEDIUM,
+    "workforce_units": Priority.MEDIUM,
     "product_type": Priority.MEDIUM,
     "date_delivery": Priority.MEDIUM,
     "age_restriction": Priority.MEDIUM,
@@ -345,8 +346,7 @@ def reject_review_item(
                 )
             )
     elif (
-        review_item.item_type == ReviewItemType.STATUS_CHANGE
-        and review_item.project_id is not None
+        review_item.item_type == ReviewItemType.STATUS_CHANGE and review_item.project_id is not None
     ):
         project = session.get(Project, review_item.project_id)
         if project is not None:
@@ -474,9 +474,7 @@ def stage_review_decision(
         review_item.item_type in DISCOVERY_REVIEW_ITEM_TYPES
         and normalized_decision_type not in DISCOVERY_STAGEABLE_DECISION_TYPES
     ):
-        raise ValueError(
-            f"{normalized_decision_type} is not supported for discovery review items."
-        )
+        raise ValueError(f"{normalized_decision_type} is not supported for discovery review items.")
     now = datetime.now(UTC)
     existing = _active_staged_decision(session, review_item.id)
     revised = existing is not None
@@ -562,6 +560,7 @@ def stage_review_decision(
         staged_by_email=decision.staged_by_email,
         revised=revised,
     )
+
 
 def revise_review_decision(
     session: Session,
@@ -727,13 +726,9 @@ def _load_open_review_item(session: Session, review_item_id: uuid.UUID) -> Revie
     if review_item is None:
         raise ValueError(f"Review item {review_item_id} does not exist.")
     if review_item.status != ReviewItemStatus.OPEN:
-        raise ValueError(
-            f"Review item {review_item_id} is {review_item.status.value}, not open."
-        )
+        raise ValueError(f"Review item {review_item_id} is {review_item.status.value}, not open.")
     if getattr(review_item, "state", REVIEW_ITEM_STATE_OPEN) != REVIEW_ITEM_STATE_OPEN:
-        raise ValueError(
-            f"Review item {review_item_id} is {review_item.state}, not open."
-        )
+        raise ValueError(f"Review item {review_item_id} is {review_item.state}, not open.")
     return review_item
 
 
@@ -920,9 +915,7 @@ def _apply_staged_decision(
                 actor=actor,
                 notes=decision.decision_notes or decision.notes,
             )
-        raise ValueError(
-            f"{decision_type} is not supported for discovery review items in C.h."
-        )
+        raise ValueError(f"{decision_type} is not supported for discovery review items in C.h.")
 
     return _apply_field_or_contradiction_decision(
         session,
@@ -1694,7 +1687,9 @@ def _write_accept_change_logs(
                 source=source_name,
                 field=field_name,
                 old_value=previous_values.get(field_name),
-                new_value=normalize_value_for_project(resolution_result.resolved_values[field_name]),
+                new_value=normalize_value_for_project(
+                    resolution_result.resolved_values[field_name]
+                ),
                 change_type=ChangeType.RESEARCHER_CONFIRMED,
                 priority=priority,
                 reviewed_by=actor,
@@ -1738,7 +1733,9 @@ def _write_commit_change_logs(
                 source=source,
                 field=field_name,
                 old_value=previous_values.get(field_name),
-                new_value=normalize_value_for_project(resolution_result.resolved_values[field_name]),
+                new_value=normalize_value_for_project(
+                    resolution_result.resolved_values[field_name]
+                ),
                 change_type=change_type,
                 priority=priority,
                 reviewed_by=actor,
@@ -1818,13 +1815,11 @@ def _build_status_rejection_override(
 ) -> dict[str, dict[str, Any]] | None:
     payload = _payload_mapping(review_item.payload)
     status_payload = _payload_mapping(payload.get("status_suggestion"))
-    suggested_status = (
-        _coerce_text(status_payload.get("suggested_status"))
-        or _status_change_new_value(payload)
-    )
-    current_status = (
-        _coerce_text(status_payload.get("current_status"))
-        or _status_change_old_value(payload)
+    suggested_status = _coerce_text(
+        status_payload.get("suggested_status")
+    ) or _status_change_new_value(payload)
+    current_status = _coerce_text(status_payload.get("current_status")) or _status_change_old_value(
+        payload
     )
     if suggested_status is None or current_status is None:
         return None

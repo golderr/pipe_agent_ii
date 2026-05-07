@@ -80,6 +80,7 @@ REFERENCE_FIELD_TO_PROJECT_FIELD = {
     "candidate_unit_total": "total_units",
     "candidate_unit_affordable": "affordable_units",
     "candidate_unit_market_rate": "market_rate_units",
+    "candidate_unit_workforce": "workforce_units",
     "candidate_product_type": "product_type",
     "candidate_age_restriction": "age_restriction",
     "candidate_status_signal": "pipeline_status",
@@ -94,6 +95,7 @@ LOW_CONFIDENCE_REFERENCE_FIELDS = {
     "total_units": "candidate_unit_total",
     "affordable_units": "candidate_unit_affordable",
     "market_rate_units": "candidate_unit_market_rate",
+    "workforce_units": "candidate_unit_workforce",
     "developer": "candidate_developer",
     "date_delivery": "candidate_delivery_year_normalized",
     "candidate_address": "candidate_address",
@@ -211,9 +213,7 @@ def run_news_integration_for_article(
         )
 
     pass3b_result: NewsExtractionRunResult | None = None
-    pass3b_triggered = (
-        resolved_settings.news_use_legacy_pass3 and _should_run_pass3b(first_pass)
-    )
+    pass3b_triggered = resolved_settings.news_use_legacy_pass3 and _should_run_pass3b(first_pass)
     agent_decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
     if pass3b_triggered:
         runner = reextraction_runner or run_news_reextraction_for_article
@@ -294,8 +294,8 @@ def _load_current_references_and_matches(
                 skipped_reason="no_references",
                 current_extraction_triggered_by=extraction.triggered_by,
             )
-        effective_force_project_id, force_project_id_dropped_reason = (
-            _effective_force_project_id(force_project_id, reference_count=len(references))
+        effective_force_project_id, force_project_id_dropped_reason = _effective_force_project_id(
+            force_project_id, reference_count=len(references)
         )
         matches = tuple(
             match_news_reference(
@@ -335,6 +335,9 @@ def _pass3b_context(first_pass: _FirstPassMatchSet) -> dict[str, Any]:
                 "candidate_address": reference.candidate_address,
                 "candidate_developer": reference.candidate_developer,
                 "candidate_unit_total": reference.candidate_unit_total,
+                "candidate_unit_affordable": reference.candidate_unit_affordable,
+                "candidate_unit_market_rate": reference.candidate_unit_market_rate,
+                "candidate_unit_workforce": reference.candidate_unit_workforce,
                 "candidate_confidence": reference.candidate_confidence,
                 "match_reason": match.reason,
             }
@@ -418,10 +421,7 @@ def _agent_triggers_for_reference(
     triggers: list[AgentTrigger] = []
     if match.status == NewsMatchStatus.NEW_CANDIDATE:
         triggers.append(AgentTrigger.NEW_CANDIDATE)
-    if (
-        match.status == NewsMatchStatus.POSSIBLE
-        and len(match.candidate_project_ids) > 0
-    ):
+    if match.status == NewsMatchStatus.POSSIBLE and len(match.candidate_project_ids) > 0:
         triggers.append(AgentTrigger.POSSIBLE_MULTI_CANDIDATE)
     if _low_confidence_populated_fields(reference):
         triggers.append(AgentTrigger.LOW_CONFIDENCE)
@@ -484,6 +484,7 @@ def _agent_reference_payload(
         "candidate_unit_total": reference.candidate_unit_total,
         "candidate_unit_affordable": reference.candidate_unit_affordable,
         "candidate_unit_market_rate": reference.candidate_unit_market_rate,
+        "candidate_unit_workforce": reference.candidate_unit_workforce,
         "candidate_product_type": reference.candidate_product_type,
         "candidate_age_restriction": reference.candidate_age_restriction,
         "candidate_status_signal": reference.candidate_status_signal,
@@ -580,8 +581,8 @@ def _integrate_current_extraction(
         current_extraction_id=extraction.id,
         now=now,
     )
-    effective_force_project_id, force_project_id_dropped_reason = (
-        _effective_force_project_id(force_project_id, reference_count=len(references))
+    effective_force_project_id, force_project_id_dropped_reason = _effective_force_project_id(
+        force_project_id, reference_count=len(references)
     )
     stats = _MutableIntegrationStats()
     current_evidence_ids: set[uuid.UUID] = set()
@@ -635,9 +636,7 @@ def _integrate_current_extraction(
                     match=match,
                     evidence=evidence,
                     agent_run_id=(
-                        agent_decision.result.agent_run_id
-                        if agent_decision is not None
-                        else None
+                        agent_decision.result.agent_run_id if agent_decision is not None else None
                     ),
                 )
             )
@@ -1031,6 +1030,7 @@ def _news_extracted_fields(
         "total_units": reference.candidate_unit_total,
         "affordable_units": reference.candidate_unit_affordable,
         "market_rate_units": reference.candidate_unit_market_rate,
+        "workforce_units": reference.candidate_unit_workforce,
         "product_type": _product_type_value(reference.candidate_product_type),
         "age_restriction": _age_restriction_value(reference.candidate_age_restriction),
         "pipeline_status": reference.candidate_status_signal,
@@ -1141,8 +1141,7 @@ def _mark_prior_references_superseded(
     for reference in prior_references:
         reference.match_status = NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
         reference.match_reason = (
-            "Reference was superseded because Pass 3b advanced the article's "
-            "current extraction."
+            "Reference was superseded because Pass 3b advanced the article's current extraction."
         )
         reference.match_decision_at = now
 
@@ -1541,18 +1540,43 @@ def _structural_disagreement(
         "date_delivery": {"delivery_phrase"},
         "product_type": {"product_type"},
         "age_restriction": {"age_restriction"},
+        "affordable_units": {"affordable_split_phrase"},
+        "market_rate_units": {"affordable_split_phrase"},
+        "workforce_units": {"affordable_split_phrase"},
     }
     wanted = extractors_by_field.get(field_name, set())
     for signal in signals:
         if not isinstance(signal, dict):
             continue
-        if signal.get("extractor") in wanted:
+        extractor = signal.get("extractor")
+        if extractor not in wanted:
+            continue
+        if extractor == "affordable_split_phrase" and not _split_signal_matches_field(
+            signal,
+            field_name,
+        ):
+            continue
+        if extractor in wanted:
             return {
                 "extractor": signal.get("extractor"),
                 "raw_match": signal.get("raw_match"),
                 "canonical": serialize_json(signal.get("canonical")),
             }
     return None
+
+
+def _split_signal_matches_field(signal: dict[str, Any], field_name: str) -> bool:
+    structural = signal.get("canonical")
+    if not isinstance(structural, dict):
+        return False
+    kind = str(structural.get("kind") or "")
+    if field_name == "workforce_units":
+        return kind == "workforce"
+    if field_name == "market_rate_units":
+        return kind == "market_rate"
+    if field_name == "affordable_units":
+        return kind in {"affordable", "low_income", "moderate_income"}
+    return False
 
 
 def _review_item_fields(diff_result: DiffResult) -> list[str]:

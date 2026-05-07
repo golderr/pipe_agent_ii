@@ -55,7 +55,7 @@ Ordered by the `ARCHITECTURE.md` §3d groupings.
 | RentFS | `rent_or_sale` | Source-populated direct | CoStar/Pipedream provide this, but the resolution engine does not own it yet. Read-only for MVP. |
 | MRUnits | `market_rate_units` | Evidence-derived | §22.2 contradiction threshold: delta > 5. |
 | AffUnits | `affordable_units` | Evidence-derived | §22.2 contradiction threshold: delta > 5. Allowlisted sources only (LAHD, Pipedream, SM Dev Tracking, news). |
-| WorkforceUnits | `workforce_units` (planned) | Evidence-derived | Planned in ROADMAP E.6. Workforce units are a component of total units, distinct from both affordable and market-rate units. |
+| WorkforceUnits | `workforce_units` | Evidence-derived | Added in AGENT.2 step 6. Workforce units are a component of total units, distinct from both affordable and market-rate units. Default is NULL when unknown. |
 | TotUnits | `total_units` | Evidence-derived | §22.2 contradiction threshold: delta > 5. |
 | Acres | `acres` | Source-populated direct | Public records + CoStar. Read-only for MVP. |
 | RetailSF | `retail_sf` | Source-populated direct | CoStar/Pipedream. Read-only for MVP. |

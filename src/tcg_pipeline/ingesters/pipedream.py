@@ -87,6 +87,8 @@ HEADER_COLUMNS = (
     "RentFS",
     "MRUnits",
     "AffUnits",
+    # Current workbooks may not expose this yet; keep the ingester forward-compatible.
+    "WorkforceUnits",
     "TotUnits",
     "Acres",
     "RetailSF",
@@ -537,6 +539,7 @@ def _build_project_record(
         total_units=_parse_int(payload.get("TotUnits")),
         market_rate_units=_parse_int(payload.get("MRUnits")),
         affordable_units=_parse_int(payload.get("AffUnits")),
+        workforce_units=_parse_int(payload.get("WorkforceUnits")),
         pct_studio=_parse_float(payload.get("PercS")),
         pct_1bed=_parse_float(payload.get("Perc1B")),
         pct_2bed=_parse_float(payload.get("Perc2B")),
@@ -604,6 +607,7 @@ def _build_project_record(
         "total_units": project.total_units,
         "market_rate_units": project.market_rate_units,
         "affordable_units": project.affordable_units,
+        "workforce_units": project.workforce_units,
         "developer": project.developer,
     }
     source_record = ProjectSourceRecord(

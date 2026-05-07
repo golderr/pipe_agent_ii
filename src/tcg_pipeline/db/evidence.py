@@ -36,6 +36,7 @@ PIPEDREAM_SNAPSHOT_FIELDS = (
     "total_units",
     "market_rate_units",
     "affordable_units",
+    "workforce_units",
     "pct_studio",
     "pct_1bed",
     "pct_2bed",
@@ -141,8 +142,7 @@ def write_pipedream_snapshot_evidence(
     notes: str | None = None,
 ) -> EvidenceWriteResult:
     snapshot_values = {
-        field_name: getattr(project, field_name)
-        for field_name in PIPEDREAM_SNAPSHOT_FIELDS
+        field_name: getattr(project, field_name) for field_name in PIPEDREAM_SNAPSHOT_FIELDS
     }
     return write_evidence(
         session,

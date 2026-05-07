@@ -429,6 +429,21 @@ def test_resolve_unit_split_ignores_disallowed_sources() -> None:
     assert resolution.rule_applied == "no_allowed_split_evidence"
 
 
+def test_resolve_unit_split_accepts_workforce_units_from_allowed_source() -> None:
+    project = _build_project()
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 5, 1),
+        extracted_fields={"workforce_units": {"value": 12, "confidence": "high"}},
+    )
+
+    resolution = resolve_unit_split([news_evidence], project, "workforce_units")
+
+    assert resolution.value == 12
+    assert resolution.rule_applied == "most_recent_allowed_split_source_wins"
+
+
 def test_resolve_product_type_uses_most_recent_explicit_value() -> None:
     project = _build_project()
     project.product_type = ProductType.UNKNOWN
@@ -564,8 +579,7 @@ def test_resolve_delivery_year_override_records_newer_candidate_and_keeps_overri
     assert "override_superseded" not in resolution.metadata
 
 
-def test_resolve_delivery_year_for_complete_rejects_future_explicit_date_and_keeps_prior_explicit(
-) -> None:
+def test_resolve_delivery_year_for_complete_rejects_future_explicit_date() -> None:
     project = _build_project()
     project.date_delivery = date(2026, 3, 20)
     project.delivery_year_provenance = "explicit_costar"
@@ -690,8 +704,8 @@ def test_resolve_status_override_holds_until_newer_evidence() -> None:
                 "source_type": "ladbs_permit",
                 "evidence_ids": [],
                 "rule_applied": "highest_status_wins",
-        },
-    }
+            },
+        }
     }
     permit_evidence = _build_evidence(
         source_type="ladbs_permit",

@@ -212,8 +212,8 @@ DELETE /projects/{project_id}/override/{field_name}
 ```
 
 Only evidence-derived Core fields are accepted: `pipeline_status`,
-`total_units`, `affordable_units`, `market_rate_units`, `developer`,
-`product_type`, `age_restriction`, and `date_delivery`.
+`total_units`, `affordable_units`, `workforce_units`, `market_rate_units`,
+`developer`, `product_type`, `age_restriction`, and `date_delivery`.
 
 The API writes/clears `researcher_overrides`, re-runs
 `resolve_project(apply=True)`, updates project edit metadata, and writes a

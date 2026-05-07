@@ -38,6 +38,7 @@ LOGGED_FIELDS = {
     "total_units",
     "affordable_units",
     "market_rate_units",
+    "workforce_units",
     "product_type",
     "date_delivery",
     "delivery_year_provenance",
@@ -98,6 +99,12 @@ def resolve_project(
         "market_rate_units",
         overrides=overrides,
     )
+    workforce_units_resolution = resolve_unit_split(
+        evidence_rows,
+        project,
+        "workforce_units",
+        overrides=overrides,
+    )
     product_type_resolution = resolve_product_type(
         evidence_rows,
         project,
@@ -128,6 +135,7 @@ def resolve_project(
         "total_units": total_units_resolution,
         "affordable_units": affordable_units_resolution,
         "market_rate_units": market_rate_units_resolution,
+        "workforce_units": workforce_units_resolution,
         "product_type": product_type_resolution,
         "date_delivery": delivery_resolution,
         "delivery_year_provenance": FieldResolution(
@@ -197,6 +205,7 @@ def resolve_project(
         total_units_resolution=total_units_resolution,
         affordable_units_resolution=affordable_units_resolution,
         market_rate_units_resolution=market_rate_units_resolution,
+        workforce_units_resolution=workforce_units_resolution,
         developer_resolution=developer_resolution,
     )
 
@@ -259,8 +268,7 @@ def resolve_project(
         field_resolutions=field_resolutions,
         review_flags=review_flags,
         resolved_values={
-            field_name: resolution.value
-            for field_name, resolution in field_resolutions.items()
+            field_name: resolution.value for field_name, resolution in field_resolutions.items()
         },
     )
 
@@ -302,6 +310,7 @@ def _build_review_flags(
     total_units_resolution: FieldResolution,
     affordable_units_resolution: FieldResolution,
     market_rate_units_resolution: FieldResolution,
+    workforce_units_resolution: FieldResolution,
     developer_resolution: FieldResolution,
 ) -> list[ReviewFlag]:
     review_flags: list[ReviewFlag] = []
@@ -327,25 +336,36 @@ def _build_review_flags(
     resolved_total = total_units_resolution.value
     resolved_affordable = affordable_units_resolution.value
     resolved_market_rate = market_rate_units_resolution.value
+    resolved_workforce = workforce_units_resolution.value
     total_changed = project.total_units != resolved_total
     split_unchanged = (
         project.affordable_units == resolved_affordable
         and project.market_rate_units == resolved_market_rate
+        and project.workforce_units == resolved_workforce
+    )
+    bucket_sum, bucket_sum_is_complete = _unit_bucket_sum(
+        affordable_units=resolved_affordable,
+        market_rate_units=resolved_market_rate,
+        workforce_units=resolved_workforce,
     )
     if (
         total_changed
         and split_unchanged
         and resolved_total is not None
-        and resolved_affordable is not None
-        and resolved_market_rate is not None
-        and abs((resolved_affordable + resolved_market_rate) - resolved_total) > 2
+        and bucket_sum is not None
+        and (
+            (bucket_sum_is_complete and abs(bucket_sum - resolved_total) > 2)
+            or bucket_sum - resolved_total > 2
+        )
     ):
         review_flags.append(
             ReviewFlag(
                 code="unit_split_mismatch",
                 message=(
-                    f"Total units updated to {resolved_total}. Affordable/market-rate split "
-                    f"({resolved_affordable}/{resolved_market_rate}) may need revision "
+                    f"Total units updated to {resolved_total}. Affordable/market-rate/workforce "
+                    f"split ({_display_unit_bucket(resolved_affordable)}/"
+                    f"{_display_unit_bucket(resolved_market_rate)}/"
+                    f"{_display_unit_bucket(resolved_workforce)}) may need revision "
                     "because the split no longer sums to total."
                 ),
                 priority=Priority.MEDIUM,
@@ -356,8 +376,7 @@ def _build_review_flags(
         match_type = str(developer_resolution.metadata.get("match_type") or "")
         raw_value = developer_resolution.metadata.get("raw_value") or developer_resolution.value
         canonical_name = (
-            developer_resolution.metadata.get("canonical_name")
-            or developer_resolution.value
+            developer_resolution.metadata.get("canonical_name") or developer_resolution.value
         )
         score = developer_resolution.metadata.get("score")
         if match_type == "fuzzy_review":
@@ -384,3 +403,20 @@ def _build_review_flags(
             )
 
     return review_flags
+
+
+def _unit_bucket_sum(
+    *,
+    affordable_units: int | None,
+    market_rate_units: int | None,
+    workforce_units: int | None,
+) -> tuple[int | None, bool]:
+    buckets = (affordable_units, market_rate_units, workforce_units)
+    known_values = [value for value in buckets if value is not None]
+    if not known_values:
+        return None, False
+    return sum(known_values), len(known_values) == len(buckets)
+
+
+def _display_unit_bucket(value: int | None) -> str:
+    return "NULL" if value is None else str(value)

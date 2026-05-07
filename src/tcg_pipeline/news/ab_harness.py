@@ -54,11 +54,7 @@ from tcg_pipeline.news.prompts import RenderedPrompt, render_extraction_prompt
 from tcg_pipeline.news.structural import build_structural_signals_payload
 from tcg_pipeline.settings import Settings, get_settings
 
-DEFAULT_AB_CANDIDATES = (
-    "anthropic:claude-opus-4-7,"
-    "anthropic:claude-sonnet-4-6,"
-    "openai:gpt-5.4"
-)
+DEFAULT_AB_CANDIDATES = "anthropic:claude-opus-4-7,anthropic:claude-sonnet-4-6,openai:gpt-5.4"
 DEFAULT_AB_FIXTURE = Path("tests/fixtures/news/urbanize_la/pass1_validation_articles.json")
 PREFLIGHT_SCHEMA = {
     "type": "object",
@@ -414,10 +410,7 @@ def _run_candidate_for_article(
             "notes": None,
         },
     }
-    if (
-        parsed.payload is None
-        or parsed.parse_status != NewsExtractionParseStatus.OK.value
-    ):
+    if parsed.payload is None or parsed.parse_status != NewsExtractionParseStatus.OK.value:
         return result
     diagnostic = parsed.payload.get("diagnostic")
     if isinstance(diagnostic, dict):
@@ -623,6 +616,7 @@ def _reference_result(reference: NewsProjectReference, match: Any) -> dict[str, 
         "candidate_unit_total": reference.candidate_unit_total,
         "candidate_unit_affordable": reference.candidate_unit_affordable,
         "candidate_unit_market_rate": reference.candidate_unit_market_rate,
+        "candidate_unit_workforce": reference.candidate_unit_workforce,
         "candidate_product_type": reference.candidate_product_type,
         "candidate_age_restriction": reference.candidate_age_restriction,
         "candidate_status_signal": reference.candidate_status_signal,
@@ -646,9 +640,7 @@ def _reference_result(reference: NewsProjectReference, match: Any) -> dict[str, 
         "match_type": match.match_type,
         "match_confidence": match.confidence,
         "matched_project_id": str(match.project_id) if match.project_id else None,
-        "candidate_project_ids": [
-            str(project_id) for project_id in match.candidate_project_ids
-        ],
+        "candidate_project_ids": [str(project_id) for project_id in match.candidate_project_ids],
         "match_reason": match.reason,
     }
 

@@ -31,9 +31,7 @@ class DiffResult:
 
     @property
     def has_reviewable_changes(self) -> bool:
-        return bool(
-            self.field_changes or self.status_suggestion is not None or self.review_flags
-        )
+        return bool(self.field_changes or self.status_suggestion is not None or self.review_flags)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +49,7 @@ class ProjectDiffSnapshot:
     total_units: int | None
     affordable_units: int | None
     market_rate_units: int | None
+    workforce_units: int | None
     product_type: ProductType
     date_delivery: date | None
     age_restriction: AgeRestriction
@@ -112,6 +111,17 @@ def diff_project_against_record(project: Project, raw_record: RawRecord) -> Diff
             )
         )
 
+    new_workforce_units = _parse_int(mapped_fields.get("workforce_units"))
+    if new_workforce_units is not None and new_workforce_units != project.workforce_units:
+        diff_result.field_changes.append(
+            DetectedChange(
+                field="workforce_units",
+                old_value=project.workforce_units,
+                new_value=new_workforce_units,
+                priority=Priority.MEDIUM,
+            )
+        )
+
     return diff_result
 
 
@@ -123,6 +133,7 @@ def snapshot_project_for_diff(project: Project) -> ProjectDiffSnapshot:
         total_units=project.total_units,
         affordable_units=project.affordable_units,
         market_rate_units=project.market_rate_units,
+        workforce_units=project.workforce_units,
         product_type=project.product_type,
         date_delivery=project.date_delivery,
         age_restriction=project.age_restriction,
@@ -193,6 +204,13 @@ def diff_project_snapshots(
         field="market_rate_units",
         old_value=previous.market_rate_units,
         new_value=current.market_rate_units,
+        priority=Priority.MEDIUM,
+    )
+    _append_change(
+        diff_result,
+        field="workforce_units",
+        old_value=previous.workforce_units,
+        new_value=current.workforce_units,
         priority=Priority.MEDIUM,
     )
     _append_change(
@@ -277,6 +295,8 @@ def _priority_for_status_change(status: PipelineStatus) -> Priority:
     if status in {PipelineStatus.UNDER_CONSTRUCTION, PipelineStatus.COMPLETE}:
         return Priority.HIGH
     return Priority.MEDIUM
+
+
 def _parse_date(value: Any) -> date | None:
     if value is None or value == "":
         return None

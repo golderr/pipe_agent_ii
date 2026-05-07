@@ -52,7 +52,7 @@ The `ReviewItemType` database enum values are lowercase. Existing values remain 
 | `low_confidence` | Existing low-confidence workflow item | LOW or MEDIUM |
 | `override_contradiction` | New evidence contradicts existing override | At minimum MEDIUM (§22.3) |
 | `contradiction` | Multiple sources disagree on a field and no winner emerges cleanly | HIGH |
-| `unit_split_mismatch` | Total units updated but affordable/market split doesn't sum | MEDIUM |
+| `unit_split_mismatch` | Total units updated but known affordable/workforce/market-rate split doesn't sum | MEDIUM |
 
 Review item priorities are computed by rules per type (see §3).
 
@@ -293,6 +293,7 @@ CONTRADICTION_RULES = {
     'pipeline_status':    lambda cur, new: cur != new,
     'total_units':        lambda cur, new: cur != new and abs(cur - new) > 5,
     'affordable_units':   lambda cur, new: cur != new and abs(cur - new) > 5,
+    'workforce_units':    lambda cur, new: cur != new and abs(cur - new) > 5,
     'market_rate_units':  lambda cur, new: cur != new and abs(cur - new) > 5,
     'developer':          lambda cur, new: confident_canonicalize(cur) != confident_canonicalize(new),
     'product_type':       lambda cur, new: cur != new,

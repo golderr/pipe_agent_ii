@@ -44,6 +44,7 @@ PROJECT_STATE_SNAPSHOT_FIELDS = (
     "total_units",
     "market_rate_units",
     "affordable_units",
+    "workforce_units",
     "stories",
     "retail_sf",
     "office_sf",
@@ -113,10 +114,14 @@ def handle_get_project_state(
             _field_resolution_payload(row, evidence_metadata=evidence_metadata)
             for row in field_rows
         ]
-        latest_evidence = session.execute(
-            PROJECT_LATEST_EVIDENCE_SQL,
-            {"project_id": str(project_id)},
-        ).mappings().first()
+        latest_evidence = (
+            session.execute(
+                PROJECT_LATEST_EVIDENCE_SQL,
+                {"project_id": str(project_id)},
+            )
+            .mappings()
+            .first()
+        )
 
     payload = {
         "project": _project_payload(project),
@@ -180,11 +185,15 @@ def handle_search_projects(
         raise AgentToolError("Tool search_projects requires a session_factory.")
 
     with request.session_factory() as session:
-        projects = session.execute(
-            select(Project)
-            .where(Project.pipeline_status.notin_(sorted(DELETED_PROJECT_STATUSES)))
-            .order_by(Project.project_name.asc().nulls_last(), Project.canonical_address.asc())
-        ).scalars().all()
+        projects = (
+            session.execute(
+                select(Project)
+                .where(Project.pipeline_status.notin_(sorted(DELETED_PROJECT_STATUSES)))
+                .order_by(Project.project_name.asc().nulls_last(), Project.canonical_address.asc())
+            )
+            .scalars()
+            .all()
+        )
 
     candidates = [
         _project_search_payload(
@@ -197,9 +206,7 @@ def handle_search_projects(
         for project in projects
     ]
     candidates = [
-        candidate
-        for candidate in candidates
-        if candidate["score"] >= SEARCH_PROJECTS_MIN_SCORE
+        candidate for candidate in candidates if candidate["score"] >= SEARCH_PROJECTS_MIN_SCORE
     ]
     candidates.sort(
         key=lambda candidate: (
@@ -344,6 +351,7 @@ def _project_search_payload(
         "total_units": project.total_units,
         "affordable_units": project.affordable_units,
         "market_rate_units": project.market_rate_units,
+        "workforce_units": project.workforce_units,
     }
 
 
@@ -387,9 +395,7 @@ def _project_name_ratio(
     names = [project_name, query_text]
     project_names = [project.project_name, *list(project.previous_names or [])]
     scores = [
-        _text_ratio(candidate, known_name)
-        for candidate in names
-        for known_name in project_names
+        _text_ratio(candidate, known_name) for candidate in names for known_name in project_names
     ]
     return max(scores, default=0.0)
 
@@ -411,11 +417,7 @@ def _evidence_metadata_for_field_rows(
     field_rows: list[dict[str, Any]],
 ) -> dict[uuid.UUID, dict[str, Any]]:
     evidence_ids = sorted(
-        {
-            evidence_id
-            for row in field_rows
-            for evidence_id in _uuid_list(row.get("evidence_ids"))
-        },
+        {evidence_id for row in field_rows for evidence_id in _uuid_list(row.get("evidence_ids"))},
         key=str,
     )
     if not evidence_ids:

@@ -101,7 +101,7 @@ For Pipedream seed PSRs specifically: use the project's `status_date` or `last_e
 
 ### 5b. Pipedream-Origin Fields Without PSR Coverage (CRITICAL)
 
-This is the most important backfill nuance. The Pipedream seed ingester creates `Project` records with all fields populated AND creates a `ProjectSourceRecord` per project. However, the PSR's `mapped_fields` only contains a subset of fields (project_name, canonical_address, pipeline_status, status_date, city, state, zip, total_units, market_rate_units, affordable_units, developer). Other Pipedream-origin fields on the Project (product_type, age_restriction, stories, delivery_date, rent_or_sale, planner fields, etc.) have no PSR backing.
+This is the most important backfill nuance. The Pipedream seed ingester creates `Project` records with all fields populated AND creates a `ProjectSourceRecord` per project. However, the PSR's `mapped_fields` only contains a subset of fields (project_name, canonical_address, pipeline_status, status_date, city, state, zip, total_units, market_rate_units, affordable_units, workforce_units, developer). Other Pipedream-origin fields on the Project (product_type, age_restriction, stories, delivery_date, rent_or_sale, planner fields, etc.) have no PSR backing.
 
 **Decision: Synthesize a comprehensive "pipedream seed" evidence row per project** from the current Project field values for any Pipedream-seeded project. This evidence row should contain ALL fields that Pipedream populated — not just what's in the PSR's `mapped_fields`.
 
@@ -114,6 +114,7 @@ for project in pipedream_seeded_projects:
         "total_units": {"value": project.total_units, "confidence": "high"},
         "affordable_units": {"value": project.affordable_units, "confidence": "high"},
         "market_rate_units": {"value": project.market_rate_units, "confidence": "high"},
+        "workforce_units": {"value": project.workforce_units, "confidence": "high"},
         "product_type": {"value": project.product_type.value, "confidence": "high"},
         "age_restriction": {"value": project.age_restriction.value, "confidence": "high"},
         "developer": {"value": project.developer, "confidence": "high"},
@@ -187,13 +188,14 @@ This avoids a breaking migration and keeps all existing tests passing. No cleanu
 
 ## 8. Unit Split When Total Changes — Keep Last Explicit Split
 
-**Keep the last explicit affordable/market_rate values. Do NOT null them out. Flag for researcher awareness.**
+**Keep the last explicit affordable/workforce/market_rate values. Do NOT null them out. Flag for researcher awareness.**
 
 When total_units changes but no source provides a new split:
 - `total_units` → updated to the new value
 - `affordable_units` → stays at last explicit value
+- `workforce_units` → stays at last explicit value; if unknown, stays `NULL`
 - `market_rate_units` → stays at last explicit value
-- Validation runs: if `affordable + market_rate != total (±2)`, generate a review item: *"Total units updated to {new}. Affordable/market-rate split ({aff}/{mr}) may need revision — sum no longer matches total."*
+- Validation runs: if all three buckets are known and `affordable + workforce + market_rate != total (±2)`, or if known buckets exceed total by more than 2, generate a review item. Unknown buckets remain `NULL` in the UI and are not silently treated as another bucket.
 
 The researcher can then update the split or confirm it's correct. Nulling out the split would lose data. Holding the total would block legitimate updates.
 
@@ -407,10 +409,10 @@ These decisions were made during the Phase 3 remediation and Phase 4 developer-c
 The following changes were intentional and should be treated as part of the evidence-layer retrofit, not incidental refactors:
 
 - `StatusHistory` entries now use the underlying evidence `source_type` and `evidence_type`, not just `resolution_engine`.
-- The project diff snapshot now covers all resolver-owned user-facing fields, including `affordable_units`, `market_rate_units`, `product_type`, `date_delivery`, `age_restriction`, and `developer`.
+- The project diff snapshot now covers all resolver-owned user-facing fields, including `affordable_units`, `workforce_units`, `market_rate_units`, `product_type`, `date_delivery`, `age_restriction`, and `developer`.
 - `resolution_log` now includes `confidence_reason` and `likelihood_breakdown`. `status_confidence` remains excluded because it mirrors `confidence` during the transition.
 - Unit-split protection includes both:
-  - a split-source allowlist for `affordable_units` / `market_rate_units`
+  - a split-source allowlist for `affordable_units` / `workforce_units` / `market_rate_units`
   - a `unit_split_mismatch` review flag when total units change but the preserved split no longer sums to total
 
 ### 19b. Developer Review Flags Are Not Gated On Field Delta
@@ -710,7 +712,7 @@ The contradiction threshold varies by field to avoid spurious review items for i
 |---|---|
 | `pipeline_status` | Any evidence implying a different resolved status value. |
 | `total_units` | Any evidence with a different value AND `abs(delta) > 5`. Deltas ≤ 5 do not contradict (per §21e small-delta policy). |
-| `affordable_units`, `market_rate_units` | Same threshold as `total_units` (`abs(delta) > 5`). |
+| `affordable_units`, `workforce_units`, `market_rate_units` | Same threshold as `total_units` (`abs(delta) > 5`). |
 | `developer` | Any evidence with a different string after canonicalization. Identical canonicals do not contradict. |
 | `product_type` | Explicit disagreement. |
 | `age_restriction` | Explicit disagreement. |

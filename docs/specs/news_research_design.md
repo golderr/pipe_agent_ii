@@ -486,6 +486,7 @@ CREATE TABLE news_project_references (
   candidate_unit_total INTEGER,
   candidate_unit_affordable INTEGER,
   candidate_unit_market_rate INTEGER,
+  candidate_unit_workforce INTEGER,
   candidate_product_type TEXT,
   candidate_age_restriction TEXT,
   candidate_status_signal TEXT,                   -- normalized to PipelineStatus value, or signal_flag key
@@ -782,7 +783,8 @@ CREATE VIEW news_project_references_summary
 WITH (security_invoker = false) AS
 SELECT id, extraction_id, article_id, reference_index, candidate_name, candidate_address,
        candidate_developer, candidate_unit_total, candidate_unit_affordable,
-       candidate_unit_market_rate, candidate_product_type, candidate_age_restriction,
+       candidate_unit_market_rate, candidate_unit_workforce,
+       candidate_product_type, candidate_age_restriction,
        candidate_status_signal, candidate_delivery_year_text,
        candidate_delivery_year_normalized, candidate_signal_flags, candidate_identifiers,
        candidate_neighborhood, candidate_lat, candidate_lng, candidate_confidence,
@@ -853,7 +855,7 @@ A third follow-on migration adds the trigger or worker-side aggregation that upd
 **What is implemented in code today** (Phase D must remain compatible with these contracts):
 
 - **`developer.py:18`** — `DEVELOPER_SOURCE_PRIORITY` puts `news_article` at priority 1, just below `pipedream` (priority 0). Used as a tiebreak when evidence dates collide; "most recent wins" is still the primary ordering. So a fresh news article does NOT automatically outrank older Pipedream evidence — recency is checked first.
-- **`units.py:15-19`** — `SPLIT_SOURCE_ALLOWLIST` includes `news_article`; news evidence may write affordable/market_rate splits.
+- **`units.py:15-19`** — `SPLIT_SOURCE_ALLOWLIST` includes `news_article`; news evidence may write affordable/workforce/market_rate splits when explicitly stated.
 - **`delivery_year.py`** — `_provenance_for_source_type('news_article')` returns `'explicit_news'`. D.4-resolver implements the §21f rule: when CoStar would otherwise win delivery-date resolution, recent `news_article` evidence within 180 days can outrank it while preserving higher-priority TCG/government winners. See §25.7.
 - **`contradictions.py:30, 341-357`** — `NEWS_SOURCE_TYPES = {'news_article', 'news', 'article', 'bizjournals'}`. The contradiction service relaxes the delivery-date contradiction threshold for news evidence within the last 180 days (`_candidate_is_recent_article`). Phase D standardizes on `'news_article'` as the canonical source_type; the other strings remain in the set for compat.
 - **`snippets.py:145, 240`** — `'news_article': render_news_article_snippet`. The renderer reads `evidence.raw_data.{publication, published_at, author}` for the detail line and `extracted_fields[field].highlights` (or top-level `extracted_fields.highlights`) for passage offsets. Phase D writes highlights into `extracted_fields[field].highlights`.
@@ -1351,7 +1353,7 @@ Your job:
    - candidate_name (project name, if stated)
    - candidate_address (street address, if stated)
    - candidate_developer (developer/sponsor entity, if stated)
-   - candidate_unit_total, candidate_unit_affordable, candidate_unit_market_rate
+   - candidate_unit_total, candidate_unit_affordable, candidate_unit_market_rate, candidate_unit_workforce
    - candidate_product_type (apartment | condo | townhome | single_family | micro_co_living | other)
    - candidate_age_restriction (non_age_restricted | senior | student | unknown)
    - candidate_status_signal (Conceptual | Proposed | Pending | Approved | Under Construction
@@ -1393,6 +1395,7 @@ Schema: <see §8.5>
       "candidate_unit_total": "integer | null",
       "candidate_unit_affordable": "integer | null",
       "candidate_unit_market_rate": "integer | null",
+      "candidate_unit_workforce": "integer | null",
       "candidate_product_type": "apartment | condo | townhome | single_family | micro_co_living | other | null",
       "candidate_age_restriction": "non_age_restricted | senior | student | unknown | null",
       "candidate_status_signal": "PipelineStatus enum value | null",
@@ -1472,7 +1475,7 @@ Pass 3 has two distinct trigger families. They fire at different points in the p
 
 **Pass 3a — extraction-time triggers** (fire inside the extraction pipeline, before the matcher runs; ship in build step **D.3d**):
 
-1. **Pass 1 / Pass 2 conflict** on a load-bearing field. Load-bearing = `pipeline_status`, `total_units`, `affordable_units`, `market_rate_units`, `developer`, `date_delivery`, `candidate_address`. Conflict = differing canonical values where both sides are non-null.
+1. **Pass 1 / Pass 2 conflict** on a load-bearing field. Load-bearing = `pipeline_status`, `total_units`, `affordable_units`, `workforce_units`, `market_rate_units`, `developer`, `date_delivery`, `candidate_address`. Conflict = differing canonical values where both sides are non-null.
 2. **Pass 2 low confidence** on any load-bearing field.
 3. **Pass 2 returned a parse-error / schema-invalid / refused result** that the structured-output retry didn't fix.
 
@@ -1551,6 +1554,7 @@ class ArticleReferenceMatchInput:
     candidate_unit_total: int | None
     candidate_unit_affordable: int | None
     candidate_unit_market_rate: int | None
+    candidate_unit_workforce: int | None
     candidate_neighborhood: str | None
     candidate_lat: float | None
     candidate_lng: float | None
@@ -2625,6 +2629,7 @@ Each case is one article (HTML + body_text snapshot) with hand-labeled expected 
       "candidate_name": "Helio",
       "candidate_developer": "Helio Capital",
       "candidate_unit_total": 310,
+      "candidate_unit_workforce": null,
       "candidate_signal_flags": {"groundbreaking_announced": true},
       "candidate_status_signal": "Under Construction",
       "match_target_project_id": "<uuid>",

@@ -31,12 +31,16 @@ def _review_items_by_field(
     source_run_id,
     project_id,
 ) -> dict[str, ReviewItem]:
-    rows = session.execute(
-        select(ReviewItem).where(
-            ReviewItem.source_run_id == source_run_id,
-            ReviewItem.project_id == project_id,
+    rows = (
+        session.execute(
+            select(ReviewItem).where(
+                ReviewItem.source_run_id == source_run_id,
+                ReviewItem.project_id == project_id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {str(row.field_name): row for row in rows}
 
 
@@ -636,6 +640,7 @@ def test_persist_collected_records_flags_unit_split_mismatch_when_total_changes(
         total_units=100,
         affordable_units=20,
         market_rate_units=80,
+        workforce_units=0,
     )
     postgres_session.add(project)
     postgres_session.flush()
@@ -675,8 +680,8 @@ def test_persist_collected_records_flags_unit_split_mismatch_when_total_changes(
     assert {
         "code": "unit_split_mismatch",
         "message": (
-            "Total units updated to 120. Affordable/market-rate split (20/80) may need "
-            "revision because the split no longer sums to total."
+            "Total units updated to 120. Affordable/market-rate/workforce split "
+            "(20/80/0) may need revision because the split no longer sums to total."
         ),
         "priority": "medium",
     } in review_item.payload["review_flags"]
@@ -769,9 +774,13 @@ def test_persist_collected_records_flags_fuzzy_developer_review_without_field_de
     postgres_session.flush()
     postgres_session.refresh(project)
 
-    alias_rows = postgres_session.execute(
-        select(DeveloperAlias.alias_name).where(DeveloperAlias.alias_name == raw_name)
-    ).scalars().all()
+    alias_rows = (
+        postgres_session.execute(
+            select(DeveloperAlias.alias_name).where(DeveloperAlias.alias_name == raw_name)
+        )
+        .scalars()
+        .all()
+    )
     review_item = postgres_session.execute(
         select(ReviewItem).where(
             ReviewItem.source_run_id == result.source_run_id,

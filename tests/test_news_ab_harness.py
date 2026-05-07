@@ -38,6 +38,7 @@ CANNED_EXTRACTION_PAYLOAD = {
             "candidate_unit_total": 42,
             "candidate_unit_affordable": None,
             "candidate_unit_market_rate": None,
+            "candidate_unit_workforce": None,
             "candidate_product_type": "apartment",
             "candidate_age_restriction": "non_age_restricted",
             "candidate_status_signal": "Proposed",
@@ -351,9 +352,7 @@ def _ensure_ab_harness_tables(postgres_session: Session) -> None:
         "review_items",
         "source_runs",
     }
-    missing = [
-        table_name for table_name in required_tables if not inspector.has_table(table_name)
-    ]
+    missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply Phase D migrations before running A/B harness tests: {missing}")
 

@@ -17,6 +17,8 @@ Rules:
 - If the previous extraction was malformed, ignore its structure and extract from the article body.
 - If a value is not stated, leave it null.
 - Do not infer project facts from general market commentary.
+- Keep workforce units in candidate_unit_workforce only; do not fold them into
+  candidate_unit_affordable or candidate_unit_market_rate.
 - Every extracted non-null value must have at least one passage_excerpt anchoring it.
 - Use offset_start and offset_end from the original article body, not from the offset marker text.
 - Use registry_developer_id and registry_project_id only when the article text clearly refers to the glossary entry.

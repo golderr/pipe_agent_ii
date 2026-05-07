@@ -22,6 +22,7 @@
           "candidate_unit_total",
           "candidate_unit_affordable",
           "candidate_unit_market_rate",
+          "candidate_unit_workforce",
           "candidate_product_type",
           "candidate_age_restriction",
           "candidate_status_signal",
@@ -52,6 +53,9 @@
             "type": ["integer", "null"]
           },
           "candidate_unit_market_rate": {
+            "type": ["integer", "null"]
+          },
+          "candidate_unit_workforce": {
             "type": ["integer", "null"]
           },
           "candidate_product_type": {

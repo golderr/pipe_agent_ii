@@ -182,6 +182,63 @@ def test_decide_pass3a_reextraction_detects_structural_conflict(
     assert decision.context["conflicts"][0]["extracted_value"] == 250
 
 
+def test_decide_pass3a_reextraction_keeps_workforce_split_distinct(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "affordable_split_phrase",
+                "raw_match": "18 workforce units",
+                "offset_start": 50,
+                "offset_end": 68,
+                "canonical": {"kind": "workforce", "count": 18},
+                "confidence": 0.8,
+                "metadata": {},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="initial",
+        prompt_id="extract_v2",
+        prompt_version="v2",
+        prompt_hash="hash",
+        model="claude-opus-4-7",
+        output_json=_payload(
+            candidate_unit_workforce=12,
+            passage_excerpts=[
+                {
+                    "field": "candidate_unit_workforce",
+                    "value": 12,
+                    "passage": "The project includes 12 workforce units.",
+                    "offset_start": 45,
+                    "offset_end": 75,
+                }
+            ],
+        ),
+        parse_status=NewsExtractionParseStatus.OK.value,
+    )
+    postgres_session.add(extraction)
+    postgres_session.flush()
+
+    decision = decide_pass3a_reextraction(article, extraction)
+
+    assert decision is not None
+    conflict = decision.context["conflicts"][0]
+    assert conflict["field"] == "workforce_units"
+    assert conflict["structural_value"] == 18
+    assert conflict["extracted_value"] == 12
+
+
 def test_decide_pass3a_reextraction_ignores_equivalent_address_format(
     postgres_session: Session,
 ) -> None:
@@ -599,7 +656,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     postgres_session.flush()
     rendered_prompt = render_extraction_prompt(postgres_session, article)
     response = ExtractionLLMResponse(
-        payload=_payload(),
+        payload=_payload(candidate_unit_workforce=16),
         text="{}",
         model="claude-opus-4-7",
         usage=LLMUsage(
@@ -647,12 +704,11 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     assert extraction.model_provider == "anthropic"
     assert extraction.parse_status == NewsExtractionParseStatus.OK.value
     reference = postgres_session.execute(
-        select(NewsProjectReference).where(
-            NewsProjectReference.extraction_id == extraction.id
-        )
+        select(NewsProjectReference).where(NewsProjectReference.extraction_id == extraction.id)
     ).scalar_one()
     assert reference.candidate_name == "Helio"
     assert reference.candidate_unit_total == 140
+    assert reference.candidate_unit_workforce == 16
     assert reference.candidate_signal_flags == {"groundbreaking_announced": True}
     assert reference.candidate_delivery_year_normalized == date(2027, 11, 1)
     assert reference.match_status == "pending"
@@ -802,9 +858,7 @@ def test_run_news_extraction_for_article_retries_output_quality_failure(
     assert retry.triggered_by == "output_quality_retry"
     assert retry.diagnostic["extract_retry_context"]["attempt"] == 1
     reference = postgres_session.execute(
-        select(NewsProjectReference).where(
-            NewsProjectReference.extraction_id == retry.id
-        )
+        select(NewsProjectReference).where(NewsProjectReference.extraction_id == retry.id)
     ).scalar_one()
     assert reference.candidate_unit_total == 145
     retry_cost = postgres_session.execute(
@@ -864,24 +918,24 @@ def test_run_news_extraction_for_article_bounds_extract_retry_attempts(
     assert refreshed_article is not None
     assert refreshed_article.current_extraction_id is None
     assert refreshed_article.current_extraction_version == 0
-    retry_rows = postgres_session.execute(
-        select(NewsExtraction)
-        .where(
-            NewsExtraction.article_id == article.id,
-            NewsExtraction.pass_name == NewsExtractionPass.EXTRACT_RETRY.value,
+    retry_rows = (
+        postgres_session.execute(
+            select(NewsExtraction).where(
+                NewsExtraction.article_id == article.id,
+                NewsExtraction.pass_name == NewsExtractionPass.EXTRACT_RETRY.value,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(retry_rows) == 2
     first_retry = next(
         row for row in retry_rows if row.supersedes_extraction_id == result.extraction_id
     )
-    second_retry = next(
-        row for row in retry_rows if row.supersedes_extraction_id == first_retry.id
-    )
+    second_retry = next(row for row in retry_rows if row.supersedes_extraction_id == first_retry.id)
     assert second_retry.id == result.extract_retry_id
     assert all(
-        row.parse_status == NewsExtractionParseStatus.PARSE_ERROR.value
-        for row in retry_rows
+        row.parse_status == NewsExtractionParseStatus.PARSE_ERROR.value for row in retry_rows
     )
     retry_cost = postgres_session.execute(
         select(LLMCostUsage).where(
@@ -986,13 +1040,9 @@ def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
     assert reextraction.pass_name == NewsExtractionPass.REEXTRACTION.value
     assert reextraction.supersedes_extraction_id == initial.id
     assert reextraction.triggered_by == "pass1_pass2_conflict"
-    assert reextraction.diagnostic["pass3a_context"]["conflicts"][0]["field"] == (
-        "total_units"
-    )
+    assert reextraction.diagnostic["pass3a_context"]["conflicts"][0]["field"] == ("total_units")
     reference = postgres_session.execute(
-        select(NewsProjectReference).where(
-            NewsProjectReference.extraction_id == reextraction.id
-        )
+        select(NewsProjectReference).where(NewsProjectReference.extraction_id == reextraction.id)
     ).scalar_one()
     assert reference.candidate_unit_total == 310
     reextraction_cost = postgres_session.execute(
@@ -1044,15 +1094,18 @@ def test_run_news_extraction_for_article_does_not_reextract_without_trigger(
     assert client.calls == 1
     assert result.extraction_id is not None
     assert result.reextraction_id is None
-    assert postgres_session.execute(
-        select(LLMCostUsage).where(
-            LLMCostUsage.bucket == "news",
-            LLMCostUsage.cost_date == date(2026, 4, 29),
-            LLMCostUsage.capability == NewsExtractionPass.REEXTRACTION.value,
-            LLMCostUsage.provider == "anthropic",
-            LLMCostUsage.model == "claude-opus-4-7",
-        )
-    ).scalar_one_or_none() is None
+    assert (
+        postgres_session.execute(
+            select(LLMCostUsage).where(
+                LLMCostUsage.bucket == "news",
+                LLMCostUsage.cost_date == date(2026, 4, 29),
+                LLMCostUsage.capability == NewsExtractionPass.REEXTRACTION.value,
+                LLMCostUsage.provider == "anthropic",
+                LLMCostUsage.model == "claude-opus-4-7",
+            )
+        ).scalar_one_or_none()
+        is None
+    )
 
 
 def test_run_news_extraction_for_article_skips_low_confidence_pass3a_by_default(
@@ -1098,21 +1151,27 @@ def test_run_news_extraction_for_article_skips_low_confidence_pass3a_by_default(
     assert refreshed_article is not None
     assert refreshed_article.current_extraction_id == result.extraction_id
     assert refreshed_article.current_extraction_version == 1
-    assert postgres_session.execute(
-        select(NewsExtraction).where(
-            NewsExtraction.article_id == article.id,
-            NewsExtraction.pass_name == NewsExtractionPass.REEXTRACTION.value,
-        )
-    ).scalar_one_or_none() is None
-    assert postgres_session.execute(
-        select(LLMCostUsage).where(
-            LLMCostUsage.bucket == "news",
-            LLMCostUsage.cost_date == date(2026, 4, 29),
-            LLMCostUsage.capability == NewsExtractionPass.REEXTRACTION.value,
-            LLMCostUsage.provider == "anthropic",
-            LLMCostUsage.model == "claude-opus-4-7",
-        )
-    ).scalar_one_or_none() is None
+    assert (
+        postgres_session.execute(
+            select(NewsExtraction).where(
+                NewsExtraction.article_id == article.id,
+                NewsExtraction.pass_name == NewsExtractionPass.REEXTRACTION.value,
+            )
+        ).scalar_one_or_none()
+        is None
+    )
+    assert (
+        postgres_session.execute(
+            select(LLMCostUsage).where(
+                LLMCostUsage.bucket == "news",
+                LLMCostUsage.cost_date == date(2026, 4, 29),
+                LLMCostUsage.capability == NewsExtractionPass.REEXTRACTION.value,
+                LLMCostUsage.provider == "anthropic",
+                LLMCostUsage.model == "claude-opus-4-7",
+            )
+        ).scalar_one_or_none()
+        is None
+    )
 
 
 def test_run_news_extraction_for_article_runs_low_confidence_pass3a_when_legacy_enabled(
@@ -1229,12 +1288,15 @@ def test_run_news_extraction_for_article_skips_pass3a_when_cost_cap_blocks(
     assert refreshed_article is not None
     assert refreshed_article.current_extraction_id == result.extraction_id
     assert refreshed_article.current_extraction_version == 1
-    assert postgres_session.execute(
-        select(NewsExtraction).where(
-            NewsExtraction.article_id == article.id,
-            NewsExtraction.pass_name == NewsExtractionPass.REEXTRACTION.value,
-        )
-    ).scalar_one_or_none() is None
+    assert (
+        postgres_session.execute(
+            select(NewsExtraction).where(
+                NewsExtraction.article_id == article.id,
+                NewsExtraction.pass_name == NewsExtractionPass.REEXTRACTION.value,
+            )
+        ).scalar_one_or_none()
+        is None
+    )
 
 
 def test_run_news_extraction_for_article_persists_pass3a_api_error_without_advancing(
@@ -1463,6 +1525,7 @@ def _payload(
     candidate_signal_flags: dict[str, bool] | None = None,
     candidate_address: str = "1234 Sunset Boulevard",
     candidate_unit_total: int = 140,
+    candidate_unit_workforce: int | None = None,
     candidate_confidence: str = "high",
     passage_excerpts: list[dict] | None = None,
     registry_project_id: str | None = None,
@@ -1494,6 +1557,7 @@ def _payload(
                 "candidate_unit_total": candidate_unit_total,
                 "candidate_unit_affordable": 14,
                 "candidate_unit_market_rate": 126,
+                "candidate_unit_workforce": candidate_unit_workforce,
                 "candidate_product_type": "apartment",
                 "candidate_age_restriction": "non_age_restricted",
                 "candidate_status_signal": "Under Construction",
@@ -1558,9 +1622,7 @@ def _ensure_news_extraction_tables(postgres_session: Session) -> None:
         "news_signal_flag_registry",
         "system_alerts",
     }
-    missing = [
-        table_name for table_name in required_tables if not inspector.has_table(table_name)
-    ]
+    missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply Phase D migrations before running extraction tests: {missing}")
 
@@ -1572,9 +1634,7 @@ def _news_source(postgres_session: Session) -> NewsSource:
     if source is None:
         pytest.skip("Apply migration 202604290021 before running extraction tests.")
     if not postgres_session.execute(
-        select(NewsSignalFlag).where(
-            NewsSignalFlag.flag_key == "groundbreaking_announced"
-        )
+        select(NewsSignalFlag).where(NewsSignalFlag.flag_key == "groundbreaking_announced")
     ).scalar_one_or_none():
         pytest.skip("Apply migration 202604290019 before running extraction tests.")
     return source

@@ -473,6 +473,7 @@ class Project(Base, TimestampMixin):
     total_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
     market_rate_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
     affordable_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    workforce_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pct_studio: Mapped[float | None] = mapped_column(Float, nullable=True)
     pct_1bed: Mapped[float | None] = mapped_column(Float, nullable=True)
     pct_2bed: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -570,9 +571,7 @@ class Project(Base, TimestampMixin):
     agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="project")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="project")
     resolution_logs: Mapped[list["ResolutionLog"]] = relationship(back_populates="project")
-    researcher_overrides: Mapped[list[ResearcherOverride]] = relationship(
-        back_populates="project"
-    )
+    researcher_overrides: Mapped[list[ResearcherOverride]] = relationship(back_populates="project")
     project_notes: Mapped[list["ProjectNote"]] = relationship(back_populates="project")
 
 
@@ -798,16 +797,12 @@ class Evidence(Base):
             "source_record_id",
             "raw_data_hash",
             unique=True,
-            postgresql_where=text(
-                "source_record_id IS NOT NULL AND raw_data_hash IS NOT NULL"
-            ),
+            postgresql_where=text("source_record_id IS NOT NULL AND raw_data_hash IS NOT NULL"),
         ),
         Index(
             "ix_evidence_news_article_id_active",
             text("(raw_data ->> 'article_id')"),
-            postgresql_where=text(
-                "source_type = 'news_article' AND superseded_at IS NULL"
-            ),
+            postgresql_where=text("source_type = 'news_article' AND superseded_at IS NULL"),
         ),
     )
 
@@ -861,9 +856,7 @@ class DeveloperRegistry(Base, TimestampMixin):
 
 class DeveloperAlias(Base):
     __tablename__ = "developer_alias"
-    __table_args__ = (
-        Index("ix_developer_alias_developer_id", "developer_id"),
-    )
+    __table_args__ = (Index("ix_developer_alias_developer_id", "developer_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     developer_id: Mapped[uuid.UUID] = mapped_column(
@@ -1080,9 +1073,7 @@ class ScrapeJob(Base):
 
 class CoStarUpload(Base):
     __tablename__ = "costar_uploads"
-    __table_args__ = (
-        Index("ix_costar_uploads_jurisdiction_id", "jurisdiction_id"),
-    )
+    __table_args__ = (Index("ix_costar_uploads_jurisdiction_id", "jurisdiction_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     jurisdiction_id: Mapped[uuid.UUID] = mapped_column(
@@ -1118,9 +1109,7 @@ class CoStarUpload(Base):
 
 class NewsSource(Base, TimestampMixin):
     __tablename__ = "news_sources"
-    __table_args__ = (
-        Index("ix_news_sources_active", "active"),
-    )
+    __table_args__ = (Index("ix_news_sources_active", "active"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
@@ -1346,6 +1335,7 @@ class NewsProjectReference(Base, TimestampMixin):
     candidate_unit_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_unit_affordable: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_unit_market_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    candidate_unit_workforce: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_product_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_age_restriction: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_status_signal: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1582,9 +1572,7 @@ class CostCapOverride(Base):
 
 class LLMCostUsage(Base):
     __tablename__ = "llm_cost_usage"
-    __table_args__ = (
-        Index("ix_llm_cost_usage_bucket_date", "bucket", text("cost_date DESC")),
-    )
+    __table_args__ = (Index("ix_llm_cost_usage_bucket_date", "bucket", text("cost_date DESC")),)
 
     bucket: Mapped[str] = mapped_column(Text, primary_key=True)
     cost_date: Mapped[date] = mapped_column(Date, primary_key=True)
@@ -1668,8 +1656,7 @@ class AgentRun(Base):
             name="nonnegative_counters",
         ),
         CheckConstraint(
-            "(outcome LIKE 'failed_%' AND error_text IS NOT NULL) "
-            "OR (outcome NOT LIKE 'failed_%')",
+            "(outcome LIKE 'failed_%' AND error_text IS NOT NULL) OR (outcome NOT LIKE 'failed_%')",
             name="failed_outcome_error_text",
         ),
         Index("ix_agent_runs_intake", "intake_source_type", "intake_record_id"),
@@ -1698,8 +1685,7 @@ class AgentRun(Base):
         Text,
         nullable=False,
         comment=(
-            "Source-specific intake identifier. For news, this is the stringified "
-            "news_articles.id."
+            "Source-specific intake identifier. For news, this is the stringified news_articles.id."
         ),
     )
     intake_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -1766,16 +1752,12 @@ class AgentRun(Base):
     project: Mapped[Project | None] = relationship(back_populates="agent_runs")
     source_run: Mapped[SourceRun | None] = relationship(back_populates="agent_runs")
     scrape_job: Mapped[ScrapeJob | None] = relationship(back_populates="agent_runs")
-    review_item_links: Mapped[list[AgentRunReviewItem]] = relationship(
-        back_populates="agent_run"
-    )
+    review_item_links: Mapped[list[AgentRunReviewItem]] = relationship(back_populates="agent_run")
 
 
 class AgentRunReviewItem(Base):
     __tablename__ = "agent_run_review_items"
-    __table_args__ = (
-        Index("ix_agent_run_review_items_review_item", "review_item_id"),
-    )
+    __table_args__ = (Index("ix_agent_run_review_items_review_item", "review_item_id"),)
 
     agent_run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -1963,9 +1945,7 @@ class ReviewItem(Base):
             "item_type",
             unique=True,
             postgresql_where=text(
-                "state IN ('open', 'staged') "
-                "AND field_name IS NOT NULL "
-                "AND project_id IS NOT NULL"
+                "state IN ('open', 'staged') AND field_name IS NOT NULL AND project_id IS NOT NULL"
             ),
         ),
         CheckConstraint(
@@ -2026,9 +2006,7 @@ class ReviewItem(Base):
     winning_evidence: Mapped[Evidence | None] = relationship()
     decisions: Mapped[list["ReviewDecision"]] = relationship(back_populates="review_item")
     change_log_entries: Mapped[list["ChangeLog"]] = relationship(back_populates="review_item")
-    agent_run_links: Mapped[list[AgentRunReviewItem]] = relationship(
-        back_populates="review_item"
-    )
+    agent_run_links: Mapped[list[AgentRunReviewItem]] = relationship(back_populates="review_item")
 
 
 class ReviewDecision(Base):
@@ -2090,9 +2068,7 @@ class ReviewDecision(Base):
 
 class ChangeLog(Base):
     __tablename__ = "change_log"
-    __table_args__ = (
-        Index("ix_change_log_project_id_timestamp", "project_id", "timestamp"),
-    )
+    __table_args__ = (Index("ix_change_log_project_id_timestamp", "project_id", "timestamp"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -2128,9 +2104,7 @@ class ResolutionLog(Base):
     """Discrepancy-only audit rows for Phase 2 and ongoing resolution validation."""
 
     __tablename__ = "resolution_log"
-    __table_args__ = (
-        Index("ix_resolution_log_project_id_created_at", "project_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_resolution_log_project_id_created_at", "project_id", "created_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -2167,9 +2141,7 @@ class ResolutionLog(Base):
 
 class DismissedRecord(Base):
     __tablename__ = "dismissed_records"
-    __table_args__ = (
-        UniqueConstraint("source", "source_record_id"),
-    )
+    __table_args__ = (UniqueConstraint("source", "source_record_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     source: Mapped[str] = mapped_column(String(120), nullable=False)

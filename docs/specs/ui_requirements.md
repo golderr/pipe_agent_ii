@@ -925,7 +925,7 @@ Every field in the data model belongs to one of five classes. The class determin
 
 | Class | Examples | Write path | Visual cue on edit |
 |---|---|---|---|
-| **Evidence-derived** | `pipeline_status`, `total_units`, `affordable_units`, `market_rate_units`, `developer`, `product_type`, `age_restriction`, `date_delivery` | Edit becomes a `researcher_override` via the FastAPI. Resolution engine re-runs. | ⓘ "Your edit holds the value. New contradicting evidence will create a review item." |
+| **Evidence-derived** | `pipeline_status`, `total_units`, `affordable_units`, `workforce_units`, `market_rate_units`, `developer`, `product_type`, `age_restriction`, `date_delivery` | Edit becomes a `researcher_override` via the FastAPI. Resolution engine re-runs. | ⓘ "Your edit holds the value. New contradicting evidence will create a review item." |
 | **Source-populated direct** | `rent_or_sale`, `acres`, `retail_sf`, `office_sf`, `hotel_keys`, `stories`, bed-mix percentages, `costar_submarket`, `owner`, `zoning` | Read-only for MVP. Future choice: promote to Evidence-derived or teach source ingesters to respect field overrides. | Disabled edit control: "Managed by source updates in MVP." |
 | **Researcher-authored** | `project_name`, `previous_names`, `source_urls`, planner contacts | Direct write to project table via the FastAPI. ChangeLog entry created. | ⓘ "Your edit is the source of truth for this field." |
 | **Project notes** | `researcher_notes`, `personal_notes`, `change_notes` | Append-only write to `project_notes` via the FastAPI. ChangeLog entry created. | ⓘ "Notes are append-only." |

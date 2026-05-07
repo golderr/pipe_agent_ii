@@ -151,6 +151,7 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
                 candidate_address="1234 Sunset Boulevard, Los Angeles, CA 90026",
                 candidate_developer="Atlas Development",
                 candidate_unit_total=140,
+                candidate_unit_workforce=16,
                 passage_excerpts=[
                     {
                         "field": "candidate_unit_total",
@@ -158,7 +159,14 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
                         "passage": "Atlas broke ground on the 140-unit Helio project.",
                         "offset_start": 27,
                         "offset_end": 35,
-                    }
+                    },
+                    {
+                        "field": "candidate_unit_workforce",
+                        "value": 16,
+                        "passage": "The plans include 16 workforce units.",
+                        "offset_start": 36,
+                        "offset_end": 54,
+                    },
                 ],
             )
         ],
@@ -190,6 +198,7 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
     assert refreshed_project is not None
     assert refreshed_reference is not None
     assert refreshed_project.total_units == 140
+    assert refreshed_project.workforce_units == 16
     assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
     evidence = postgres_session.execute(
         select(Evidence).where(Evidence.source_record_id == str(reference.id))
@@ -199,6 +208,10 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
     assert evidence.extracted_fields["canonical_address"]["value"] == canonical_address
     assert evidence.extracted_fields["total_units"]["value"] == 140
     assert evidence.extracted_fields["total_units"]["confidence"] == "high"
+    assert evidence.extracted_fields["workforce_units"]["value"] == 16
+    assert evidence.extracted_fields["workforce_units"]["highlights"][0]["field"] == (
+        "workforce_units"
+    )
     assert evidence.extracted_fields["total_units"]["highlights"][0]["passage"].startswith(
         "Atlas broke ground"
     )
@@ -364,16 +377,17 @@ def test_news_integration_runs_pass3b_and_integrates_latest_extraction(
     assert refreshed_article is not None
     assert refreshed_initial is not None
     assert refreshed_article.current_extraction_id == reextraction_ids[0]
-    assert (
-        refreshed_initial.match_status
-        == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
-    )
-    new_candidate_items = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.source_run_id == source_run.id,
-            ReviewItem.item_type == ReviewItemType.NEW_CANDIDATE,
+    assert refreshed_initial.match_status == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
+    new_candidate_items = (
+        postgres_session.execute(
+            select(ReviewItem).where(
+                ReviewItem.source_run_id == source_run.id,
+                ReviewItem.item_type == ReviewItemType.NEW_CANDIDATE,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert new_candidate_items == []
     evidence = postgres_session.execute(
         select(Evidence).where(
@@ -486,9 +500,9 @@ def test_news_integration_supersedes_stale_article_evidence_after_reextraction(
         .scalars()
         .all()
     )
-    assert {
-        reference.match_status for reference in stale_references
-    } == {NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value}
+    assert {reference.match_status for reference in stale_references} == {
+        NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
+    }
 
 
 def test_news_integration_marks_all_non_current_references_superseded(
@@ -570,14 +584,8 @@ def test_news_integration_marks_all_non_current_references_superseded(
     assert initial_reference is not None
     assert pass3a_reference is not None
     assert final_reference is not None
-    assert (
-        initial_reference.match_status
-        == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
-    )
-    assert (
-        pass3a_reference.match_status
-        == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
-    )
+    assert initial_reference.match_status == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
+    assert pass3a_reference.match_status == NewsMatchStatus.SUPERSEDED_BY_REEXTRACTION.value
     assert final_reference.match_status == NewsMatchStatus.CONFIRMED.value
 
 
@@ -653,9 +661,7 @@ def test_force_project_id_is_honored_for_single_reference_and_reported_for_multi
     )
 
     assert multi_result.force_project_id_dropped_reason == "multi_reference"
-    assert multi_result.progress_payload["force_project_id_dropped_reason"] == (
-        "multi_reference"
-    )
+    assert multi_result.progress_payload["force_project_id_dropped_reason"] == ("multi_reference")
 
 
 def test_news_integration_creates_possible_match_review_item(
@@ -779,19 +785,21 @@ def test_news_possible_match_agent_can_confirm_candidate_project(
     assert refreshed_reference is not None
     assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
     assert refreshed_reference.matched_project_id == project.id
-    assert refreshed_reference.match_candidates["match_type"] == (
-        "agent_confirmed_possible_match"
-    )
+    assert refreshed_reference.match_candidates["match_type"] == ("agent_confirmed_possible_match")
     evidence = postgres_session.execute(
         select(Evidence).where(Evidence.source_record_id == str(reference.id))
     ).scalar_one()
     assert evidence.project_id == project.id
-    possible_items = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.item_type == ReviewItemType.POSSIBLE_MATCH,
-            ReviewItem.source_run_id == source_run.id,
+    possible_items = (
+        postgres_session.execute(
+            select(ReviewItem).where(
+                ReviewItem.item_type == ReviewItemType.POSSIBLE_MATCH,
+                ReviewItem.source_run_id == source_run.id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert possible_items == []
 
 
@@ -1106,9 +1114,7 @@ def test_news_low_confidence_agent_can_promote_discarded_reference(
     assert refreshed_reference is not None
     assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
     assert refreshed_reference.matched_project_id == project.id
-    assert refreshed_reference.match_candidates["match_type"] == (
-        "agent_promoted_existing_project"
-    )
+    assert refreshed_reference.match_candidates["match_type"] == ("agent_promoted_existing_project")
     evidence = postgres_session.execute(
         select(Evidence).where(Evidence.source_record_id == str(reference.id))
     ).scalar_one()
@@ -1178,9 +1184,7 @@ def test_news_combined_possible_low_confidence_uses_confirm_verdict(
     assert refreshed_reference is not None
     assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
     assert refreshed_reference.matched_project_id == project.id
-    assert refreshed_reference.match_candidates["match_type"] == (
-        "agent_confirmed_possible_match"
-    )
+    assert refreshed_reference.match_candidates["match_type"] == ("agent_confirmed_possible_match")
     agent_run = postgres_session.execute(
         select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
     ).scalar_one()
@@ -1258,9 +1262,7 @@ def test_news_combined_new_candidate_low_confidence_uses_promote_verdict(
     assert refreshed_reference is not None
     assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
     assert refreshed_reference.matched_project_id == project.id
-    assert refreshed_reference.match_candidates["match_type"] == (
-        "agent_promoted_existing_project"
-    )
+    assert refreshed_reference.match_candidates["match_type"] == ("agent_promoted_existing_project")
     agent_run = postgres_session.execute(
         select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
     ).scalar_one()
@@ -1513,19 +1515,21 @@ def test_news_new_candidate_agent_can_promote_existing_project(
     assert refreshed_reference is not None
     assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
     assert refreshed_reference.matched_project_id == project.id
-    assert refreshed_reference.match_candidates["match_type"] == (
-        "agent_promoted_existing_project"
-    )
+    assert refreshed_reference.match_candidates["match_type"] == ("agent_promoted_existing_project")
     evidence = postgres_session.execute(
         select(Evidence).where(Evidence.source_record_id == str(reference.id))
     ).scalar_one()
     assert evidence.project_id == project.id
-    new_candidate_items = postgres_session.execute(
-        select(ReviewItem).where(
-            ReviewItem.item_type == ReviewItemType.NEW_CANDIDATE,
-            ReviewItem.source_run_id == source_run.id,
+    new_candidate_items = (
+        postgres_session.execute(
+            select(ReviewItem).where(
+                ReviewItem.item_type == ReviewItemType.NEW_CANDIDATE,
+                ReviewItem.source_run_id == source_run.id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert new_candidate_items == []
 
 
@@ -1609,9 +1613,7 @@ def _ensure_news_integration_tables(postgres_session: Session) -> None:
         "review_items",
         "source_runs",
     }
-    missing = [
-        table_name for table_name in required_tables if not inspector.has_table(table_name)
-    ]
+    missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply Phase D migrations before running integration tests: {missing}")
     if "matched_evidence_id" not in {
@@ -1628,9 +1630,7 @@ def _ensure_agent2_tables(postgres_session: Session) -> None:
         "cost_caps",
         "llm_cost_usage",
     }
-    missing = [
-        table_name for table_name in required_tables if not inspector.has_table(table_name)
-    ]
+    missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply AGENT.2 migrations before running agent integration tests: {missing}")
 
@@ -1750,9 +1750,7 @@ def _add_extraction(
         triggered_by=triggered_by,
         supersedes_extraction_id=supersedes_extraction_id,
         prompt_id=(
-            "extract_v1"
-            if pass_name == NewsExtractionPass.EXTRACTION.value
-            else "reextract_v1"
+            "extract_v1" if pass_name == NewsExtractionPass.EXTRACTION.value else "reextract_v1"
         ),
         prompt_version="v1",
         prompt_hash=uuid.uuid4().hex,
@@ -1798,6 +1796,7 @@ def _reference_from_payload(
         candidate_unit_total=payload.get("candidate_unit_total"),
         candidate_unit_affordable=payload.get("candidate_unit_affordable"),
         candidate_unit_market_rate=payload.get("candidate_unit_market_rate"),
+        candidate_unit_workforce=payload.get("candidate_unit_workforce"),
         candidate_product_type=payload.get("candidate_product_type"),
         candidate_age_restriction=payload.get("candidate_age_restriction"),
         candidate_status_signal=payload.get("candidate_status_signal"),
@@ -1820,6 +1819,7 @@ def _reference_payload(
     candidate_address: str | None = None,
     candidate_developer: str | None = None,
     candidate_unit_total: int | None = None,
+    candidate_unit_workforce: int | None = None,
     candidate_identifiers: dict[str, list[str]] | None = None,
     candidate_product_type: str | None = None,
     candidate_age_restriction: str | None = None,
@@ -1834,6 +1834,7 @@ def _reference_payload(
         "candidate_unit_total": candidate_unit_total,
         "candidate_unit_affordable": None,
         "candidate_unit_market_rate": None,
+        "candidate_unit_workforce": candidate_unit_workforce,
         "candidate_product_type": candidate_product_type,
         "candidate_age_restriction": candidate_age_restriction,
         "candidate_status_signal": None,

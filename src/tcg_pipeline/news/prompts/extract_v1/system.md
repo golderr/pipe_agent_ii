@@ -13,6 +13,8 @@ Rules:
 - Emit one project_reference per detailed project.
 - If a value is not stated, leave it null.
 - Do not infer project facts from general market commentary.
+- Keep workforce units in candidate_unit_workforce only; do not fold them into
+  candidate_unit_affordable or candidate_unit_market_rate.
 - Treat structural signals as concrete evidence unless nearby article text contradicts them.
 - Every extracted non-null value must have at least one passage_excerpt anchoring it.
 - Use offset_start and offset_end from the original article body, not from the offset marker text.

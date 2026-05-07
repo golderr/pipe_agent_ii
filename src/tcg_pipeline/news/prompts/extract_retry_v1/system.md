@@ -12,6 +12,8 @@ This retry exists only to repair output quality:
 - Preserve the extraction rules from the default extractor: never guess names,
   addresses, developers, counts, dates, statuses, coordinates, identifiers, unit
   buckets, product type, age restrictions, or project IDs.
+- Keep workforce units in candidate_unit_workforce only; do not fold them into
+  candidate_unit_affordable or candidate_unit_market_rate.
 - Every extracted non-null value must have at least one passage_excerpt anchoring it.
 - Use offset_start and offset_end from the original article body, not from offset
   marker text.

@@ -33,7 +33,7 @@ ACTIVE_REVIEW_STATES = {"open", "staged"}
 REVIEW_PROTECTED_MODES = {"review_protected", "until_newer_evidence", "sticky", None}
 CONTRADICTION_DETECTION_ACTOR = "contradiction_detection"
 NEWS_SOURCE_TYPES = {"news_article", "news", "article", "bizjournals"}
-UNIT_FIELDS = {"total_units", "affordable_units", "market_rate_units"}
+UNIT_FIELDS = {"total_units", "affordable_units", "market_rate_units", "workforce_units"}
 LARGE_UNIT_DELTA = 50
 SMALL_UNIT_DELTA = 5
 DELIVERY_DATE_DELTA_DAYS = 30
@@ -242,8 +242,7 @@ def _developers_contradict(
         override_canonical.match_type in CONFIDENT_DEVELOPER_MATCH_TYPES
         and candidate_canonical.match_type in CONFIDENT_DEVELOPER_MATCH_TYPES
         and override_canonical.canonical_developer_id is not None
-        and override_canonical.canonical_developer_id
-        == candidate_canonical.canonical_developer_id
+        and override_canonical.canonical_developer_id == candidate_canonical.canonical_developer_id
     ):
         return False
     return True
@@ -303,9 +302,7 @@ def contradiction_payload(
             "confidence": resolution.metadata.get("candidate_confidence"),
             "evidence_ids": resolution.metadata.get("candidate_evidence_ids") or [],
             "evidence_date": resolution.metadata.get("candidate_evidence_date"),
-            "evidence_frontier": _json_safe(
-                resolution.metadata.get("candidate_evidence_frontier")
-            ),
+            "evidence_frontier": _json_safe(resolution.metadata.get("candidate_evidence_frontier")),
         },
         "message": f"Newer evidence contradicts the manually edited {field_name} value.",
     }
@@ -328,13 +325,17 @@ def _existing_override_contradiction_items_by_field(
     session: Session,
     project: Project,
 ) -> dict[str, ReviewItem]:
-    rows = session.execute(
-        select(ReviewItem).where(
-            ReviewItem.project_id == project.id,
-            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
-            ReviewItem.state.in_(ACTIVE_REVIEW_STATES),
+    rows = (
+        session.execute(
+            select(ReviewItem).where(
+                ReviewItem.project_id == project.id,
+                ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+                ReviewItem.state.in_(ACTIVE_REVIEW_STATES),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     items_by_field: dict[str, ReviewItem] = {}
     for item in rows:
         payload = item.payload if isinstance(item.payload, dict) else {}
@@ -372,9 +373,7 @@ def _candidate_is_recent_article(resolution: FieldResolution | None) -> bool:
         token in source_type for token in NEWS_SOURCE_TYPES
     ):
         return False
-    candidate_date = _date_from_comparable(
-        resolution.metadata.get("candidate_evidence_date")
-    )
+    candidate_date = _date_from_comparable(resolution.metadata.get("candidate_evidence_date"))
     if candidate_date is None:
         return False
     return candidate_date >= date.today() - timedelta(days=RECENT_ARTICLE_DAYS)
@@ -436,14 +435,18 @@ def _supporting_evidence_ids(
     field_name: str,
     override_value: Any,
 ) -> list[uuid.UUID]:
-    rows = session.execute(
-        select(Evidence).where(
-            Evidence.project_id == project.id,
-            Evidence.superseded_at.is_(None),
-            Evidence.extracted_fields.isnot(None),
-            Evidence.extracted_fields.op("?")(field_name),
+    rows = (
+        session.execute(
+            select(Evidence).where(
+                Evidence.project_id == project.id,
+                Evidence.superseded_at.is_(None),
+                Evidence.extracted_fields.isnot(None),
+                Evidence.extracted_fields.op("?")(field_name),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     supporting: list[uuid.UUID] = []
     for evidence in rows:
         field_payload = (evidence.extracted_fields or {}).get(field_name)

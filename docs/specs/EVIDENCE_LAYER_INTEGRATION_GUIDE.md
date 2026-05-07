@@ -343,7 +343,7 @@ Conceptual → Proposed → Pending → Approved → Under Construction → Pre-
 
 **total_units:** Most recent evidence wins regardless of tier. Flag if change > 10% from current. Tie-break by tier (Gov > News > CoStar).
 
-**affordable/market_rate:** Only update from sources that explicitly provide the split (Pipedream, LAHD, SM Dev Tracking, news when explicit). Never infer split from total. When total changes but split doesn't update → flag.
+**affordable/workforce/market_rate:** Only update from sources that explicitly provide the split (Pipedream, LAHD, SM Dev Tracking, news when explicit). Never infer split from total. When total changes but a complete known split doesn't update → flag.
 
 ### 8c. product_type
 

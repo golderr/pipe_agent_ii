@@ -51,6 +51,7 @@ def test_backfill_evidence_is_rerunnable_without_duplicate_rows(
         pipeline_status=PipelineStatus.PENDING,
         product_type=ProductType.APARTMENT,
         total_units=120,
+        workforce_units=8,
         created_by=PIPEDREAM_CREATED_BY,
         last_edit_date=date(2026, 4, 15),
     )
@@ -116,6 +117,7 @@ def test_backfill_evidence_is_rerunnable_without_duplicate_rows(
     evidence_rows = evidence_rows.scalars().all()
     assert [row.source_type for row in evidence_rows] == ["ladbs_permit", "pipedream"]
     assert [row.source_record_id for row in evidence_rows] == ["11010-10000-02451", "994.00001"]
+    assert evidence_rows[1].extracted_fields["workforce_units"]["value"] == 8
     assert result.inserted_source_record_rows >= 1
     assert result.inserted_pipedream_snapshots >= 1
 
@@ -200,9 +202,13 @@ def test_backfill_source_record_evidence_skips_preexisting_orphan_duplicate(
     result = _backfill_source_record_evidence(postgres_session, result=BackfillEvidenceResult())
     postgres_session.flush()
 
-    evidence_rows = postgres_session.execute(
-        select(Evidence).where(Evidence.source_record_id == "11010-10000-02451")
-    ).scalars().all()
+    evidence_rows = (
+        postgres_session.execute(
+            select(Evidence).where(Evidence.source_record_id == "11010-10000-02451")
+        )
+        .scalars()
+        .all()
+    )
     assert len(evidence_rows) == 1
     assert result.skipped_duplicates >= 1
 

@@ -298,9 +298,13 @@ def test_persist_news_article_chunk_embeddings_supersedes_active_chunks(
     )
     postgres_session.flush()
 
-    chunks = postgres_session.execute(
-        select(NewsArticleChunk).where(NewsArticleChunk.article_id == article.id)
-    ).scalars().all()
+    chunks = (
+        postgres_session.execute(
+            select(NewsArticleChunk).where(NewsArticleChunk.article_id == article.id)
+        )
+        .scalars()
+        .all()
+    )
     active_chunks = [chunk for chunk in chunks if chunk.superseded_at is None]
     assert superseded_count == 1
     assert len(active_chunks) == 1
@@ -394,6 +398,7 @@ def _gated_reference(
         candidate_unit_total=120,
         candidate_unit_affordable=12,
         candidate_unit_market_rate=108,
+        candidate_unit_workforce=None,
         candidate_product_type="apartment",
         candidate_age_restriction="non_age_restricted",
         candidate_status_signal="Proposed",

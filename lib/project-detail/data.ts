@@ -231,6 +231,7 @@ const PROJECT_SELECT = [
   "total_units",
   "market_rate_units",
   "affordable_units",
+  "workforce_units",
   "pct_studio",
   "pct_1bed",
   "pct_2bed",
@@ -300,6 +301,12 @@ const CORE_FIELDS: FieldDefinition[] = [
   {
     key: "affordable_units",
     label: "Affordable units",
+    className: "evidence",
+    edit: { mutation: "override", kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+  },
+  {
+    key: "workforce_units",
+    label: "Workforce units",
     className: "evidence",
     edit: { mutation: "override", kind: "number", options: null, info: CORE_OVERRIDE_INFO }
   },
