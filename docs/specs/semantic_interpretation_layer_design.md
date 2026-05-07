@@ -276,7 +276,7 @@ Until the enum expands, these get mapped to `OTHER` with explicit signal flags s
 
 When the enum expansion ships, a one-time migration rewrites existing `OTHER` rows that carry these signal flags into the new enum values. Reason codes for the v1 mappings are stable across the enum-expansion event (the codes describe what the article said, not which enum value got written).
 
-Reason codes: `news_product_type_explicit_apartment`, `news_product_type_explicit_condo`, `news_product_type_explicit_townhome`, `news_product_type_explicit_single_family`, `news_product_type_explicit_micro_co_living`, `news_product_type_care_based_senior_<subtype>`, `news_product_type_hotel`, `news_product_type_student_housing`, `news_product_type_mixed_use`, `news_product_type_unmappable`.
+Reason codes: `news_product_type_explicit_apartment`, `news_product_type_explicit_condo`, `news_product_type_explicit_townhome`, `news_product_type_explicit_single_family`, `news_product_type_explicit_micro_co_living`, `news_product_type_care_based_senior` with subtype carried in `signal_flags.care_subtype`, `news_product_type_hotel`, `news_product_type_student_housing`, `news_product_type_mixed_use`, `news_product_type_unmappable`.
 
 ### 5.3 `age_restriction`
 
@@ -308,7 +308,7 @@ Three input types from the news extractor:
   | Bare year ("delivery 2027") | `<year>-12-15` | medium |
   | Quarter ("Q3 2027") | quarter midpoint (`<year>-08-15` for Q3) | medium |
 
-  Reason codes: `news_delivery_date_projected_<season>`, `news_delivery_date_projected_quarter`, `news_delivery_date_projected_year_only`.
+  Reason codes: `news_delivery_date_projected_season` with the season carried in `signal_flags.projected_season`, `news_delivery_date_projected_quarter`, `news_delivery_date_projected_year_only`.
 
 - **Forward-looking groundbreaking** ("will start construction Q1 2026") → does not write `date_delivery`; writes a `construction_start_expected_at` signal flag instead. The delivery-year estimator may use it.
 
@@ -508,8 +508,8 @@ The following fields are currently Source-populated direct (read-only for MVP) a
 
 - **`stories`** — "32-story tower", "20-story residential building". Reason: `news_stories_explicit`.
 - **`retail_sf` / `office_sf` / `hotel_keys` / `total_sf`** — "1.5 million square feet of office", "200 hotel keys", "50,000 square feet of ground-floor retail". Reasons: `news_retail_sf_explicit`, `news_office_sf_explicit`, `news_hotel_keys_explicit`, `news_total_sf_explicit`.
-- **`affordable_type`** — "100% affordable LIHTC project", "ED1 streamlined", "TOC bonus", "density bonus project". Currently emitted as signal flags (`lihtc_observed`, `ed1_observed`, `toc_observed`, `density_bonus_observed`); becomes canonical when `affordable_type` graduates.
-- **`entitlement_type` / `appeal_status` / `ceqa_status`** — "Draft EIR released", "Final EIR certified", "EIR challenged in court", "appeal denied". Reasons reserved: `news_ceqa_status_*`, `news_appeal_status_*`. CEQA milestone interpretation interacts with `pipeline_status` per the TCG status definitions ("Draft EIR Submitted" → Pending; "Environmental Review Completed (full EIR)" → Approved); a follow-on design covers operationalizing it. Tracked as an open question in §12.
+- **`affordable_type`** — "100% affordable LIHTC project", "ED1 streamlined", "TOC bonus", "density bonus project". Currently emitted as signal flags (`lihtc_observed`, `ed1_observed`, `toc_observed`, `density_bonus_observed`) with reasons `news_affordable_type_lihtc_observed`, `news_affordable_type_ed1_observed`, `news_affordable_type_toc_observed`, and `news_affordable_type_density_bonus_observed`; becomes canonical when `affordable_type` graduates.
+- **`entitlement_type` / `appeal_status` / `ceqa_status`** — "Draft EIR released", "Final EIR certified", "EIR challenged in court", "appeal denied". Reasons reserved: `news_ceqa_status_draft_eir_released`, `news_ceqa_status_final_eir_certified`, `news_ceqa_status_exemption_observed`, `news_appeal_status_filed`, `news_appeal_status_denied`, and `news_appeal_status_challenge_observed`. CEQA milestone interpretation interacts with `pipeline_status` per the TCG status definitions ("Draft EIR Submitted" → Pending; "Environmental Review Completed (full EIR)" → Approved); a follow-on design covers operationalizing it. Tracked as an open question in §12.
 
 Until graduation, the interpreter emits these as signal flags only; no evidence rows are written.
 

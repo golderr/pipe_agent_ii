@@ -30,10 +30,56 @@ def test_reason_code_registry_contains_step7_critical_codes() -> None:
         "news_tenure_unstated_no_default",
         "news_tenure_mixed_split_observed",
         "news_product_type_hotel",
+        "news_product_type_care_based_senior",
+        "news_delivery_date_projected_season",
         "news_status_cancellation_review_required",
     }
 
     assert expected <= set(REASON_CODES_BY_CODE)
+
+
+def test_reason_code_registry_contains_future_scope_placeholders() -> None:
+    expected = {
+        "news_stories_explicit",
+        "news_retail_sf_explicit",
+        "news_office_sf_explicit",
+        "news_hotel_keys_explicit",
+        "news_total_sf_explicit",
+        "news_affordable_type_lihtc_observed",
+        "news_affordable_type_ed1_observed",
+        "news_affordable_type_toc_observed",
+        "news_affordable_type_density_bonus_observed",
+        "news_ceqa_status_draft_eir_released",
+        "news_ceqa_status_final_eir_certified",
+        "news_ceqa_status_exemption_observed",
+        "news_appeal_status_filed",
+        "news_appeal_status_denied",
+        "news_appeal_status_challenge_observed",
+    }
+
+    assert expected <= set(REASON_CODES_BY_CODE)
+    for code in expected:
+        assert reason_code_for(code).signal_only is True
+
+
+def test_reason_code_registry_count_is_stable() -> None:
+    assert len(REASON_CODES_BY_CODE) == 71
+
+
+def test_review_item_templates_stay_in_allowed_vocabulary() -> None:
+    allowed = {
+        "news_status_uncorroborated",
+        "multi_tenure_review",
+        "project_cancellation_review",
+    }
+    used = {
+        reason.review_item_template
+        for reason in REASON_CODES_BY_CODE.values()
+        if reason.review_item_template is not None
+    }
+
+    assert used <= allowed
+    assert used == allowed
 
 
 def test_reason_code_metadata_captures_policy_decisions() -> None:
