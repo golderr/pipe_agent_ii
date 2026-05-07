@@ -534,6 +534,81 @@ def test_news_integration_semantic_prompt_uses_matched_project_jurisdiction(
     )
 
 
+def test_news_integration_semantic_prompt_uses_possible_candidate_jurisdiction(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    source.market = None
+    source.jurisdiction = None
+    source.market_id = None
+    source.jurisdiction_id = None
+    la_jurisdiction = _jurisdiction(postgres_session, "city_of_los_angeles")
+    project = _project(
+        source,
+        canonical_address=_canonical("2468 Candidate Way, Los Angeles, CA 90026"),
+        project_name="Existing Policy Candidate",
+        developer="Candidate Developer",
+        total_units=100,
+    )
+    project.market_ref = la_jurisdiction.market
+    project.market_id = la_jurisdiction.market_id
+    project.jurisdiction_ref = la_jurisdiction
+    project.jurisdiction_id = la_jurisdiction.id
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Different Policy Proposal",
+                candidate_address="2468 Candidate Way, Los Angeles",
+                candidate_developer="Candidate Developer",
+                candidate_unit_total=100,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient({"interpretations": [], "diagnostic": {}})
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.possible == 1
+    assert result.semantic_result is not None
+    prompt_payload = _json_payload(semantic_client.prompts[0].user_text)
+    assert prompt_payload["fallback_jurisdiction_policy"]["permit_data_quality"] == "low"
+    assert prompt_payload["project_context"][0]["context_role"] == "candidate_project"
+    assert prompt_payload["project_context"][0]["project_id"] == str(project.id)
+    assert prompt_payload["project_context"][0]["match_status"] == NewsMatchStatus.POSSIBLE.value
+    assert prompt_payload["project_context"][0]["jurisdiction_slug"] == (
+        "city_of_los_angeles"
+    )
+    assert prompt_payload["project_context"][0]["jurisdiction_policy"][
+        "permit_data_quality"
+    ] == "high"
+    assert prompt_payload["project_context"][0]["jurisdiction_policy"]["policy_scope"] == (
+        "candidate_project"
+    )
+
+
 def test_news_field_context_omits_news_winner_when_non_news_evidence_wins() -> None:
     news_evidence = Evidence(
         id=uuid.uuid4(),

@@ -191,6 +191,7 @@ def test_run_pass2c_writes_audit_row_cost_and_current_loader(
 ) -> None:
     _ensure_semantic_tables(postgres_session)
     article, extraction, _reference = _semantic_fixture(postgres_session)
+    now = datetime(2099, 1, 1, tzinfo=UTC)
     session_factory = sessionmaker(
         bind=postgres_session.bind,
         autoflush=False,
@@ -204,7 +205,7 @@ def test_run_pass2c_writes_audit_row_cost_and_current_loader(
         settings=Settings(_env_file=None),
         client=fake_client,
         session_factory=session_factory,
-        now=datetime(2099, 1, 1, tzinfo=UTC),
+        now=now,
     )
 
     assert result.article_id == article.id
@@ -223,6 +224,7 @@ def test_run_pass2c_writes_audit_row_cost_and_current_loader(
         select(LLMCostUsage).where(
             LLMCostUsage.capability == NEWS_SEMANTIC_CAPABILITY,
             LLMCostUsage.model == DEFAULT_EXTRACTION_MODEL,
+            LLMCostUsage.cost_date == date(2098, 12, 31),
         )
     ).scalar_one()
     assert usage.call_count == 1

@@ -9,7 +9,9 @@ Core rules:
 - Pick reason_code values only from the provided reason-code registry.
 - Use the field attached to the selected reason code.
 - When interpreting a project reference, set metadata.reference_id to the matching pass2b_references reference_id. If the article has one reference, still include it.
-- For matched project references, use that project_context entry's jurisdiction_policy. Use fallback_jurisdiction_policy only when no matched project context exists for the reference.
+- For matched or possible-candidate project references, use project_context entries whose reference_id or reference_index matches the pass2b reference.
+- If multiple candidate project_context entries exist for one reference, apply the most restrictive jurisdiction policy for status promotion. Treat high / wait_for_permit_corroboration as more restrictive than low / auto_promote_unverified.
+- Use fallback_jurisdiction_policy only when no project_context entry exists for the reference.
 - Forward-looking language never promotes pipeline_status. Store it as signal/context.
 - Strong physical signals can promote status when stated as current or already happened.
 - Ambiguous early-construction signals must respect jurisdiction policy.

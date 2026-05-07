@@ -453,40 +453,62 @@ def _semantic_prompt_context(
     recent_evidence: list[dict[str, Any]] = []
     seen_project_ids: set[uuid.UUID] = set()
     for reference, match in zip(references, matches, strict=True):
-        if match.project_id is None:
-            continue
-        project = session.get(Project, match.project_id)
-        if project is None:
-            continue
-        project_context.append(
-            {
-                "reference_id": str(reference.id),
-                "reference_index": reference.reference_index,
-                "match_status": match.status.value,
-                "match_confidence": match.confidence,
-                "project_id": str(project.id),
-                "jurisdiction_slug": (
-                    project.jurisdiction_ref.slug
-                    if project.jurisdiction_ref is not None
-                    else None
-                ),
-                "jurisdiction_name": (
-                    project.jurisdiction_ref.name
-                    if project.jurisdiction_ref is not None
-                    else None
-                ),
-                "jurisdiction_policy": _project_jurisdiction_policy_payload(project),
-                "project_state": _project_state_payload(project),
-            }
-        )
-        if project.id in seen_project_ids:
-            continue
-        seen_project_ids.add(project.id)
-        recent_evidence.extend(_recent_evidence_payloads(session, project_id=project.id))
+        candidate_payloads = {
+            candidate.project_id: candidate.as_payload()
+            for candidate in match.candidates
+        }
+        if match.project_id is not None:
+            context_project_ids: list[tuple[uuid.UUID, str, int | None]] = [
+                (match.project_id, "matched_project", None)
+            ]
+        else:
+            context_project_ids = [
+                (project_id, "candidate_project", index)
+                for index, project_id in enumerate(match.candidate_project_ids[:3], start=1)
+            ]
+        for project_id, context_role, candidate_rank in context_project_ids:
+            project = session.get(Project, project_id)
+            if project is None:
+                continue
+            project_context.append(
+                {
+                    "reference_id": str(reference.id),
+                    "reference_index": reference.reference_index,
+                    "context_role": context_role,
+                    "match_status": match.status.value,
+                    "match_confidence": match.confidence,
+                    "match_candidate_rank": candidate_rank,
+                    "match_candidate": candidate_payloads.get(project_id),
+                    "project_id": str(project.id),
+                    "jurisdiction_slug": (
+                        project.jurisdiction_ref.slug
+                        if project.jurisdiction_ref is not None
+                        else None
+                    ),
+                    "jurisdiction_name": (
+                        project.jurisdiction_ref.name
+                        if project.jurisdiction_ref is not None
+                        else None
+                    ),
+                    "jurisdiction_policy": _project_jurisdiction_policy_payload(
+                        project,
+                        policy_scope=context_role,
+                    ),
+                    "project_state": _project_state_payload(project),
+                }
+            )
+            if project.id in seen_project_ids:
+                continue
+            seen_project_ids.add(project.id)
+            recent_evidence.extend(_recent_evidence_payloads(session, project_id=project.id))
     return tuple(project_context), tuple(recent_evidence)
 
 
-def _project_jurisdiction_policy_payload(project: Project) -> dict[str, Any]:
+def _project_jurisdiction_policy_payload(
+    project: Project,
+    *,
+    policy_scope: str = "matched_project",
+) -> dict[str, Any]:
     jurisdiction = project.jurisdiction_ref
     policy = (
         load_jurisdiction_policy(jurisdiction.slug)
@@ -496,7 +518,7 @@ def _project_jurisdiction_policy_payload(project: Project) -> dict[str, Any]:
     return {
         "jurisdiction_slug": jurisdiction.slug if jurisdiction is not None else None,
         "jurisdiction_name": jurisdiction.name if jurisdiction is not None else None,
-        "policy_scope": "matched_project",
+        "policy_scope": policy_scope,
         **policy.as_prompt_payload(),
     }
 
