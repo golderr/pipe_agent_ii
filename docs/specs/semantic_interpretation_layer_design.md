@@ -232,8 +232,9 @@ The system prompt instructs the model that the following signals describe demons
 
 Live smoke showed that Opus can occasionally put the observed event token in
 `canonical_value` (for example `topped_out` or `first_move_ins`) while selecting
-the correct status reason code. The prompt still asks for canonical TCG status
-values, but the integrator treats the reason code as authoritative for
+the correct status reason code. The prompt explicitly enumerates the allowed
+TCG status strings and forbids event tokens in `pipeline_status.canonical_value`;
+the integrator also treats the reason code as authoritative for
 `pipeline_status` normalization and writes canonical project evidence
 (`Under Construction` / `Complete`) plus canonical review proposed values.
 
@@ -1001,3 +1002,4 @@ Testing for the LLM-backed Pass 2c interpreter follows the same pattern as the e
   - Total measured semantic cost for that suite was `$0.402036`; the test used short synthetic articles, so the `$0.20/article` baseline remains the safer scheduled-article planning value.
   - Event-token canonical values from the model (`topped_out`, `first_move_ins`) are normalized by reason-code mapping before project evidence/review proposed values are written.
   - Render cutover sets `NEWS_USE_LEGACY_SEMANTIC=false` on API and worker; legacy Pass 3 and AGENT.2 tool-loop kill switches remain unchanged.
+  - The `interpret_v1` prompt now explicitly enumerates valid `pipeline_status.canonical_value` strings and says `glossary_gap_observed=true` is only for genuinely unfamiliar article phrasing.

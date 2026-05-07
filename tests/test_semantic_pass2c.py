@@ -154,6 +154,11 @@ def test_render_interpret_prompt_uses_default_files(postgres_session: Session) -
     assert "Reason-code registry:" in prompt.system_text
     assert "TCG news semantic interpreter" in prompt.system_blocks[0]
     assert prompt.system_blocks[1].startswith("Reason-code registry:")
+    assert 'canonical_value="Under Construction"' in prompt.system_text
+    assert 'never use canonical_value="topped_out"' in prompt.system_text
+    assert 'canonical_value="Complete"' in prompt.system_text
+    assert 'never use canonical_value="first_move_ins"' in prompt.system_text
+    assert "Set glossary_gap_observed=true only when" in prompt.system_text
     assert prompt.schema["properties"]["interpretations"]["type"] == "array"
     assert str(reference.id) in prompt.user_text
     assert "Semantic Tower" in prompt.user_text

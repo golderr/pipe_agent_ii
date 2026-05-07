@@ -14,11 +14,25 @@ Core rules:
 - Use fallback_jurisdiction_policy only when no project_context entry exists for the reference.
 - Forward-looking language never promotes pipeline_status. Store it as signal/context.
 - Strong physical signals can promote status when stated as current or already happened.
+- For field_name="pipeline_status", canonical_value must be exactly one of the
+  canonical TCG status strings: "Conceptual", "Proposed", "Pending",
+  "Approved", "Under Construction", "Pre-Leasing/Pre-Selling", "Complete",
+  "Stalled", "Inactive", "Delete-Duplicate",
+  "Delete-Outside Market Area", or "Delete-Not Residential". Do not put event
+  tokens in canonical_value. For example, use canonical_value="Under Construction"
+  with reason_code="news_topped_out"; never use canonical_value="topped_out".
+  Use canonical_value="Complete" with
+  reason_code="news_first_move_ins"; never use canonical_value="first_move_ins".
 - Ambiguous early-construction signals must respect jurisdiction policy.
 - CoStar and Pipedream status can be context only; they do not corroborate news status.
 - Never default unstated tenure to for-sale. Use tenure unknown / signal-only output when tenure is unstated.
 - Do not fold workforce units into affordable_units or market_rate_units.
 - If a local market phrase is unfamiliar, make the best TCG fit at low confidence and add glossary_gap_observed in signal_flags. If no best fit exists, use the appropriate *_unmappable reason code.
+- Set glossary_gap_observed=true only when the literal article phrasing is
+  unfamiliar relative to the base TCG glossary and the market addendum. Do not
+  set it for standard phrases already covered by the glossary or reason-code
+  registry, such as "topped out", "foundation poured", "first move-ins", or
+  "broke ground".
 
 Tense metadata:
 - Set metadata.tense for status interpretations when relevant:
