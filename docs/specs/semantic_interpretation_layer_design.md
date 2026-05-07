@@ -1,6 +1,6 @@
 # Semantic Interpretation Layer Design
 
-> **Status:** In implementation - Pass 2c news path built and live-smoked; Render cutover still gated.
+> **Status:** In implementation - Pass 2c news path built, live-smoked, and cut over on Render.
 > **Implementation owner:** AGENT.2 sub-sequence step 7.
 > **Implementation contract for:** the shared semantic field interpretation layer specified in `agentic_escalation_design.md` §5.1.1.
 > **Last updated:** 2026-05-07 (revision 9 - broader live-smoke findings)
@@ -1000,3 +1000,4 @@ Testing for the LLM-backed Pass 2c interpreter follows the same pattern as the e
   - The broader suite passed 10 checks over 9 live Pass 2c calls: strong `topped_out` -> Under Construction, low/default-policy `broke_ground` -> Under Construction, forward-looking groundbreaking -> signal only, `first_move_ins` -> Complete, mixed tenure -> `multi_tenure_review`, three-article LA dedup -> one high-priority `news_status_uncorroborated` item with count 3, and glossary-gap/unmappable handling.
   - Total measured semantic cost for that suite was `$0.402036`; the test used short synthetic articles, so the `$0.20/article` baseline remains the safer scheduled-article planning value.
   - Event-token canonical values from the model (`topped_out`, `first_move_ins`) are normalized by reason-code mapping before project evidence/review proposed values are written.
+  - Render cutover sets `NEWS_USE_LEGACY_SEMANTIC=false` on API and worker; legacy Pass 3 and AGENT.2 tool-loop kill switches remain unchanged.

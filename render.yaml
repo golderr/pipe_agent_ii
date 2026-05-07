@@ -90,7 +90,7 @@ services:
       - key: NEWS_USE_LEGACY_PASS3
         value: "false"
       - key: NEWS_USE_LEGACY_SEMANTIC
-        value: "true"
+        value: "false"
       # --- Queue ---
       - key: REDIS_URL
         fromService:
@@ -166,7 +166,7 @@ services:
       - key: NEWS_USE_LEGACY_PASS3
         value: "false"
       - key: NEWS_USE_LEGACY_SEMANTIC
-        value: "true"
+        value: "false"
       # --- Worker identity / heartbeat / scheduler ---
       - key: WORKER_NAME
         value: tcg-pipeline-worker-prod

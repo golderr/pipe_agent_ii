@@ -34,7 +34,7 @@ def test_news_semantic_llm_settings_are_separate_from_extraction_settings() -> N
     assert Settings(_env_file=None).news_semantic_max_tokens == 5000
 
 
-def test_render_services_hold_legacy_semantic_path_until_smoke() -> None:
+def test_render_services_use_pass2c_after_controlled_smoke() -> None:
     render_config = yaml.safe_load(Path("render.yaml").read_text())
     service_env = {
         service["name"]: {entry["key"]: entry.get("value") for entry in service["envVars"]}
@@ -54,6 +54,6 @@ def test_render_services_hold_legacy_semantic_path_until_smoke() -> None:
     assert {key: api_env[key] for key in semantic_keys} == {
         key: worker_env[key] for key in semantic_keys
     }
-    assert api_env["NEWS_USE_LEGACY_SEMANTIC"] == "true"
+    assert api_env["NEWS_USE_LEGACY_SEMANTIC"] == "false"
     assert api_env["NEWS_SEMANTIC_MODEL"] == "claude-opus-4-7"
     assert api_env["NEWS_SEMANTIC_MAX_TOKENS"] == "5000"
