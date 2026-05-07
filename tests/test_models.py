@@ -10,6 +10,7 @@ from tcg_pipeline.db.models import (
     NewsExtraction,
     NewsExtractionPass,
     NewsProjectReference,
+    NewsSemanticInterpretation,
     NewsSignalFlag,
     NewsSource,
     Project,
@@ -17,6 +18,7 @@ from tcg_pipeline.db.models import (
     ProjectRelationship,
     RelationshipType,
     ResolutionLog,
+    ReviewItemType,
     ScrapeJob,
     ScrapeJobKind,
     SystemAlert,
@@ -71,6 +73,9 @@ def test_news_research_indexes_are_declared() -> None:
     news_source_indexes = {index.name for index in NewsSource.__table__.indexes}
     news_article_indexes = {index.name for index in NewsArticle.__table__.indexes}
     news_extraction_indexes = {index.name for index in NewsExtraction.__table__.indexes}
+    semantic_interpretation_indexes = {
+        index.name for index in NewsSemanticInterpretation.__table__.indexes
+    }
     reference_indexes = {index.name for index in NewsProjectReference.__table__.indexes}
     flag_indexes = {index.name for index in NewsSignalFlag.__table__.indexes}
 
@@ -79,6 +84,16 @@ def test_news_research_indexes_are_declared() -> None:
     assert "ix_news_articles_published_at" in news_article_indexes
     assert "ix_news_articles_triage_status" in news_article_indexes
     assert "ix_news_extractions_article_id_created_at" in news_extraction_indexes
+    assert (
+        "ix_news_semantic_interpretations_article_id_created_at"
+        in semantic_interpretation_indexes
+    )
+    assert (
+        "ix_news_semantic_interpretations_prompt_id_version"
+        in semantic_interpretation_indexes
+    )
+    assert "output_json" in NewsSemanticInterpretation.__table__.columns
+    assert "prompt_hash" in NewsSemanticInterpretation.__table__.columns
     assert "ix_news_project_references_match_status" in reference_indexes
     assert "ix_news_signal_flag_registry_active" in flag_indexes
 
@@ -136,6 +151,18 @@ def test_agent_run_audit_tables_are_declared() -> None:
         "failed_budget",
         "failed_error",
         "killed_by_switch",
+    }
+
+
+def test_semantic_review_item_types_are_declared() -> None:
+    assert {
+        ReviewItemType.NEWS_STATUS_UNCORROBORATED.value,
+        ReviewItemType.MULTI_TENURE_REVIEW.value,
+        ReviewItemType.PROJECT_CANCELLATION_REVIEW.value,
+    } == {
+        "news_status_uncorroborated",
+        "multi_tenure_review",
+        "project_cancellation_review",
     }
 
 

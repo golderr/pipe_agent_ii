@@ -61,7 +61,9 @@ class InterpreterContext:
     project_state: Mapping[str, Any] = field(default_factory=dict)
     jurisdiction_slug: str | None = None
     jurisdiction_policy: Mapping[str, Any] = field(default_factory=dict)
+    market_glossary: Mapping[str, Any] = field(default_factory=dict)
     recent_evidence: Sequence[Mapping[str, Any]] = ()
+    source_profile: str | None = None
 
 
 class SemanticInterpreter(Protocol):

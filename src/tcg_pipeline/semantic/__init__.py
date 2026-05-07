@@ -4,6 +4,8 @@ from tcg_pipeline.semantic.reason_codes import (
     REASON_CODES_BY_CODE,
     REASON_CODES_BY_PROFILE_FIELD,
     ReasonCode,
+    ReasonCodeRegistry,
+    build_reason_code_registry,
     reason_code_for,
     validate_reason_code_registry,
 )
@@ -23,9 +25,11 @@ __all__ = [
     "REASON_CODES_BY_CODE",
     "REASON_CODES_BY_PROFILE_FIELD",
     "ReasonCode",
+    "ReasonCodeRegistry",
     "SemanticInterpretation",
     "SemanticInterpreter",
     "SourceObservations",
+    "build_reason_code_registry",
     "reason_code_for",
     "validate_reason_code_registry",
 ]

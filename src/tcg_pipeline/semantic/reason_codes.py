@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from tcg_pipeline.semantic.types import Confidence
@@ -21,6 +21,12 @@ class ReasonCode:
     # Signal-only codes do not write canonical evidence directly. They may still
     # open review items when the observation needs explicit researcher action.
     signal_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReasonCodeRegistry:
+    by_code: Mapping[str, ReasonCode]
+    by_profile_field: Mapping[tuple[str, str], Mapping[str, ReasonCode]]
 
 
 def _reason(
@@ -183,6 +189,14 @@ NEWS_STATUS_REASON_CODES: Mapping[str, ReasonCode] = {
             review_item_template="project_cancellation_review",
             signal_only=True,
         ),
+        _reason(
+            "news_status_unmappable",
+            "pipeline_status",
+            "Unmappable status terminology",
+            description="Article status language cannot be mapped to the TCG status taxonomy.",
+            confidence_default="low",
+            signal_only=True,
+        ),
     )
 }
 
@@ -290,6 +304,14 @@ NEWS_MISC_REASON_CODES: Mapping[str, ReasonCode] = {
             confidence_default="high",
         ),
         _reason(
+            "news_age_restriction_unmappable",
+            "age_restriction",
+            "Unmappable age-restriction terminology",
+            description="Article age-restriction language cannot be mapped safely.",
+            confidence_default="low",
+            signal_only=True,
+        ),
+        _reason(
             "news_delivery_date_explicit",
             "date_delivery",
             "Explicit delivery date",
@@ -316,6 +338,14 @@ NEWS_MISC_REASON_CODES: Mapping[str, ReasonCode] = {
             "Projected year-only delivery date",
             description="Article gives only a delivery year.",
             confidence_default="medium",
+        ),
+        _reason(
+            "news_delivery_date_unmappable",
+            "date_delivery",
+            "Unmappable delivery timing",
+            description="Article delivery-timing language cannot be mapped safely.",
+            confidence_default="low",
+            signal_only=True,
         ),
         _reason(
             "news_units_total_explicit",
@@ -515,6 +545,14 @@ NEWS_MISC_REASON_CODES: Mapping[str, ReasonCode] = {
             signal_only=True,
         ),
         _reason(
+            "news_tenure_unmappable",
+            "rent_or_sale",
+            "Unmappable tenure terminology",
+            description="Article tenure language cannot be mapped safely.",
+            confidence_default="low",
+            signal_only=True,
+        ),
+        _reason(
             "news_address_intersection_synthesized",
             "candidate_address",
             "Intersection address synthesized",
@@ -619,25 +657,62 @@ NEWS_MISC_REASON_CODES: Mapping[str, ReasonCode] = {
 }
 
 
+def _build_by_code(groups: Iterable[Mapping[str, ReasonCode]]) -> Mapping[str, ReasonCode]:
+    by_code: dict[str, ReasonCode] = {}
+    duplicates: set[str] = set()
+    for group in groups:
+        for code, reason in group.items():
+            if code in by_code:
+                duplicates.add(code)
+            by_code[code] = reason
+    if duplicates:
+        raise ValueError(f"Duplicate semantic reason codes: {sorted(duplicates)}")
+    return dict(by_code)
+
+
+def _group_by_profile_field(
+    reason_codes: Iterable[ReasonCode],
+) -> Mapping[tuple[str, str], Mapping[str, ReasonCode]]:
+    grouped: dict[tuple[str, str], dict[str, ReasonCode]] = defaultdict(dict)
+    for reason in reason_codes:
+        grouped[(reason.source_profile, reason.field_name)][reason.code] = reason
+    return {key: dict(value) for key, value in grouped.items()}
+
+
 REASON_CODE_GROUPS: Mapping[str, Mapping[str, ReasonCode]] = {
     "news_v1.pipeline_status": NEWS_STATUS_REASON_CODES,
     "news_v1.product_type": NEWS_PRODUCT_TYPE_REASON_CODES,
     "news_v1.misc": NEWS_MISC_REASON_CODES,
 }
 
-REASON_CODES_BY_CODE: Mapping[str, ReasonCode] = {
-    code: reason
-    for group in REASON_CODE_GROUPS.values()
-    for code, reason in group.items()
-}
+REASON_CODES_BY_CODE: Mapping[str, ReasonCode] = _build_by_code(REASON_CODE_GROUPS.values())
 
-_grouped: dict[tuple[str, str], dict[str, ReasonCode]] = defaultdict(dict)
-for reason in REASON_CODES_BY_CODE.values():
-    _grouped[(reason.source_profile, reason.field_name)][reason.code] = reason
+REASON_CODES_BY_PROFILE_FIELD: Mapping[tuple[str, str], Mapping[str, ReasonCode]] = (
+    _group_by_profile_field(REASON_CODES_BY_CODE.values())
+)
 
-REASON_CODES_BY_PROFILE_FIELD: Mapping[tuple[str, str], Mapping[str, ReasonCode]] = {
-    key: dict(value) for key, value in _grouped.items()
-}
+
+def build_reason_code_registry(
+    extra_reason_codes: Iterable[ReasonCode] = (),
+) -> ReasonCodeRegistry:
+    by_code: dict[str, ReasonCode] = dict(REASON_CODES_BY_CODE)
+    duplicates: set[str] = set()
+    for reason in extra_reason_codes:
+        if not reason.code:
+            raise ValueError("Reason-code extension code is required")
+        if not reason.source_profile:
+            raise ValueError(f"Reason-code extension {reason.code} is missing source_profile")
+        if not reason.field_name:
+            raise ValueError(f"Reason-code extension {reason.code} is missing field_name")
+        if reason.code in by_code:
+            duplicates.add(reason.code)
+        by_code[reason.code] = reason
+    if duplicates:
+        raise ValueError(f"Duplicate semantic reason codes: {sorted(duplicates)}")
+    return ReasonCodeRegistry(
+        by_code=dict(by_code),
+        by_profile_field=_group_by_profile_field(by_code.values()),
+    )
 
 
 def reason_code_for(code: str) -> ReasonCode:
@@ -647,7 +722,12 @@ def reason_code_for(code: str) -> ReasonCode:
         raise KeyError(f"Unknown semantic reason code: {code}") from exc
 
 
-def validate_reason_code_registry() -> None:
+def validate_reason_code_registry(registry: ReasonCodeRegistry | None = None) -> None:
+    if registry is not None:
+        regrouped = _group_by_profile_field(registry.by_code.values())
+        if regrouped != registry.by_profile_field:
+            raise ValueError("Semantic reason-code profile/field index is stale")
+        return
     seen: set[str] = set()
     duplicates: set[str] = set()
     for group in REASON_CODE_GROUPS.values():

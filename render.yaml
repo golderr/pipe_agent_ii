@@ -76,6 +76,12 @@ services:
         value: claude-opus-4-7
       - key: NEWS_EXTRACT_MAX_TOKENS
         value: "2500"
+      - key: NEWS_SEMANTIC_PROVIDER
+        value: anthropic
+      - key: NEWS_SEMANTIC_MODEL
+        value: claude-opus-4-7
+      - key: NEWS_SEMANTIC_MAX_TOKENS
+        value: "2500"
       # --- Agent routing guardrails ---
       - key: AGENT_ENABLED_FOR_NEWS
         value: "false"
@@ -83,6 +89,8 @@ services:
         value: "false"
       - key: NEWS_USE_LEGACY_PASS3
         value: "false"
+      - key: NEWS_USE_LEGACY_SEMANTIC
+        value: "true"
       # --- Queue ---
       - key: REDIS_URL
         fromService:
@@ -144,6 +152,12 @@ services:
         value: claude-opus-4-7
       - key: NEWS_EXTRACT_MAX_TOKENS
         value: "2500"
+      - key: NEWS_SEMANTIC_PROVIDER
+        value: anthropic
+      - key: NEWS_SEMANTIC_MODEL
+        value: claude-opus-4-7
+      - key: NEWS_SEMANTIC_MAX_TOKENS
+        value: "2500"
       # --- Agent routing guardrails ---
       - key: AGENT_ENABLED_FOR_NEWS
         value: "false"
@@ -151,6 +165,8 @@ services:
         value: "false"
       - key: NEWS_USE_LEGACY_PASS3
         value: "false"
+      - key: NEWS_USE_LEGACY_SEMANTIC
+        value: "true"
       # --- Worker identity / heartbeat / scheduler ---
       - key: WORKER_NAME
         value: tcg-pipeline-worker-prod

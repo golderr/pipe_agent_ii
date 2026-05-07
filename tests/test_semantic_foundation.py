@@ -7,8 +7,10 @@ from tcg_pipeline.semantic import (
     REASON_CODES_BY_PROFILE_FIELD,
     InterpreterContext,
     PassageAnchor,
+    ReasonCode,
     SemanticInterpretation,
     SourceObservations,
+    build_reason_code_registry,
     reason_code_for,
     validate_reason_code_registry,
 )
@@ -33,6 +35,10 @@ def test_reason_code_registry_contains_step7_critical_codes() -> None:
         "news_product_type_care_based_senior",
         "news_delivery_date_projected_season",
         "news_status_cancellation_review_required",
+        "news_status_unmappable",
+        "news_age_restriction_unmappable",
+        "news_delivery_date_unmappable",
+        "news_tenure_unmappable",
     }
 
     assert expected <= set(REASON_CODES_BY_CODE)
@@ -63,7 +69,7 @@ def test_reason_code_registry_contains_future_scope_placeholders() -> None:
 
 
 def test_reason_code_registry_count_is_stable() -> None:
-    assert len(REASON_CODES_BY_CODE) == 71
+    assert len(REASON_CODES_BY_CODE) == 75
 
 
 def test_review_item_templates_stay_in_allowed_vocabulary() -> None:
@@ -109,6 +115,42 @@ def test_reason_codes_group_by_source_profile_and_field() -> None:
     assert set(workforce_codes) == {"news_units_workforce_explicit"}
 
 
+def test_reason_code_registry_accepts_market_extensions() -> None:
+    extension = ReasonCode(
+        code="news_status_ulurp_certification",
+        source_profile="news_v1",
+        field_name="pipeline_status",
+        label="ULURP certification",
+        description="NYC market-specific status phrase.",
+        confidence_default="medium",
+    )
+
+    registry = build_reason_code_registry([extension])
+
+    assert registry.by_code["news_status_ulurp_certification"] is extension
+    assert (
+        "news_status_ulurp_certification"
+        in registry.by_profile_field[("news_v1", "pipeline_status")]
+    )
+    validate_reason_code_registry(registry)
+
+
+def test_reason_code_registry_rejects_colliding_market_extensions() -> None:
+    with pytest.raises(ValueError, match="Duplicate semantic reason codes"):
+        build_reason_code_registry(
+            [
+                ReasonCode(
+                    code="news_topped_out",
+                    source_profile="news_v1",
+                    field_name="pipeline_status",
+                    label="Duplicate",
+                    description="Duplicate market extension.",
+                    confidence_default="medium",
+                )
+            ]
+        )
+
+
 def test_semantic_interpretation_allows_signal_only_output() -> None:
     interpretation = SemanticInterpretation(
         field_name="pipeline_status",
@@ -150,8 +192,12 @@ def test_source_observations_and_context_are_generic_containers() -> None:
     context = InterpreterContext(
         jurisdiction_slug="city_of_los_angeles",
         jurisdiction_policy={"permit_data_quality": "high"},
+        market_glossary={"slug": "los_angeles"},
+        source_profile="news_v1",
     )
 
     assert observations.source_profile == "news_v1"
     assert observations.reference_payload["candidate_unit_total"] == 200
     assert context.jurisdiction_policy["permit_data_quality"] == "high"
+    assert context.market_glossary["slug"] == "los_angeles"
+    assert context.source_profile == "news_v1"

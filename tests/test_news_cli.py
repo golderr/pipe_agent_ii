@@ -197,7 +197,8 @@ def test_news_paste_link_smoke_cli_invokes_api_and_worker(
     )
     assert (
         "Agent flags: AGENT_ENABLED_FOR_NEWS=True | "
-        "AGENT_ALLOW_LIVE_LLM=True | NEWS_USE_LEGACY_PASS3=False"
+        "AGENT_ALLOW_LIVE_LLM=True | NEWS_USE_LEGACY_PASS3=False | "
+        "NEWS_USE_LEGACY_SEMANTIC=False"
     ) in result.output
     assert f"Article: {article_id}" in result.output
     assert f"Scrape job: {job_id}" in result.output

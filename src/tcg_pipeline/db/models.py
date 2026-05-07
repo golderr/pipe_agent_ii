@@ -115,6 +115,9 @@ class ReviewItemType(str, enum.Enum):
     POTENTIAL_STALL = "potential_stall"
     LOW_CONFIDENCE = "low_confidence"
     OVERRIDE_CONTRADICTION = "override_contradiction"
+    NEWS_STATUS_UNCORROBORATED = "news_status_uncorroborated"
+    MULTI_TENURE_REVIEW = "multi_tenure_review"
+    PROJECT_CANCELLATION_REVIEW = "project_cancellation_review"
 
 
 class ReviewItemStatus(str, enum.Enum):
@@ -1232,6 +1235,10 @@ class NewsArticle(Base, TimestampMixin):
         back_populates="article",
         foreign_keys="NewsExtraction.article_id",
     )
+    semantic_interpretations: Mapped[list[NewsSemanticInterpretation]] = relationship(
+        back_populates="article",
+        foreign_keys="NewsSemanticInterpretation.article_id",
+    )
     project_references: Mapped[list["NewsProjectReference"]] = relationship(
         back_populates="article"
     )
@@ -1305,7 +1312,82 @@ class NewsExtraction(Base):
     project_references: Mapped[list["NewsProjectReference"]] = relationship(
         back_populates="extraction"
     )
+    semantic_interpretations: Mapped[list[NewsSemanticInterpretation]] = relationship(
+        back_populates="extraction"
+    )
     agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="intake_extraction")
+
+
+class NewsSemanticInterpretation(Base):
+    __tablename__ = "news_semantic_interpretations"
+    __table_args__ = (
+        Index(
+            "ix_news_semantic_interpretations_article_id_created_at",
+            "article_id",
+            text("created_at DESC"),
+        ),
+        Index("ix_news_semantic_interpretations_extraction_id", "extraction_id"),
+        Index(
+            "ix_news_semantic_interpretations_prompt_id_version",
+            "prompt_id",
+            "prompt_version",
+        ),
+        Index(
+            "ix_news_semantic_interpretations_parse_status_created_at",
+            "parse_status",
+            text("created_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_articles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    extraction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("news_extractions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    prompt_id: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    model_provider: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="anthropic",
+        server_default="anthropic",
+    )
+    input_tokens_uncached: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens_cache_creation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens_cached: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    raw_response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=NewsExtractionParseStatus.OK.value,
+    )
+    parse_error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diagnostic: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    article: Mapped[NewsArticle] = relationship(
+        back_populates="semantic_interpretations",
+        foreign_keys=[article_id],
+    )
+    extraction: Mapped[NewsExtraction] = relationship(
+        back_populates="semantic_interpretations"
+    )
 
 
 class NewsProjectReference(Base, TimestampMixin):

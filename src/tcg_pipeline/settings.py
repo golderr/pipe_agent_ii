@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     news_extract_model: str = "claude-opus-4-7"
     news_extract_provider: str = "anthropic"
     news_extract_max_tokens: int = Field(default=5000, ge=1)
+    news_semantic_model: str = "claude-opus-4-7"
+    news_semantic_provider: str = "anthropic"
+    news_semantic_max_tokens: int = Field(default=2500, ge=1)
     news_llm_timeout_seconds: float = Field(default=90.0, ge=1)
     news_embedding_provider: str = "openai"
     news_embedding_model: str = DEFAULT_NEWS_EMBEDDING_MODEL
@@ -77,6 +80,7 @@ class Settings(BaseSettings):
     agent_enabled_for_permits: bool = True
     agent_allow_live_llm: bool = False
     news_use_legacy_pass3: bool = False
+    news_use_legacy_semantic: bool = False
 
     api_cors_origins: str = "http://localhost:3000"
     api_auth_audience: str = "authenticated"
