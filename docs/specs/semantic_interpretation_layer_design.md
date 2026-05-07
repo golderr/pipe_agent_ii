@@ -3,7 +3,7 @@
 > **Status:** Design — not yet implemented.
 > **Implementation owner:** AGENT.2 sub-sequence step 7.
 > **Implementation contract for:** the shared semantic field interpretation layer specified in `agentic_escalation_design.md` §5.1.1.
-> **Last updated:** 2026-05-06
+> **Last updated:** 2026-05-07
 
 ---
 
@@ -25,7 +25,7 @@ The field domains covered are organized in two scope tiers:
 
 **v1 in-scope (Evidence-derived today):** `pipeline_status`, `product_type`, `age_restriction`, `date_delivery`, and the unit-bucket family (`total_units`, `affordable_units`, `workforce_units`, `market_rate_units`).
 
-**v1 in-scope (proposed promotion to Evidence-derived; requires researcher sign-off):** `rent_or_sale` (tenure). This is currently Source-populated direct but the news interpreter has a critical safety reason to write tenure evidence — see §5.6.
+**v1 in-scope (signal flags only; no evidence write until researcher sign-off):** `rent_or_sale` (tenure). This is currently Source-populated direct. Step 7 records tenure observations as structured signal flags, but does not promote `rent_or_sale` to Evidence-derived or write canonical tenure evidence without a separate researcher decision — see §5.6.
 
 **v1 in-scope (cross-field interpretation that does not write canonical evidence yet, but emits structured signal flags consumed by the matcher / resolver / future fields):** vague-location language → coordinates (§5.7), project name cleaning + alias detection (§5.8), identifier extraction (§5.9), developer role disambiguation (§5.10), status nuance for delayed / cancelled / abandoned articles (§5.11).
 
@@ -54,6 +54,10 @@ This document does NOT cover:
 6. **Per-jurisdiction policy decides ambiguous cases.** "Broke ground"-class news language is ambiguous (ceremonial vs. actual). Jurisdictions with verified high-quality permit feeds do not promote alone on ambiguous news; they create a review item recommending stay-current. Jurisdictions without strong permit coverage promote with `confidence=medium` and an explicit "no permit corroboration" reason. New jurisdictions default to the latter; the former is earned operationally.
 
 7. **TCG status taxonomy is preserved as-is.** The granular Conceptual / Proposed / Pending / Approved / Under Construction / Pre-Leasing / Complete / Stalled / Inactive taxonomy stays. The interpreter changes how source signals map *into* the taxonomy; it does not collapse or extend the buckets.
+
+8. **Reduce review load without hiding judgment calls.** Strong deterministic signals auto-apply when the rule is reliable. Ambiguous signals produce one deduplicated review item per project/status target/reason, with a clear system recommendation and supporting evidence attached. Additional articles strengthen the same item instead of creating parallel review work.
+
+9. **Researcher decisions become feedback data.** Every semantic-layer review item records the source text, reason code, system recommendation, researcher decision, final value, and reviewer note when present. The first use of this dataset is rule/prompt/eval improvement and spot-check sampling, not direct model fine-tuning.
 
 ---
 
@@ -192,7 +196,7 @@ In a `high` jurisdiction, the interpreter emits a `SemanticInterpretation` with:
 - `requires_corroboration=true`
 - `reason_code=news_status_uncorroborated_high_quality_permit_jurisdiction`
 
-The resolver does NOT promote on this output alone. It creates a `news_status_uncorroborated` review item per §7.3.
+The resolver does NOT promote on this output alone. It creates or updates a single open `news_status_uncorroborated` review item per `(project_id, proposed_status, reason_code)` per §7.3. This avoids one review item per article. The first ambiguous article recommends keeping the current status unless the researcher confirms outside knowledge. If three or more independent articles support the same ambiguous early-construction signal and no permit corroboration has arrived, the same review item is upgraded to stronger researcher-attention copy / priority, but still does not auto-promote in a high-quality permit jurisdiction.
 
 In a `low` jurisdiction, the interpreter emits the same canonical value with:
 
@@ -203,11 +207,13 @@ In a `low` jurisdiction, the interpreter emits the same canonical value with:
 
 The resolver promotes; the project's `resolution_log` row carries the explicit "no permit corroboration" reason, and the Resolution tab UI displays it honestly.
 
+Strong physical signals in §4.2.1 still auto-promote in all jurisdictions. For example, "foundation was poured yesterday" and "the tower topped out" are not treated as ambiguous groundbreaking language.
+
 When permit evidence later arrives in either jurisdiction, the resolver re-runs and the row updates per §7.
 
 #### 4.2.4 Forward-looking signals (signal flag only, no status)
 
-Forward-looking phrases never write `pipeline_status` evidence. They emit a signal flag with the projected date when extractable, and an anchor passage.
+Forward-looking phrases never write `pipeline_status` evidence and do not create review items by default. They emit a signal flag with the projected date when extractable, and an anchor passage. A follow-up review item is created only if later resolver logic detects a direct contradiction with committed project state.
 
 | Phrase / pattern | Output |
 |---|---|
@@ -235,7 +241,7 @@ Step 7 v1 ships the deterministic phrase-table interpreter only. The LLM fallbac
 
 ### 5.2 `product_type`
 
-The current TCG `ProductType` enum is residential-centric: `apartment | condo | townhome | single_family | micro_co_living | other`. Step 7 v1 keeps the enum as-is for the live build but **proposes an expansion** that requires researcher sign-off before merging.
+The current TCG `ProductType` enum is residential-centric: `apartment | condo | townhome | single_family | micro_co_living | other`. Step 7 v1 keeps the enum as-is for the live build. Potential expansion remains a future schema decision; v1 preserves the richer signal as structured flags while writing `OTHER` when the current enum has no safe canonical value.
 
 #### 5.2.1 Existing enum mapping
 
@@ -249,9 +255,9 @@ Deterministic mapping from the news extractor's `candidate_product_type` to the 
 
 Note: `ProductType` and `AgeRestriction` are independent enums per the existing schema. A 55+ apartment building is `(APARTMENT, SENIOR)`, not its own product type.
 
-#### 5.2.2 Proposed enum expansion (requires researcher decision)
+#### 5.2.2 Deferred enum expansion (future researcher decision)
 
-The current enum collapses several operationally-distinct asset classes into `OTHER`. Forecasting depends on per-class absorption curves and unit economics that differ materially. Proposed additions:
+The current enum collapses several operationally-distinct asset classes into `OTHER`. Forecasting depends on per-class absorption curves and unit economics that differ materially. Step 7 does not expand the enum; it records signal flags so later migration has auditable source data. Possible future additions:
 
 - **`HOTEL`** — hospitality, tracked by `hotel_keys`, fundamentally different from residential.
 - **`SENIOR_CARE_INDEPENDENT_LIVING`** (IL) — units are real units; market-rate-like absorption.
@@ -325,14 +331,14 @@ If the article mentions a unit-mix split that doesn't sum to total within ±2, t
 
 #### 5.6.1 Status of `rent_or_sale` field
 
-`rent_or_sale` is currently a Source-populated direct field (read-only for MVP). Step 7 **proposes promoting it to Evidence-derived** so the news interpreter can write tenure evidence. This is a substantive schema/workflow change requiring researcher sign-off:
+`rent_or_sale` is currently a Source-populated direct field (read-only for MVP). Step 7 does **not** promote it to Evidence-derived. The news interpreter records tenure observations as signal flags only until a separate researcher decision promotes the field. A future promotion would be a substantive schema/workflow change requiring researcher sign-off:
 
 - Resolver gains a `rent_or_sale` resolver (most recent explicit-source-stated value wins).
 - Contradiction detection covers tenure mismatches.
 - Override API allows researcher overrides on tenure.
 - Matcher gains tenure as a key matching dimension (rental and for-sale projects at the same address are treated as separate projects unless an explicit `counterpart` relationship exists).
 
-Until the promotion ships, the news interpreter still emits tenure observations as signal flags, but does not write `rent_or_sale` evidence rows.
+Until the promotion ships, the news interpreter emits tenure observations as signal flags, but does not write `rent_or_sale` evidence rows.
 
 #### 5.6.2 CRITICAL safety rule: never default unstated tenure
 
@@ -341,7 +347,7 @@ The single most important rule in tenure interpretation: **if the article does n
 The motivating failure mode: a news article saying "this 80-unit townhome project will deliver in 2027" without explicit tenure language. The traditional default in some markets is to assume "townhome" = for-sale, but the SFR/BTR (single-family-rental / build-to-rent / build-for-rent) asset class has grown materially since 2020 and townhome rental communities are common. Silently classifying an SFR townhome project as for-sale would be a real and recurring error that contaminates downstream forecasting.
 
 When tenure is unstated, the interpreter:
-- Emits `signal_flags={"tenure_unstated": true}`.
+- Emits `signal_flags={"tenure_unknown": true}` with reason `news_tenure_unstated_no_default`.
 - Does NOT write `rent_or_sale` evidence (regardless of whether `rent_or_sale` is Evidence-derived yet).
 - Does NOT preserve any existing tenure assumption from the source profile or jurisdiction config.
 - The matcher treats tenure-unstated articles as ambiguous and applies extra scrutiny when matching to existing rental-only or for-sale-only projects (does not auto-merge).
@@ -393,7 +399,10 @@ Articles describing mixed-tenure projects ("a 200-unit project with 150 rental a
 
 - The interpreter emits `signal_flags={"tenure_split_observed": true, "tenure_split_breakdown": {"rental_units": 150, "for_sale_units": 50, "rental_product_type": "apartment", "for_sale_product_type": "condo"}}`.
 - Does NOT write `total_units` or other unit-bucket evidence for the article; the buckets are ambiguous when split across two projects.
-- Matcher behavior: writes evidence to both linked projects if they exist (linked via `counterpart` or `phase` relationship); otherwise creates a `multi_tenure_review` review item asking the researcher to set up the relationships and re-process.
+- Matcher behavior:
+  - If both linked projects already exist (linked via `counterpart` or `phase` relationship), write the appropriate component evidence to each project.
+  - If one component exists and the other is missing, create a `multi_tenure_review` item with a strong suggested action to create the missing counterpart project. Example: if only the rental apartment project exists and the article states "150 rental apartments and 50 for-sale condos," the review item proposes a new for-sale condo project prefilled with the observed unit count, product type, tenure signal, address/name anchors, and relationship back to the rental project.
+  - If neither component can be matched confidently, create a `multi_tenure_review` item asking the researcher to split/create the appropriate linked projects from the article.
 
 The `multi_tenure_review` review-item type is new; additive enum migration in step 7.
 
@@ -619,15 +628,37 @@ When the news interpreter produces `requires_corroboration=true` (`high` permit-
   "recommendation": "keep_current",
   "recommendation_text": "Article reports project is under construction; this jurisdiction has high-quality permit feeds and no permit corroboration was found. Suggest keeping at Approved unless you have outside knowledge.",
   "evidence_ids": ["<news_evidence_id>"],
-  "reason_code": "news_status_uncorroborated_high_quality_permit_jurisdiction"
+  "reason_code": "news_status_uncorroborated_high_quality_permit_jurisdiction",
+  "system_recommendation_strength": "keep_current",
+  "independent_news_article_count": 1,
+  "supporting_context": {
+    "costar_or_pipedream_status_agrees": false,
+    "note": "CoStar/Pipedream status may be displayed for context but does not count as status corroboration."
+  }
 }
 ```
 
 The review-queue card uses the existing decision-card UI shape with one specialization: a default-recommendation banner ("System suggests: keep Approved"). Decision keys are unchanged (`a` accept-new, `s` keep-current, `d` defer, `f` custom).
 
+Open-item dedupe rule: only one open `news_status_uncorroborated` item exists per project/proposed status/reason code. Later independent articles with the same signal append their evidence IDs to the item and increment `independent_news_article_count`. When the count reaches three or more, the item remains non-auto-promoting but the system recommendation strength changes to `researcher_review_recommended` and the priority/copy may be upgraded so the researcher sees that multiple sources now support the same uncorroborated status signal.
+
 If permit evidence arrives later that promotes the project to U/C, the resolver invalidates the open `news_status_uncorroborated` item (it is now consistent with the resolved status) and surfaces the news evidence as a supporting row on the new permit-driven resolution. The audit trail records that the review item was superseded by permit corroboration rather than by researcher action.
 
 A new value `news_status_uncorroborated` is added to the `ReviewItemType` enum. Migration is additive (new enum value), conservative per the AGENT.reset config-table preservation rule.
+
+### 7.4 Researcher feedback dataset
+
+Semantic-layer review items are not just operational queue entries; they are labeled feedback data for improving the rules and later agent layers. Every semantic-layer review item must preserve:
+
+- source text / source anchors that triggered the interpretation,
+- reason code,
+- system recommendation and recommendation strength,
+- proposed value and current value,
+- researcher decision,
+- final value after the decision,
+- reviewer note when present.
+
+The first use is not model fine-tuning. The first use is targeted rule updates, prompt improvements, spot-check sampling, and eval slices by reason code. Future agent layers may consume this dataset as training/evaluation material once enough labeled decisions exist.
 
 ---
 
@@ -669,9 +700,11 @@ Step 7 ships in a single coherent build (per the 2026-05-06 decision). Sequence:
 6. **Run the smoke suite end-to-end:** the D.6 5-article fixture set + paste-link smokes with explicit cases:
    - `topped_out` strong signal → expect U/C, high confidence, regardless of jurisdiction.
    - `broke_ground` ambiguous + LA (`high` jurisdiction) → expect `news_status_uncorroborated` review item, no status promotion.
+   - Three independent `broke_ground` ambiguous LA articles → expect the same deduplicated review item with all evidence attached and upgraded recommendation strength, still no auto-promotion.
    - `broke_ground` ambiguous + a hypothetical Santa Monica `low` jurisdiction → expect U/C promotion with `confidence=medium`, no review item.
    - Forward-looking "plans to break ground" → expect signal flag emission, no status change.
    - `first_move_ins` → expect Complete promotion + `first_move_ins=true` signal flag (consumable by AGENT.6 once it ships).
+   - Mixed-tenure article with one existing component → expect `multi_tenure_review` with a prefilled suggested missing counterpart project, not merged unit evidence on the existing project.
 
    Confirm each produces the expected interpreter output, reason code, and resolution / review-item behavior.
 7. **Flip `news_use_legacy_semantic` off** on Render after smoke success. Render kill switches remain available as fast disable.
@@ -688,6 +721,7 @@ The semantic-layer cutover is independent of the AGENT.reset event. AGENT.reset'
 - **Jurisdiction-policy tests:** the same article processed under `high` and `low` jurisdictions produces the expected divergent outputs.
 - **Tense-classification tests:** unit tests per tense category with positive and negative phrases.
 - **Reason-code stability tests:** every reason code referenced in code is present in the registry; the registry has no dangling entries.
+- **Feedback-payload tests:** semantic review items preserve reason code, system recommendation, anchors, proposed/current values, and enough decision metadata for later rule/eval feedback.
 - **End-to-end smoke (manual, AGENT.2 step 7 acceptance):** the cases enumerated in §10 step 6, run against a live LLM, with reason-code distribution and resolution_log / review-queue audit verified.
 
 ---
@@ -696,13 +730,14 @@ The semantic-layer cutover is independent of the AGENT.reset event. AGENT.reset'
 
 1. **Tense classification bare-past-tense default.** The doc currently says undated past-tense status verbs in older articles default to `past_concurrent`. Worth a researcher conversation before locking — alternative is to require an explicit date anchor for any historical-context interpretation.
 2. **LLM fallback for ambiguous prose.** Step 7 v1 ships deterministic only. Criteria for promoting LLM fallback to v2 (and the prompt design) need to be defined after 30 days of v1 operational data.
-3. **`ProductType` enum expansion (§5.2.2).** Whether to introduce `HOTEL`, `SENIOR_CARE_INDEPENDENT_LIVING`, `SENIOR_CARE_ASSISTED_LIVING`, `SENIOR_CARE_MEMORY_CARE`, `SENIOR_CARE_SKILLED_NURSING`, `SENIOR_CARE_CCRC`, `STUDENT_HOUSING`, and `MIXED_USE` as explicit enum values, or whether `OTHER` + signal flags is sufficient. Forecasting uses these as distinct asset classes; conflating them inside `OTHER` loses real information. Schema impact: enum migration + one-time rewrite of existing `OTHER` rows that carry the relevant signal flags.
-4. **`rent_or_sale` field-class promotion (§5.6.1).** Whether to graduate `rent_or_sale` from Source-populated direct to Evidence-derived so the news interpreter can write tenure evidence. Schema impact: resolver gains a tenure resolver, contradiction detection covers tenure, override API allows tenure overrides, matcher gains tenure as a key matching dimension. The CRITICAL safety rule in §5.6.2 applies in either case (signal flag emitted regardless), but full evidence-write capability requires this promotion.
+3. **`ProductType` enum expansion (§5.2.2).** Deferred for step 7 v1. The interpreter writes the current enum values and preserves hotel / senior-care / student-housing / mixed-use specificity as signal flags. Revisit explicit enum additions after step 7 produces enough examples to justify the schema/UI/export change.
+4. **`rent_or_sale` field-class promotion (§5.6.1).** Still unresolved and not part of step 7 v1. The CRITICAL safety rule in §5.6.2 applies now: unstated tenure is recorded as tenure unknown and never defaulted to for-sale. Full evidence-write capability requires a later researcher decision because it adds resolver, contradiction, override, and matcher implications.
 5. **`asset_class` field as a separate dimension.** As an alternative or complement to ProductType expansion, consider a new `asset_class` field that captures compound categories (SFR/BTR, townhome rental, CCRC, mixed-use) explicitly. Trade-off: cleaner architectural separation between physical form (`product_type`) and operational class (`asset_class`), but adds another field to the schema. Either path resolves the SFR/townhome-rental display question raised in §5.6.5.
-6. **Mid-month vs 1st-of-month projection convention (§5.4).** The doc uses mid-month dates for vague timing language ("late 2026" → `2026-12-15`). Researcher may prefer 1st-of-month (`2026-12-01`) for cleaner display. Differences are tiny (15 days) and easy to flip.
+6. **Vague delivery-date projection convention (§5.4).** Resolved for step 7 v1: use the mid-month convention in §5.4 (for example "late 2026" → `2026-12-15`) because it is semantically more honest than first-of-month while still sorting predictably.
 7. **`forward_looking` date extraction.** The phrase-table currently says forward-looking phrases extract a projected date when present. Whether we use the same projection conventions as §5.4 (early/spring/mid/fall/late → seasonal midpoints) or treat forward-looking dates more conservatively (require explicit month/year) is a judgment call.
 8. **CEQA milestone → pipeline_status interpretation (§5.12).** "Draft EIR Submitted" → Pending and "Environmental Review Completed (full EIR)" → Approved per the TCG status definitions, but operationalizing CEQA milestones from news language requires its own design (which milestones count, how to detect "full EIR" vs "categorical exemption", how to handle EIR challenges). Tracked as a follow-on after step 7 ships.
 9. **Pre-Leasing → Complete transition cadence (AGENT.6).** Resolved 2026-05-06: AGENT.6 sweep stops once project hits Complete (first move-ins or CofO). Recorded here for cross-reference; no further design needed in this doc.
+10. **Researcher feedback dataset.** Resolved for step 7 v1: semantic review items must preserve structured source anchors, reason codes, system recommendations, researcher decisions, final values, and reviewer notes where present. This feeds rule/prompt/eval improvement first; direct model fine-tuning is future scope.
 
 ---
 
@@ -720,3 +755,13 @@ The semantic-layer cutover is independent of the AGENT.reset event. AGENT.reset'
   - **§5.12 NEW** — Future-scope fields with reason codes pre-defined for forward compatibility.
   - **§10 step 4 updated** — Three additive ReviewItemType enum values noted (`news_status_uncorroborated`, `multi_tenure_review`, `project_cancellation_review`).
   - **§12 expanded** — New open questions on `ProductType` enum expansion, `rent_or_sale` field-class promotion, separate `asset_class` field as alternative, mid-month vs 1st-of-month projection convention, CEQA milestone interpretation. Pre-Leasing → Complete transition cadence resolved.
+- **2026-05-07 (revision 3)** — Researcher decision pass before implementation:
+  - Strong physical news signals auto-promote; ambiguous early-construction signals remain jurisdiction-policy gated.
+  - In high-quality permit jurisdictions, ambiguous uncorroborated news produces one deduplicated review item per project/proposed status/reason. Additional independent articles attach to the same item; three or more independent articles strengthen the recommendation/priority but still do not auto-promote without permit evidence or researcher action.
+  - Forward-looking status language creates signal flags only and no review item by default.
+  - CoStar/Pipedream status can be displayed as context but does not corroborate status.
+  - Tenure unstated is rendered as tenure unknown and never defaults to for-sale.
+  - Mixed-tenure articles should suggest missing counterpart project creation when one component already exists.
+  - ProductType enum expansion is deferred for step 7 v1; use `OTHER` + signal flags.
+  - Vague delivery dates use mid-month projection conventions.
+  - Semantic review items must preserve structured feedback data for future rule/prompt/eval improvement and later agent training/evaluation.
