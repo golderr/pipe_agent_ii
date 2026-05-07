@@ -3,7 +3,7 @@
 > **Status:** Design — not yet implemented.
 > **Implementation owner:** AGENT.2 sub-sequence step 7.
 > **Implementation contract for:** the shared semantic field interpretation layer specified in `agentic_escalation_design.md` §5.1.1.
-> **Last updated:** 2026-05-07 (revision 5 — Pass 2c runway cleanup + audit persistence)
+> **Last updated:** 2026-05-07 (revision 8 — first live-smoke findings)
 
 ---
 
@@ -187,7 +187,7 @@ The news status interpreter is implemented as **Pass 2c**: a single-shot Opus 4.
 - The article body / passages.
 - Pass 2b's structured candidates with anchors.
 - The market glossary addendum (loaded from `config/markets/<slug>/semantic_glossary.yaml` for the article's market).
-- Matched project context, including the matched project's jurisdiction policy values (`permit_data_quality`, `news_status_promotion_policy`). The project jurisdiction owns status-promotion policy; article-source jurisdiction is only a fallback for unmatched/new-candidate references.
+- Matched or possible-candidate project context, including each project's jurisdiction policy values (`permit_data_quality`, `news_status_promotion_policy`). The project jurisdiction owns status-promotion policy; article-source jurisdiction is only a fallback for references with no project context. When one reference has multiple possible candidates, the prompt applies the most restrictive candidate policy for status promotion.
 - The current project state and recent-evidence summary.
 
 **Output:** a JSON array of `SemanticInterpretation` records conforming to the schema in §3.1, enforced via structured-output schema. The model returns one or more interpretations per field domain (status, product_type, age_restriction, date_delivery, unit buckets, tenure, address, name, identifiers, developer-roles, status-nuance), with reason codes drawn from the registry.
@@ -201,6 +201,13 @@ so extraction and interpretation prompt lineages, A/B runs, and cost traces do
 not collapse into one audit surface.
 
 **Model:** Opus 4.7. Temperature 0. Prompt versioning lives at `src/tcg_pipeline/news/prompts/interpret_v1/system.md` and `schema.json`, mirroring the existing `extract_v2` layout. Capability key `semantic.news_v1` for J.1 admin console registration and cost accounting under the shared `news` cost bucket.
+
+**Live-smoke cost baseline:** the first successful Urbanize LA Pass 2c smoke
+measured `$0.198341` for one article after candidate-project context and the
+5,000-token output cap were enabled. Use about `$0.20/article` as the near-term
+planning baseline (about `$30/day` at 150 LA articles/day; about `$200/day` at
+1,000 articles/day) until the broader smoke suite and D.M/J.2 telemetry provide
+a larger sample.
 
 **Tools:** none. Pass 2c does not call tools. All required context arrives as input.
 
@@ -973,3 +980,9 @@ Testing for the LLM-backed Pass 2c interpreter follows the same pattern as the e
   - Strong semantic status reason codes can mark evidence as `promotes_status_alone`; the status resolver honors that marker for news-backed auto-promotion.
   - Semantic review-item templates create/update structured `news_status_uncorroborated`, `multi_tenure_review`, and `project_cancellation_review` items with `semantic_interpretation_id` in payloads.
   - Article-source jurisdiction policy is retained only as `fallback_jurisdiction_policy` for unmatched/new-candidate references, which preserves correct LA behavior for unscoped sources such as Urbanize LA.
+- **2026-05-07 (revision 8)** - First live-smoke findings:
+  - One-article Urbanize LA staging smoke validated fetch, triage, extraction, Pass 2c audit persistence, and integration on the configured database.
+  - The smoke exposed a real jurisdiction-policy gap for possible matches: candidate projects were not included in `project_context`, so unscoped Urbanize articles fell back to low/default policy. Integration now sends top-3 possible-match candidate projects with per-project jurisdiction policy, and the prompt applies the most restrictive policy for one reference with multiple candidates.
+  - `NEWS_SEMANTIC_MAX_TOKENS=2500` produced a cleanly audited `truncated` row; the semantic output cap is now `5000`. Render `NEWS_EXTRACT_MAX_TOKENS` was also aligned to the existing code/docs target of `5000`.
+  - Measured Pass 2c cost for the successful smoke was `$0.198341`, replacing the earlier `$0.05-0.10/article` estimate with a near-term `$0.20/article` planning baseline until broader smoke and telemetry provide a larger sample.
+  - The broader §10 step 6 smoke suite remains the acceptance gate before flipping `NEWS_USE_LEGACY_SEMANTIC=false` on Render.

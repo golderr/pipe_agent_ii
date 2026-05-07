@@ -509,6 +509,9 @@ def _project_jurisdiction_policy_payload(
     *,
     policy_scope: str = "matched_project",
 ) -> dict[str, Any]:
+    # policy_scope is audit-facing context. Project context uses
+    # matched_project or candidate_project; Pass 2c fallback uses
+    # article_source_fallback when no project context exists.
     jurisdiction = project.jurisdiction_ref
     policy = (
         load_jurisdiction_policy(jurisdiction.slug)
