@@ -75,13 +75,13 @@ services:
       - key: NEWS_EXTRACT_MODEL
         value: claude-opus-4-7
       - key: NEWS_EXTRACT_MAX_TOKENS
-        value: "2500"
+        value: "5000"
       - key: NEWS_SEMANTIC_PROVIDER
         value: anthropic
       - key: NEWS_SEMANTIC_MODEL
         value: claude-opus-4-7
       - key: NEWS_SEMANTIC_MAX_TOKENS
-        value: "2500"
+        value: "5000"
       # --- Agent routing guardrails ---
       - key: AGENT_ENABLED_FOR_NEWS
         value: "false"
@@ -151,13 +151,13 @@ services:
       - key: NEWS_EXTRACT_MODEL
         value: claude-opus-4-7
       - key: NEWS_EXTRACT_MAX_TOKENS
-        value: "2500"
+        value: "5000"
       - key: NEWS_SEMANTIC_PROVIDER
         value: anthropic
       - key: NEWS_SEMANTIC_MODEL
         value: claude-opus-4-7
       - key: NEWS_SEMANTIC_MAX_TOKENS
-        value: "2500"
+        value: "5000"
       # --- Agent routing guardrails ---
       - key: AGENT_ENABLED_FOR_NEWS
         value: "false"

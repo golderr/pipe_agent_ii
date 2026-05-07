@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     news_extract_max_tokens: int = Field(default=5000, ge=1)
     news_semantic_model: str = "claude-opus-4-7"
     news_semantic_provider: str = "anthropic"
-    news_semantic_max_tokens: int = Field(default=2500, ge=1)
+    news_semantic_max_tokens: int = Field(default=5000, ge=1)
     news_llm_timeout_seconds: float = Field(default=90.0, ge=1)
     news_embedding_provider: str = "openai"
     news_embedding_model: str = DEFAULT_NEWS_EMBEDDING_MODEL

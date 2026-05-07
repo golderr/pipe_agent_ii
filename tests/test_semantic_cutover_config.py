@@ -31,6 +31,7 @@ def test_news_semantic_llm_settings_are_separate_from_extraction_settings() -> N
     assert settings.news_extract_model == "claude-opus-4-7"
     assert settings.news_semantic_model == "claude-haiku-4-5-20251001"
     assert settings.news_semantic_provider == "anthropic"
+    assert Settings(_env_file=None).news_semantic_max_tokens == 5000
 
 
 def test_render_services_hold_legacy_semantic_path_until_smoke() -> None:
@@ -55,3 +56,4 @@ def test_render_services_hold_legacy_semantic_path_until_smoke() -> None:
     }
     assert api_env["NEWS_USE_LEGACY_SEMANTIC"] == "true"
     assert api_env["NEWS_SEMANTIC_MODEL"] == "claude-opus-4-7"
+    assert api_env["NEWS_SEMANTIC_MAX_TOKENS"] == "5000"
