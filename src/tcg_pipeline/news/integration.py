@@ -385,6 +385,53 @@ def run_news_integration_for_article(
         return result
 
 
+def news_article_agent_trigger_reasons(
+    article_id: uuid.UUID,
+    *,
+    force_project_id: uuid.UUID | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Return news-agent trigger names without running the agent or writing integration rows."""
+
+    resolved_session_factory = session_factory or get_session_factory()
+    resolved_settings = settings or get_settings()
+    if not resolved_settings.agent_enabled_for_news:
+        return ()
+    first_pass = _load_current_references_and_matches(
+        resolved_session_factory,
+        article_id=article_id,
+        force_project_id=force_project_id,
+    )
+    if first_pass.skipped_reason is not None or first_pass.extraction_id is None:
+        return ()
+    if resolved_settings.news_use_legacy_pass3 and _should_run_pass3b(first_pass):
+        return ()
+    contexts = _gather_agent_context(
+        resolved_session_factory,
+        first_pass=first_pass,
+        now=now or datetime.now(UTC),
+    )
+    trigger_names: list[str] = []
+    seen: set[str] = set()
+    for context in contexts:
+        triggers = _agent_triggers_for_reference(
+            reference=context.reference,
+            match=context.match,
+            pass1_pass2_conflicts=list(context.pass1_pass2_conflicts),
+            material_contradictions=list(context.material_contradictions),
+            override_contradictions=list(context.override_contradictions),
+        )
+        for trigger in triggers:
+            name = trigger.value
+            if name in seen:
+                continue
+            seen.add(name)
+            trigger_names.append(name)
+    return tuple(trigger_names)
+
+
 def _run_pass2c_for_current_extraction(
     session_factory: sessionmaker[Session],
     *,

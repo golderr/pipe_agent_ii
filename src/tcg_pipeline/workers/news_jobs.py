@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE
 from tcg_pipeline.db.connection import get_session_factory
 from tcg_pipeline.db.models import (
     NewsArticle,
@@ -43,6 +44,7 @@ from tcg_pipeline.news.extraction import (
 from tcg_pipeline.news.ingest import ArticleFetchResult, fetch_article_pass0
 from tcg_pipeline.news.integration import (
     NewsIntegrationResult,
+    news_article_agent_trigger_reasons,
     run_news_integration_for_article,
 )
 from tcg_pipeline.news.structural import apply_structural_signals
@@ -62,6 +64,9 @@ NEWS_JOB_TASK_BY_KIND = {
         "tcg_pipeline.workers.news_jobs.run_news_paste_a_link_task"
     ),
     ScrapeJobKind.NEWS_SCRAPE.value: "tcg_pipeline.workers.news_jobs.run_news_scrape_task",
+    ScrapeJobKind.NEWS_AGENT_INTEGRATE.value: (
+        "tcg_pipeline.workers.news_jobs.run_news_agent_integrate_task"
+    ),
     ScrapeJobKind.NEWS_REEXTRACT.value: "tcg_pipeline.workers.news_jobs.run_news_reextract_task",
     ScrapeJobKind.NEWS_BACKFILL_CHUNK.value: (
         "tcg_pipeline.workers.news_jobs.run_news_backfill_chunk_task"
@@ -131,6 +136,7 @@ class NewsScrapeRunStats:
     triage_relevant_count: int = 0
     extraction_ok_count: int = 0
     integration_review_item_count: int = 0
+    integration_queued_count: int = 0
     errors: list[str] | None = None
 
     def add_error(self, message: str) -> None:
@@ -161,10 +167,11 @@ def enqueue_news_job_execution(
         return False
     resolved_settings = settings or get_settings()
     try:
+        job_timeout = _news_job_timeout_seconds(kind, settings=resolved_settings)
         queue.enqueue(
             task_path,
             str(job_id),
-            job_timeout=resolved_settings.scrape_job_timeout_seconds,
+            job_timeout=job_timeout,
             result_ttl=resolved_settings.scrape_job_result_ttl_seconds,
             failure_ttl=resolved_settings.scrape_job_failure_ttl_seconds,
         )
@@ -172,6 +179,15 @@ def enqueue_news_job_execution(
         LOGGER.warning("Could not enqueue news job %s.", job_id, exc_info=True)
         return False
     return True
+
+
+def _news_job_timeout_seconds(kind: str, *, settings: Settings) -> int:
+    if kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value:
+        return min(
+            settings.scrape_job_timeout_seconds,
+            NEWS_AGENT_PROFILE.max_wallclock_seconds + 60,
+        )
+    return settings.scrape_job_timeout_seconds
 
 
 def start_news_scheduler_thread(
@@ -212,6 +228,10 @@ def run_news_paste_a_link_task(scrape_job_id: str) -> None:
 
 def run_news_scrape_task(scrape_job_id: str) -> None:
     run_news_scrape_job(uuid.UUID(scrape_job_id))
+
+
+def run_news_agent_integrate_task(scrape_job_id: str) -> None:
+    run_news_agent_integrate_job(uuid.UUID(scrape_job_id))
 
 
 def run_news_reextract_task(scrape_job_id: str) -> None:
@@ -413,6 +433,7 @@ def run_news_scrape_job(
     job_id: uuid.UUID,
     *,
     collector_factory: Callable[[NewsSource], PoliteNewsCollector] = PoliteNewsCollector,
+    settings: Settings | None = None,
     triage_runner: Callable[[uuid.UUID], NewsTriageRunResult] | None = (
         run_news_triage_for_article
     ),
@@ -422,7 +443,11 @@ def run_news_scrape_job(
     integration_runner: Callable[..., NewsIntegrationResult] | None = (
         run_news_integration_for_article
     ),
+    agent_trigger_detector: Callable[..., tuple[str, ...]] | None = (
+        news_article_agent_trigger_reasons
+    ),
 ) -> None:
+    resolved_settings = settings or get_settings()
     session_factory = get_session_factory()
     try:
         with session_factory() as session:
@@ -525,16 +550,45 @@ def run_news_scrape_job(
                 and _extraction_has_ok_result(extraction_result)
                 and integration_runner is not None
             ):
-                integration_result = integration_runner(
-                    article_id,
-                    source_run_id=plan.source_run_id,
-                    force_project_id=None,
-                    session_factory=session_factory,
+                agent_trigger_reasons = (
+                    agent_trigger_detector(
+                        article_id,
+                        force_project_id=None,
+                        session_factory=session_factory,
+                        settings=resolved_settings,
+                    )
+                    if agent_trigger_detector is not None
+                    else ()
                 )
-                stats.integration_review_item_count += (
-                    integration_result.review_items_created
-                    + integration_result.review_items_updated
-                )
+                if agent_trigger_reasons:
+                    queued = _enqueue_news_agent_integrate_job(
+                        session_factory,
+                        article_id=article_id,
+                        source_run_id=plan.source_run_id,
+                        parent_job_id=plan.job_id,
+                        source_name=plan.source_name,
+                        jurisdiction_id=plan.jurisdiction_id,
+                        trigger_reasons=agent_trigger_reasons,
+                        settings=resolved_settings,
+                    )
+                    if queued:
+                        stats.integration_queued_count += 1
+                    else:
+                        stats.add_error(
+                            "news_agent_integrate enqueue failed for article "
+                            f"{article_id}"
+                        )
+                else:
+                    integration_result = integration_runner(
+                        article_id,
+                        source_run_id=plan.source_run_id,
+                        force_project_id=None,
+                        session_factory=session_factory,
+                    )
+                    stats.integration_review_item_count += (
+                        integration_result.review_items_created
+                        + integration_result.review_items_updated
+                    )
         _finish_news_scrape_job(session_factory, plan=plan, stats=stats)
     except PoliteFetchError as exc:
         stats.add_error(_polite_fetch_error_text(exc))
@@ -550,6 +604,135 @@ def run_news_scrape_job(
         raise
     finally:
         collector.close()
+
+
+def _enqueue_news_agent_integrate_job(
+    session_factory: sessionmaker[Session],
+    *,
+    article_id: uuid.UUID,
+    source_run_id: uuid.UUID,
+    parent_job_id: uuid.UUID,
+    source_name: str,
+    jurisdiction_id: uuid.UUID | None,
+    trigger_reasons: tuple[str, ...],
+    settings: Settings,
+) -> bool:
+    with session_factory() as session:
+        job = ScrapeJob(
+            jurisdiction_id=jurisdiction_id,
+            kind=ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+            source_name=source_name,
+            trigger_type=ScrapeTriggerType.SCHEDULED,
+            source_run_id=source_run_id,
+            status=ScrapeJobStatus.QUEUED,
+            target_payload={
+                "article_id": str(article_id),
+                "source_run_id": str(source_run_id),
+                "parent_job_id": str(parent_job_id),
+                "trigger_reasons": list(trigger_reasons),
+            },
+            progress={
+                "message": "Queued article for news-agent integration.",
+                "article_id": str(article_id),
+                "source_run_id": str(source_run_id),
+                "trigger_reasons": list(trigger_reasons),
+            },
+        )
+        session.add(job)
+        session.flush()
+        job_id = job.id
+        session.commit()
+    if enqueue_news_job_execution(
+        job_id,
+        kind=ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+        settings=settings,
+    ):
+        return True
+    with session_factory() as session:
+        job = session.get(ScrapeJob, job_id)
+        if job is not None and job.status == ScrapeJobStatus.QUEUED:
+            job.progress = {
+                **(job.progress or {}),
+                "message": "News-agent integration row created; Redis queue unavailable.",
+                "queue_backend": "unavailable",
+            }
+            session.commit()
+    return False
+
+
+def run_news_agent_integrate_job(
+    job_id: uuid.UUID,
+    *,
+    integration_runner: Callable[..., NewsIntegrationResult] | None = (
+        run_news_integration_for_article
+    ),
+) -> None:
+    session_factory = get_session_factory()
+    try:
+        with session_factory() as session:
+            job = _load_news_job(
+                session,
+                job_id=job_id,
+                expected_kind=ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+            )
+            if job is None:
+                return
+            payload = job.target_payload or {}
+            article_id = _payload_uuid(payload, "article_id")
+            source_run_id = _payload_uuid(payload, "source_run_id")
+            force_project_id = _payload_uuid(payload, "force_project_id", required=False)
+            assert article_id is not None
+            assert source_run_id is not None
+            now = datetime.now(UTC)
+            job.status = ScrapeJobStatus.RUNNING
+            job.started_at = now
+            job.progress = {
+                **(job.progress or {}),
+                "message": "Running news-agent integration.",
+                "article_id": str(article_id),
+                "source_run_id": str(source_run_id),
+                "force_project_id": str(force_project_id)
+                if force_project_id is not None
+                else None,
+            }
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+        _record_news_job_failure(job_id, exc)
+        raise
+
+    if integration_runner is None:
+        result = None
+    else:
+        try:
+            result = integration_runner(
+                article_id,
+                source_run_id=source_run_id,
+                force_project_id=force_project_id,
+                session_factory=session_factory,
+            )
+        except Exception as exc:  # noqa: BLE001 - worker tasks persist job failures.
+            _record_news_job_failure(job_id, exc)
+            raise
+
+    with session_factory() as session:
+        job = session.get(ScrapeJob, job_id)
+        if job is None or job.status != ScrapeJobStatus.RUNNING:
+            return
+        job.status = ScrapeJobStatus.COMPLETED
+        job.completed_at = datetime.now(UTC)
+        job.error_text = None
+        job.progress = {
+            **(job.progress or {}),
+            "message": "News-agent integration completed.",
+        }
+        if result is not None:
+            job.progress.update(result.progress_payload)
+            source_run = session.get(SourceRun, source_run_id)
+            if source_run is not None:
+                source_run.new_matches = (source_run.new_matches or 0) + (
+                    result.review_items_created + result.review_items_updated
+                )
+        session.commit()
 
 
 def run_news_paste_a_link_job(
@@ -1391,7 +1574,9 @@ def _finish_news_scrape_job(
         source_run.rows_inserted = stats.new_article_count
         source_run.rows_updated = stats.fetched_count
         source_run.rows_unchanged = stats.existing_article_count
-        source_run.new_matches = stats.integration_review_item_count
+        source_run.new_matches = (source_run.new_matches or 0) + (
+            stats.integration_review_item_count
+        )
         source_run.block_like_failure_count = stats.block_like_failure_count
         source_run.transient_failure_count = stats.transient_failure_count
         source_run.cost_cap_skipped_count = stats.cost_cap_skipped_count
@@ -1488,6 +1673,7 @@ def _news_scrape_progress_payload(
         "cost_cap_skipped_count": stats.cost_cap_skipped_count,
         "triage_relevant_count": stats.triage_relevant_count,
         "extraction_ok_count": stats.extraction_ok_count,
+        "integration_queued_count": stats.integration_queued_count,
         "integration_review_item_count": stats.integration_review_item_count,
     }
     if error is not None:

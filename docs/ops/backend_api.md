@@ -149,15 +149,21 @@ an active paste-a-link job if one exists; otherwise it resets fetch metadata,
 preserves the original `force_project_id` hint, creates a new
 `news_paste_a_link` job, and enqueues it through the same RQ/background fallback.
 
-The worker runs Pass 0, Pass 1, Pass 2a, Pass 2b, optional Pass 3a/3b, and
-integration for successfully fetched and triage-relevant articles: HTTP fetch,
-trafilatura body extraction, metadata
-parsing, paywall/dead-link/fetch-status detection, durable `news_articles`
-updates, structural signal extraction into `news_articles.structural_signals`,
-Haiku triage into `news_extractions(pass='triage')`, and Opus extraction into
+The scheduled scrape worker runs discovery, Pass 0, Pass 1, Pass 2a, Pass 2b,
+and inline integration for successfully fetched and triage-relevant articles
+that do not need agent escalation: HTTP fetch, trafilatura body extraction,
+metadata parsing, paywall/dead-link/fetch-status detection, durable
+`news_articles` updates, structural signal extraction into
+`news_articles.structural_signals`, Haiku triage into
+`news_extractions(pass='triage')`, and Opus extraction into
 `news_extractions(pass='extraction')` plus pending `news_project_references`.
-It also runs D.4 matching/integration, writes news evidence, creates post-apply
-review items, records `source_runs` audit rows, and completes the scrape job.
+When preflight detects a news-agent trigger, the scheduled scrape job creates a
+child `scrape_jobs(kind='news_agent_integrate')` row and enqueues it as a
+separate RQ task. The child job reloads the article/extraction state, runs
+matching/integration plus the agent loop, writes evidence/review items, links
+agent runs, and increments the parent `source_runs.new_matches` count. This
+keeps the discovery batch bounded while each agent article gets its own
+300-second agent wallclock cap.
 
 If Pass 2b extraction raises after Pass 0/1/2a succeeded, the scrape job still
 completes because the article ingest and triage state are durable. The job

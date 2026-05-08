@@ -111,6 +111,7 @@ def test_scrape_job_news_extension_columns_are_declared() -> None:
     assert {member.value for member in ScrapeJobKind} == {
         "collector_run",
         "news_scrape",
+        "news_agent_integrate",
         "news_paste_a_link",
         "news_reextract",
         "news_backfill_chunk",

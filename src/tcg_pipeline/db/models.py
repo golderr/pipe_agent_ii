@@ -173,6 +173,7 @@ class ScrapeTriggerType(enum.StrEnum):
 class ScrapeJobKind(enum.StrEnum):
     COLLECTOR_RUN = "collector_run"
     NEWS_SCRAPE = "news_scrape"
+    NEWS_AGENT_INTEGRATE = "news_agent_integrate"
     NEWS_PASTE_A_LINK = "news_paste_a_link"
     NEWS_REEXTRACT = "news_reextract"
     NEWS_BACKFILL_CHUNK = "news_backfill_chunk"
