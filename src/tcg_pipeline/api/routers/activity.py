@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import or_, select
+from sqlalchemy import String, and_, cast, or_, select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -236,14 +236,26 @@ def _agent_events(
     to_date: date | None,
     limit: int,
 ) -> list[ActivityEventResponse]:
-    statement = select(AgentRun).order_by(AgentRun.created_at.desc(), AgentRun.id.asc())
+    news_article_join = and_(
+        AgentRun.intake_source_type == "news_article",
+        AgentRun.intake_record_id == cast(NewsArticle.id, String),
+    )
+    statement = (
+        select(AgentRun)
+        .outerjoin(NewsArticle, news_article_join)
+        .outerjoin(NewsSource, NewsArticle.news_source_id == NewsSource.id)
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.asc())
+    )
+    if source:
+        statement = statement.where(
+            or_(AgentRun.intake_source_type == source, NewsSource.slug == source)
+        )
     if actor:
         statement = statement.where((AgentRun.profile_name == actor) | (AgentRun.outcome == actor))
     if project_id is not None:
         statement = statement.where(AgentRun.project_id == project_id)
     statement = _date_window(statement, AgentRun.created_at, from_date=from_date, to_date=to_date)
-    query_limit = MAX_INTERNAL_LIMIT if source else limit
-    rows = session.execute(statement.limit(query_limit)).scalars().all()
+    rows = session.execute(statement.limit(limit)).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows if row.project_id])
     review_item_ids_by_agent = _review_item_ids_by_agent(session, [row.id for row in rows])
     articles = _news_articles_by_id(session, [_news_article_id(row) for row in rows])
@@ -256,8 +268,6 @@ def _agent_events(
         article_id = _news_article_id(row)
         article = articles.get(article_id) if article_id is not None else None
         news_source = source_names.get(article.news_source_id) if article is not None else None
-        if not _agent_source_matches(row, article=article, news_source=news_source, source=source):
-            continue
         events.append(
             _agent_event(
                 row,
@@ -280,7 +290,7 @@ def _agent_event(
 ) -> ActivityEventResponse:
     trigger_text = ", ".join(row.triggered_by)
     if row.outcome in AGENT_FAILURE_OUTCOMES:
-        title = f"Agent failed: {_source_label(row.outcome)}"
+        title = f"Agent failed: {_source_label(_agent_failure_suffix(row.outcome))}"
     elif trigger_text:
         title = f"Agent decision: {trigger_text}"
     else:
@@ -421,22 +431,6 @@ def _news_sources_by_id(
     return {row.id: row for row in rows}
 
 
-def _agent_source_matches(
-    row: AgentRun,
-    *,
-    article: NewsArticle | None,
-    news_source: NewsSource | None,
-    source: str | None,
-) -> bool:
-    if source is None:
-        return True
-    if row.intake_source_type == source:
-        return True
-    if article is None or news_source is None:
-        return False
-    return news_source.slug == source
-
-
 def _news_article_id(row: AgentRun) -> uuid.UUID | None:
     if row.intake_source_type != "news_article":
         return None
@@ -488,6 +482,12 @@ def _field_label(value: str) -> str:
 
 def _source_label(value: str) -> str:
     return value.replace("_", " ").replace("-", " ").title()
+
+
+def _agent_failure_suffix(outcome: str) -> str:
+    if outcome.startswith("failed_"):
+        return outcome.removeprefix("failed_")
+    return outcome
 
 
 def _actor_label(

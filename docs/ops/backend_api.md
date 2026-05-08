@@ -43,8 +43,11 @@ endpoint family.
 Resolution rows match only `resolution_engine`. News-agent rows match either the
 logical intake source (`news_article`) or the linked `news_sources.slug`, so a
 publisher filter such as `urbanize_la` includes agent rows for articles from
-that publisher. No-op resolution rows where `current_value` equals
-`resolved_value` are hidden from the feed by default.
+that publisher. The news-agent publisher match is pushed into SQL through a
+`agent_runs` -> `news_articles` -> `news_sources` join, so source-filtered agent
+rows are not capped by an in-Python candidate prefetch. No-op resolution rows
+where `current_value` equals `resolved_value` are hidden from the feed by
+default.
 
 The `semantic` preset is still a first Activity-slice status-news filter. The
 next step-11 slice should read `news_semantic_interpretations` directly for
