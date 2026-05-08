@@ -48,14 +48,21 @@ def _auth_user() -> AuthenticatedUser:
     )
 
 
-def _project(postgres_session: Session, address: str) -> Project:
+def _project(
+    postgres_session: Session,
+    address: str,
+    *,
+    market: str = "los_angeles",
+    jurisdiction: str = "city_of_los_angeles",
+) -> Project:
     project = Project(
         canonical_address=address,
         raw_addresses=[address],
-        market="los_angeles",
+        market=market,
         city="Los Angeles",
         state="CA",
         county="Los Angeles",
+        jurisdiction=jurisdiction,
         pipeline_status=PipelineStatus.APPROVED,
         project_name=address,
     )
@@ -164,6 +171,9 @@ def _semantic_interpretation(
     reason_code: str = "news_topped_out",
     canonical_value: object = "Under Construction",
     signal_flags: dict | None = None,
+    include_reference_id: bool = True,
+    include_reference_index: bool = True,
+    parse_status: str = NewsExtractionParseStatus.OK.value,
     created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
 ) -> NewsSemanticInterpretation:
     source, article = _news_article(postgres_session, source_slug=source_slug)
@@ -192,6 +202,14 @@ def _semantic_interpretation(
     )
     postgres_session.add(reference)
     postgres_session.flush()
+    resolved_signal_flags = dict(signal_flags or {})
+    metadata: dict[str, object] = {}
+    if include_reference_id:
+        resolved_signal_flags.setdefault("reference_id", str(reference.id))
+        metadata["reference_id"] = str(reference.id)
+    if include_reference_index:
+        resolved_signal_flags.setdefault("reference_index", reference.reference_index)
+        metadata["reference_index"] = reference.reference_index
     semantic = NewsSemanticInterpretation(
         article_id=article.id,
         extraction_id=extraction.id,
@@ -209,22 +227,15 @@ def _semantic_interpretation(
                     "canonical_value": canonical_value,
                     "confidence": "high",
                     "reason_code": reason_code,
-                    "signal_flags": {
-                        **(signal_flags or {}),
-                        "reference_id": str(reference.id),
-                        "reference_index": reference.reference_index,
-                    },
+                    "signal_flags": resolved_signal_flags,
                     "source_anchors": [],
                     "requires_corroboration": False,
-                    "metadata": {
-                        "reference_id": str(reference.id),
-                        "reference_index": reference.reference_index,
-                    },
+                    "metadata": metadata,
                 }
             ],
             "diagnostic": {},
         },
-        parse_status=NewsExtractionParseStatus.OK.value,
+        parse_status=parse_status,
         created_at=created_at,
     )
     postgres_session.add(semantic)
@@ -576,6 +587,148 @@ def test_activity_feed_semantic_source_filter_matches_article_source(
     assert response.events[0].article.source_slug == source_slug
 
 
+def test_activity_feed_semantic_row_fans_out_multiple_interpretations(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "450 Activity Way")
+    semantic = _semantic_interpretation(postgres_session, project)
+    first = semantic.output_json["interpretations"][0]
+    second = {
+        **first,
+        "field_name": "total_units",
+        "canonical_value": 100,
+        "reason_code": "news_total_units_explicit",
+    }
+    semantic.output_json = {
+        **semantic.output_json,
+        "interpretations": [first, second],
+    }
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        event_type="semantic",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert [event.id for event in response.events] == [
+        f"semantic:{semantic.id}:0",
+        f"semantic:{semantic.id}:1",
+    ]
+    assert [event.field for event in response.events] == [
+        "pipeline_status",
+        "total_units",
+    ]
+
+
+def test_activity_feed_semantic_reference_index_only_links_project(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "460 Activity Way")
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        include_reference_id=False,
+        include_reference_index=True,
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="semantic",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert len(response.events) == 1
+    assert response.events[0].project is not None
+    assert response.events[0].project.id == project.id
+
+
+def test_activity_feed_semantic_single_reference_fallback_links_project(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "470 Activity Way")
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        include_reference_id=False,
+        include_reference_index=False,
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="semantic",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert len(response.events) == 1
+    assert response.events[0].project is not None
+    assert response.events[0].project.id == project.id
+
+
+def test_activity_feed_semantic_unresolved_multi_reference_keeps_project_null(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "480 Activity Way")
+    other_project = _project(postgres_session, "481 Activity Way")
+    source_slug = f"semantic-unresolved-source-{uuid.uuid4().hex}"
+    semantic = _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=source_slug,
+        include_reference_id=False,
+        include_reference_index=False,
+    )
+    postgres_session.add(
+        NewsProjectReference(
+            extraction_id=semantic.extraction_id,
+            article_id=semantic.article_id,
+            reference_index=1,
+            candidate_name=other_project.project_name,
+            matched_project_id=other_project.id,
+            match_status="confirmed",
+        )
+    )
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="semantic",
+        source=source_slug,
+        limit=10,
+    )
+
+    assert len(response.events) == 1
+    assert response.events[0].project is None
+
+
+def test_activity_feed_semantic_parse_error_rows_are_excluded(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "490 Activity Way")
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        event_type="semantic",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert response.events == []
+
+
 def test_activity_feed_source_filter_matches_agent_article_source(
     postgres_session: Session,
 ) -> None:
@@ -773,6 +926,61 @@ def test_activity_feed_combined_filters_keep_expected_rows(
     ]
 
 
+def test_activity_feed_filters_by_market_and_jurisdiction(
+    postgres_session: Session,
+) -> None:
+    la_project = _project(
+        postgres_session,
+        "590 Activity Way",
+        market="los_angeles",
+        jurisdiction="city_of_los_angeles",
+    )
+    other_project = _project(
+        postgres_session,
+        "591 Activity Way",
+        market="orange_county",
+        jurisdiction="city_of_anaheim",
+    )
+    postgres_session.add_all(
+        [
+            ChangeLog(
+                project_id=la_project.id,
+                timestamp=datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+                source="urbanize_la",
+                field="pipeline_status",
+                old_value="Approved",
+                new_value="Under Construction",
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.HIGH,
+            ),
+            ChangeLog(
+                project_id=other_project.id,
+                timestamp=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+                source="urbanize_la",
+                field="pipeline_status",
+                old_value="Approved",
+                new_value="Under Construction",
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.HIGH,
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        event_type="change",
+        market="los_angeles",
+        jurisdiction="city_of_los_angeles",
+        limit=10,
+    )
+
+    assert len(response.events) == 1
+    assert response.events[0].project is not None
+    assert response.events[0].project.id == la_project.id
+
+
 def test_activity_feed_filters_by_date_and_actor(postgres_session: Session) -> None:
     project = _project(postgres_session, "600 Activity Way")
     reviewer_id = uuid.uuid4()
@@ -913,3 +1121,47 @@ def test_activity_semantic_metrics_aggregate_gap_and_unmappable_rates(
     assert metric.unmappable_count == 2
     assert metric.glossary_gap_rate == 0.5
     assert metric.unmappable_rate == 1.0
+    assert response.thresholds["glossary_gap_rate"] == 0.15
+    assert response.thresholds["unmappable_rate"] == 0.05
+
+
+def test_activity_semantic_metrics_market_filter_excludes_other_markets(
+    postgres_session: Session,
+) -> None:
+    la_project = _project(
+        postgres_session,
+        "775 Activity Way",
+        market="los_angeles",
+    )
+    other_project = _project(
+        postgres_session,
+        "776 Activity Way",
+        market="orange_county",
+    )
+    source_slug = f"semantic-market-source-{uuid.uuid4().hex}"
+    _semantic_interpretation(
+        postgres_session,
+        la_project,
+        source_slug=source_slug,
+        reason_code="news_status_unmappable",
+        signal_flags={"glossary_gap_observed": True},
+    )
+    _semantic_interpretation(
+        postgres_session,
+        other_project,
+        source_slug=source_slug,
+        reason_code="news_status_unmappable",
+        signal_flags={"glossary_gap_observed": True},
+        created_at=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+    )
+
+    response = list_activity_semantic_metrics(
+        user=_auth_user(),
+        session=postgres_session,
+        source=source_slug,
+        market="los_angeles",
+    )
+
+    assert len(response.metrics) == 1
+    assert response.metrics[0].market == "los_angeles"
+    assert response.metrics[0].total_count == 1

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from collections import Counter
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import String, and_, cast, or_, select
+from sqlalchemy import String, and_, cast, or_, select, text
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -52,7 +51,6 @@ SEMANTIC_GAP_RATE_THRESHOLD = 0.15
 SEMANTIC_UNMAPPABLE_RATE_THRESHOLD = 0.05
 SEMANTIC_REJECTION_SIGMA_THRESHOLD = 2.0
 MAX_INTERNAL_LIMIT = 500
-MAX_SEMANTIC_METRIC_ROWS = 5000
 
 
 @router.get("/events")
@@ -65,6 +63,8 @@ def list_activity_events(
     field: Annotated[str | None, Query(max_length=120)] = None,
     actor: Annotated[str | None, Query(max_length=200)] = None,
     project_id: uuid.UUID | None = None,
+    market: Annotated[str | None, Query(max_length=120)] = None,
+    jurisdiction: Annotated[str | None, Query(max_length=120)] = None,
     from_date: date | None = None,
     to_date: date | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_INTERNAL_LIMIT)] = 200,
@@ -72,62 +72,24 @@ def list_activity_events(
     del user
     normalized_type = event_type if event_type in EVENT_TYPES else None
     normalized_view = view if view in VIEW_PRESETS else "all"
-    events: list[ActivityEventResponse] = []
-    if normalized_type in (None, "change"):
-        events.extend(
-            _change_events(
-                session,
-                source=source,
-                field=field,
-                actor=actor,
-                project_id=project_id,
-                from_date=from_date,
-                to_date=to_date,
-                limit=limit,
-            )
-        )
-    if normalized_type in (None, "resolution"):
-        events.extend(
-            _resolution_events(
-                session,
-                source=source,
-                field=field,
-                project_id=project_id,
-                from_date=from_date,
-                to_date=to_date,
-                limit=limit,
-            )
-        )
-    if normalized_type in (None, "agent"):
-        events.extend(
-            _agent_events(
-                session,
-                source=source,
-                actor=actor,
-                project_id=project_id,
-                from_date=from_date,
-                to_date=to_date,
-                limit=limit,
-            )
-        )
-    if normalized_type in (None, "semantic"):
-        events.extend(
-            _semantic_events(
-                session,
-                source=source,
-                field=field,
-                project_id=project_id,
-                from_date=from_date,
-                to_date=to_date,
-                limit=limit,
-            )
-        )
-
-    filtered_events = [event for event in events if _event_matches_view(event, normalized_view)]
-    filtered_events.sort(key=_event_sort_key, reverse=True)
+    candidates = _activity_candidates(
+        session,
+        event_type=normalized_type,
+        view=normalized_view,
+        source=source,
+        field=field,
+        actor=actor,
+        project_id=project_id,
+        market=market,
+        jurisdiction=jurisdiction,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+    )
+    events = _events_for_candidates(session, candidates)
     return ActivityFeedResponse(
         generated_at=datetime.now(UTC).isoformat(),
-        events=filtered_events[:limit],
+        events=events,
     )
 
 
@@ -142,12 +104,603 @@ def list_activity_semantic_metrics(
     to_date: date | None = None,
 ) -> ActivitySemanticMetricsResponse:
     del user
-    rows = _semantic_rows(
+    metrics = _semantic_metric_rows(
         session,
         source=source,
+        field=field,
+        market=market,
         from_date=from_date,
         to_date=to_date,
-        limit=MAX_SEMANTIC_METRIC_ROWS,
+    )
+    return ActivitySemanticMetricsResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        thresholds={
+            "glossary_gap_rate": SEMANTIC_GAP_RATE_THRESHOLD,
+            "unmappable_rate": SEMANTIC_UNMAPPABLE_RATE_THRESHOLD,
+            "reviewer_rejection_sigma": SEMANTIC_REJECTION_SIGMA_THRESHOLD,
+        },
+        metrics=metrics,
+    )
+
+
+def _activity_candidates(
+    session: Session,
+    *,
+    event_type: str | None,
+    view: str,
+    source: str | None,
+    field: str | None,
+    actor: str | None,
+    project_id: uuid.UUID | None,
+    market: str | None,
+    jurisdiction: str | None,
+    from_date: date | None,
+    to_date: date | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    event_types = _candidate_event_types(event_type=event_type, view=view)
+    if not event_types:
+        return []
+    parts: list[str] = []
+    if "change" in event_types:
+        parts.append(_CHANGE_CANDIDATE_SQL)
+    if "resolution" in event_types:
+        parts.append(_RESOLUTION_CANDIDATE_SQL)
+    if "agent" in event_types:
+        parts.append(_AGENT_CANDIDATE_SQL)
+    if "semantic" in event_types:
+        parts.append(_SEMANTIC_CANDIDATE_SQL)
+    if not parts:
+        return []
+    from_at, to_at = _date_params(from_date=from_date, to_date=to_date)
+    actor_uuid = _uuid_or_none(actor)
+    statement = text(
+        "WITH candidates AS ("
+        + "\nUNION ALL\n".join(parts)
+        + """
+)
+SELECT event_type, event_id, interpretation_index
+FROM candidates
+ORDER BY occurred_at DESC, event_type ASC, event_id ASC, interpretation_index ASC NULLS FIRST
+LIMIT :limit
+"""
+    )
+    rows = session.execute(
+        statement,
+        {
+            "source": source,
+            "field": field,
+            "actor": actor,
+            "actor_uuid": str(actor_uuid) if actor_uuid else None,
+            "project_id": str(project_id) if project_id else None,
+            "market": market,
+            "jurisdiction": jurisdiction,
+            "from_at": from_at,
+            "to_at": to_at,
+            "limit": limit,
+            "change_auto_applied": view == "auto_applied",
+            "agent_auto_applied": view == "auto_applied",
+            "parse_ok": NewsExtractionParseStatus.OK.value,
+        },
+    ).mappings()
+    return [dict(row) for row in rows]
+
+
+def _candidate_event_types(*, event_type: str | None, view: str) -> set[str]:
+    if event_type is not None:
+        allowed = {event_type}
+    elif view == "agent":
+        allowed = {"agent"}
+    elif view == "semantic":
+        allowed = {"semantic"}
+    elif view == "auto_applied":
+        allowed = {"change", "resolution", "agent"}
+    else:
+        allowed = set(EVENT_TYPES)
+    return allowed & EVENT_TYPES
+
+
+_PROJECT_FILTER_SQL = """
+AND (CAST(:project_id AS text) IS NULL OR p.id::text = CAST(:project_id AS text))
+AND (
+    CAST(:market AS text) IS NULL
+    OR p.market = CAST(:market AS text)
+    OR m.slug = CAST(:market AS text)
+)
+AND (
+    CAST(:jurisdiction AS text) IS NULL
+    OR p.jurisdiction = CAST(:jurisdiction AS text)
+    OR j.slug = CAST(:jurisdiction AS text)
+)
+"""
+
+_CHANGE_CANDIDATE_SQL = f"""
+SELECT
+    'change'::text AS event_type,
+    cl.id::text AS event_id,
+    NULL::integer AS interpretation_index,
+    cl.timestamp AS occurred_at
+FROM change_log cl
+JOIN projects p ON p.id = cl.project_id
+LEFT JOIN markets m ON m.id = p.market_id
+LEFT JOIN jurisdictions j ON j.id = p.jurisdiction_id
+WHERE (CAST(:source AS text) IS NULL OR cl.source = CAST(:source AS text))
+AND (CAST(:field AS text) IS NULL OR cl.field = CAST(:field AS text))
+AND (
+    CAST(:actor AS text) IS NULL
+    OR cl.reviewed_by_email = CAST(:actor AS text)
+    OR cl.reviewed_by = CAST(:actor AS text)
+    OR (
+        CAST(:actor_uuid AS text) IS NOT NULL
+        AND cl.reviewed_by_user_id::text = CAST(:actor_uuid AS text)
+    )
+)
+AND (CAST(:change_auto_applied AS boolean) = false OR cl.review_item_id IS NULL)
+AND (
+    CAST(:from_at AS timestamp with time zone) IS NULL
+    OR cl.timestamp >= CAST(:from_at AS timestamp with time zone)
+)
+AND (
+    CAST(:to_at AS timestamp with time zone) IS NULL
+    OR cl.timestamp <= CAST(:to_at AS timestamp with time zone)
+)
+{_PROJECT_FILTER_SQL}
+"""
+
+_RESOLUTION_CANDIDATE_SQL = f"""
+SELECT
+    'resolution'::text AS event_type,
+    rl.id::text AS event_id,
+    NULL::integer AS interpretation_index,
+    rl.created_at AS occurred_at
+FROM resolution_log rl
+JOIN projects p ON p.id = rl.project_id
+LEFT JOIN markets m ON m.id = p.market_id
+LEFT JOIN jurisdictions j ON j.id = p.jurisdiction_id
+WHERE (
+    CAST(:source AS text) IS NULL
+    OR CAST(:source AS text) = 'resolution_engine'
+)
+AND (CAST(:field AS text) IS NULL OR rl.field = CAST(:field AS text))
+AND rl.current_value IS DISTINCT FROM rl.resolved_value
+AND (
+    CAST(:from_at AS timestamp with time zone) IS NULL
+    OR rl.created_at >= CAST(:from_at AS timestamp with time zone)
+)
+AND (
+    CAST(:to_at AS timestamp with time zone) IS NULL
+    OR rl.created_at <= CAST(:to_at AS timestamp with time zone)
+)
+{_PROJECT_FILTER_SQL}
+"""
+
+_AGENT_CANDIDATE_SQL = f"""
+SELECT
+    'agent'::text AS event_type,
+    ar.id::text AS event_id,
+    NULL::integer AS interpretation_index,
+    ar.created_at AS occurred_at
+FROM agent_runs ar
+LEFT JOIN projects p ON p.id = ar.project_id
+LEFT JOIN markets m ON m.id = p.market_id
+LEFT JOIN jurisdictions j ON j.id = p.jurisdiction_id
+LEFT JOIN news_articles na
+    ON ar.intake_source_type = 'news_article'
+    AND ar.intake_record_id = na.id::text
+LEFT JOIN news_sources ns ON ns.id = na.news_source_id
+WHERE (
+    CAST(:source AS text) IS NULL
+    OR ar.intake_source_type = CAST(:source AS text)
+    OR ns.slug = CAST(:source AS text)
+)
+AND (
+    CAST(:actor AS text) IS NULL
+    OR ar.profile_name = CAST(:actor AS text)
+    OR ar.outcome = CAST(:actor AS text)
+)
+AND (
+    CAST(:agent_auto_applied AS boolean) = false
+    OR NOT EXISTS (
+        SELECT 1
+        FROM agent_run_review_items ari
+        WHERE ari.agent_run_id = ar.id
+    )
+)
+AND (
+    CAST(:from_at AS timestamp with time zone) IS NULL
+    OR ar.created_at >= CAST(:from_at AS timestamp with time zone)
+)
+AND (
+    CAST(:to_at AS timestamp with time zone) IS NULL
+    OR ar.created_at <= CAST(:to_at AS timestamp with time zone)
+)
+{_PROJECT_FILTER_SQL}
+"""
+
+_SEMANTIC_REFERENCE_JOIN_SQL = """
+LEFT JOIN LATERAL (
+    SELECT
+        COALESCE(
+            interp.item #>> '{metadata,reference_id}',
+            interp.item #>> '{metadata,source_reference_id}',
+            interp.item #>> '{metadata,pass2b_reference_id}',
+            interp.item #>> '{signal_flags,reference_id}',
+            interp.item #>> '{signal_flags,source_reference_id}',
+            interp.item #>> '{signal_flags,pass2b_reference_id}'
+        ) AS reference_id,
+        COALESCE(
+            interp.item #>> '{metadata,reference_index}',
+            interp.item #>> '{signal_flags,reference_index}'
+        ) AS reference_index
+) ref ON true
+LEFT JOIN LATERAL (
+    SELECT r.*
+    FROM news_project_references r
+    WHERE r.extraction_id = nsi.extraction_id
+    AND (
+        (ref.reference_id IS NOT NULL AND r.id::text = ref.reference_id)
+        OR (
+            ref.reference_index ~ '^[0-9]+$'
+            AND r.reference_index = ref.reference_index::integer
+        )
+        OR (
+            ref.reference_id IS NULL
+            AND ref.reference_index IS NULL
+            AND (
+                SELECT count(*)
+                FROM news_project_references sr
+                WHERE sr.extraction_id = nsi.extraction_id
+            ) = 1
+        )
+    )
+    ORDER BY
+        CASE
+            WHEN ref.reference_id IS NOT NULL AND r.id::text = ref.reference_id THEN 0
+            WHEN ref.reference_index ~ '^[0-9]+$'
+                AND r.reference_index = ref.reference_index::integer THEN 1
+            ELSE 2
+        END,
+        r.reference_index ASC
+    LIMIT 1
+) npr ON true
+"""
+
+_SEMANTIC_CANDIDATE_SQL = f"""
+SELECT
+    'semantic'::text AS event_type,
+    nsi.id::text AS event_id,
+    (interp.ordinality - 1)::integer AS interpretation_index,
+    nsi.created_at AS occurred_at
+FROM news_semantic_interpretations nsi
+JOIN news_articles na ON na.id = nsi.article_id
+LEFT JOIN news_sources ns ON ns.id = na.news_source_id
+CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(nsi.output_json -> 'interpretations', '[]'::jsonb)
+) WITH ORDINALITY AS interp(item, ordinality)
+{_SEMANTIC_REFERENCE_JOIN_SQL}
+LEFT JOIN projects p ON p.id = npr.matched_project_id
+LEFT JOIN markets m ON m.id = p.market_id
+LEFT JOIN jurisdictions j ON j.id = p.jurisdiction_id
+WHERE nsi.parse_status = CAST(:parse_ok AS text)
+AND (
+    CAST(:source AS text) IS NULL
+    OR CAST(:source AS text) IN ('semantic', 'semantic.news_v1')
+    OR ns.slug = CAST(:source AS text)
+)
+AND (
+    CAST(:field AS text) IS NULL
+    OR interp.item ->> 'field_name' = CAST(:field AS text)
+)
+AND (
+    CAST(:from_at AS timestamp with time zone) IS NULL
+    OR nsi.created_at >= CAST(:from_at AS timestamp with time zone)
+)
+AND (
+    CAST(:to_at AS timestamp with time zone) IS NULL
+    OR nsi.created_at <= CAST(:to_at AS timestamp with time zone)
+)
+{_PROJECT_FILTER_SQL}
+"""
+
+
+def _events_for_candidates(
+    session: Session,
+    candidates: list[dict[str, Any]],
+) -> list[ActivityEventResponse]:
+    change_ids: list[uuid.UUID] = []
+    resolution_ids: list[uuid.UUID] = []
+    agent_ids: list[uuid.UUID] = []
+    semantic_keys: list[tuple[uuid.UUID, int]] = []
+    for candidate in candidates:
+        event_id = _uuid_or_none(candidate.get("event_id"))
+        if event_id is None:
+            continue
+        if candidate["event_type"] == "change":
+            change_ids.append(event_id)
+        elif candidate["event_type"] == "resolution":
+            resolution_ids.append(event_id)
+        elif candidate["event_type"] == "agent":
+            agent_ids.append(event_id)
+        elif candidate["event_type"] == "semantic":
+            semantic_keys.append((event_id, int(candidate.get("interpretation_index") or 0)))
+
+    events_by_key: dict[tuple[str, uuid.UUID, int | None], ActivityEventResponse] = {}
+    for event_id, event in _change_events_by_ids(session, change_ids).items():
+        events_by_key[("change", event_id, None)] = event
+    for event_id, event in _resolution_events_by_ids(session, resolution_ids).items():
+        events_by_key[("resolution", event_id, None)] = event
+    for event_id, event in _agent_events_by_ids(session, agent_ids).items():
+        events_by_key[("agent", event_id, None)] = event
+    for key, event in _semantic_events_by_keys(session, semantic_keys).items():
+        events_by_key[("semantic", key[0], key[1])] = event
+
+    events: list[ActivityEventResponse] = []
+    for candidate in candidates:
+        event_id = _uuid_or_none(candidate.get("event_id"))
+        if event_id is None:
+            continue
+        interpretation_index = (
+            int(candidate["interpretation_index"])
+            if candidate["event_type"] == "semantic"
+            else None
+        )
+        event = events_by_key.get((candidate["event_type"], event_id, interpretation_index))
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _date_params(
+    *,
+    from_date: date | None,
+    to_date: date | None,
+) -> tuple[datetime | None, datetime | None]:
+    from_at = datetime.combine(from_date, time.min, tzinfo=UTC) if from_date else None
+    to_at = datetime.combine(to_date, time.max, tzinfo=UTC) if to_date else None
+    return from_at, to_at
+
+
+def _semantic_metric_rows(
+    session: Session,
+    *,
+    source: str | None,
+    field: str | None,
+    market: str | None,
+    from_date: date | None,
+    to_date: date | None,
+) -> list[ActivitySemanticMetricResponse]:
+    from_at, to_at = _date_params(from_date=from_date, to_date=to_date)
+    rows = session.execute(
+        text(
+            f"""
+WITH semantic_items AS (
+    SELECT
+        p.market AS market,
+        ns.slug AS source_slug,
+        ns.name AS source_name,
+        interp.item ->> 'field_name' AS field_name,
+        interp.item ->> 'reason_code' AS reason_code,
+        (interp.item #>> '{{signal_flags,glossary_gap_observed}}') = 'true'
+            AS glossary_gap_observed
+    FROM news_semantic_interpretations nsi
+    JOIN news_articles na ON na.id = nsi.article_id
+    LEFT JOIN news_sources ns ON ns.id = na.news_source_id
+    CROSS JOIN LATERAL jsonb_array_elements(
+        COALESCE(nsi.output_json -> 'interpretations', '[]'::jsonb)
+    ) WITH ORDINALITY AS interp(item, ordinality)
+    {_SEMANTIC_REFERENCE_JOIN_SQL}
+    LEFT JOIN projects p ON p.id = npr.matched_project_id
+    LEFT JOIN markets m ON m.id = p.market_id
+    WHERE nsi.parse_status = CAST(:parse_ok AS text)
+    AND (
+        CAST(:source AS text) IS NULL
+        OR CAST(:source AS text) IN ('semantic', 'semantic.news_v1')
+        OR ns.slug = CAST(:source AS text)
+    )
+    AND (
+        CAST(:field AS text) IS NULL
+        OR interp.item ->> 'field_name' = CAST(:field AS text)
+    )
+    AND (
+        CAST(:market AS text) IS NULL
+        OR p.market = CAST(:market AS text)
+        OR m.slug = CAST(:market AS text)
+    )
+    AND (
+        CAST(:from_at AS timestamp with time zone) IS NULL
+        OR nsi.created_at >= CAST(:from_at AS timestamp with time zone)
+    )
+    AND (
+        CAST(:to_at AS timestamp with time zone) IS NULL
+        OR nsi.created_at <= CAST(:to_at AS timestamp with time zone)
+    )
+)
+SELECT
+    market,
+    source_slug,
+    source_name,
+    field_name,
+    reason_code,
+    count(*)::integer AS total_count,
+    count(*) FILTER (WHERE glossary_gap_observed)::integer AS glossary_gap_count,
+    count(*) FILTER (WHERE reason_code LIKE '%\\_unmappable' ESCAPE '\\')::integer
+        AS unmappable_count
+FROM semantic_items
+WHERE field_name IS NOT NULL
+AND reason_code IS NOT NULL
+GROUP BY market, source_slug, source_name, field_name, reason_code
+ORDER BY market NULLS LAST, source_slug NULLS LAST, field_name, reason_code
+"""
+        ),
+        {
+            "source": source,
+            "field": field,
+            "market": market,
+            "from_at": from_at,
+            "to_at": to_at,
+            "parse_ok": NewsExtractionParseStatus.OK.value,
+        },
+    ).mappings()
+    metrics: list[ActivitySemanticMetricResponse] = []
+    for row in rows:
+        total_count = int(row["total_count"] or 0)
+        glossary_gap_count = int(row["glossary_gap_count"] or 0)
+        unmappable_count = int(row["unmappable_count"] or 0)
+        metrics.append(
+            ActivitySemanticMetricResponse(
+                market=row["market"],
+                source_slug=row["source_slug"],
+                source_name=row["source_name"],
+                field_name=row["field_name"],
+                field_label=_field_label(row["field_name"]),
+                reason_code=row["reason_code"],
+                total_count=total_count,
+                glossary_gap_count=glossary_gap_count,
+                unmappable_count=unmappable_count,
+                glossary_gap_rate=glossary_gap_count / total_count if total_count else 0.0,
+                unmappable_rate=unmappable_count / total_count if total_count else 0.0,
+            )
+        )
+    return metrics
+
+
+def _change_events_by_ids(
+    session: Session,
+    ids: list[uuid.UUID],
+) -> dict[uuid.UUID, ActivityEventResponse]:
+    unique_ids = sorted(set(ids))
+    if not unique_ids:
+        return {}
+    rows = session.execute(select(ChangeLog).where(ChangeLog.id.in_(unique_ids))).scalars().all()
+    projects = _projects_by_id(session, [row.project_id for row in rows])
+    return {row.id: _change_event(row, project=projects.get(row.project_id)) for row in rows}
+
+
+def _change_event(
+    row: ChangeLog,
+    *,
+    project: Project | None,
+) -> ActivityEventResponse:
+    return ActivityEventResponse(
+        id=f"change:{row.id}",
+        event_type="change",
+        occurred_at=row.timestamp.isoformat(),
+        project=_project_summary(project),
+        source=row.source,
+        source_label=_source_label(row.source),
+        field=row.field,
+        field_label=_field_label(row.field),
+        actor_label=_actor_label(
+            row.reviewed_by_email,
+            row.reviewed_by,
+            row.reviewed_by_user_id,
+        ),
+        title=f"{_field_label(row.field)} changed",
+        summary=f"{_format_value(row.old_value)} to {_format_value(row.new_value)}",
+        old_value=row.old_value,
+        new_value=row.new_value,
+        change_type=row.change_type.value,
+        priority=row.priority.value,
+        review_item_id=row.review_item_id,
+        detail={
+            "reviewed_by": row.reviewed_by,
+            "reviewed_by_user_id": str(row.reviewed_by_user_id)
+            if row.reviewed_by_user_id
+            else None,
+            "reviewed_by_email": row.reviewed_by_email,
+        },
+    )
+
+
+def _resolution_events_by_ids(
+    session: Session,
+    ids: list[uuid.UUID],
+) -> dict[uuid.UUID, ActivityEventResponse]:
+    unique_ids = sorted(set(ids))
+    if not unique_ids:
+        return {}
+    rows = (
+        session.execute(select(ResolutionLog).where(ResolutionLog.id.in_(unique_ids)))
+        .scalars()
+        .all()
+    )
+    projects = _projects_by_id(session, [row.project_id for row in rows])
+    return {row.id: _resolution_event(row, project=projects.get(row.project_id)) for row in rows}
+
+
+def _resolution_event(
+    row: ResolutionLog,
+    *,
+    project: Project | None,
+) -> ActivityEventResponse:
+    return ActivityEventResponse(
+        id=f"resolution:{row.id}",
+        event_type="resolution",
+        occurred_at=row.created_at.isoformat(),
+        project=_project_summary(project),
+        source="resolution_engine",
+        source_label="Resolution engine",
+        field=row.field,
+        field_label=_field_label(row.field),
+        actor_label="system",
+        title=f"{_field_label(row.field)} resolved",
+        summary=f"{_format_value(row.current_value)} to {_format_value(row.resolved_value)}",
+        old_value=row.current_value,
+        new_value=row.resolved_value,
+        change_type="resolved",
+        priority=None,
+        detail={
+            "rule_applied": row.rule_applied,
+            "confidence": row.confidence.value if row.confidence else None,
+            "evidence_ids": [str(evidence_id) for evidence_id in (row.evidence_ids or [])],
+        },
+    )
+
+
+def _agent_events_by_ids(
+    session: Session,
+    ids: list[uuid.UUID],
+) -> dict[uuid.UUID, ActivityEventResponse]:
+    unique_ids = sorted(set(ids))
+    if not unique_ids:
+        return {}
+    rows = session.execute(select(AgentRun).where(AgentRun.id.in_(unique_ids))).scalars().all()
+    projects = _projects_by_id(session, [row.project_id for row in rows if row.project_id])
+    review_item_ids_by_agent = _review_item_ids_by_agent(session, [row.id for row in rows])
+    articles = _news_articles_by_id(session, [_news_article_id(row) for row in rows])
+    source_names = _news_sources_by_id(
+        session,
+        [article.news_source_id for article in articles.values()],
+    )
+    events: dict[uuid.UUID, ActivityEventResponse] = {}
+    for row in rows:
+        article_id = _news_article_id(row)
+        article = articles.get(article_id) if article_id is not None else None
+        news_source = source_names.get(article.news_source_id) if article is not None else None
+        events[row.id] = _agent_event(
+            row,
+            project=projects.get(row.project_id) if row.project_id else None,
+            review_item_ids=review_item_ids_by_agent.get(row.id, []),
+            article=article,
+            news_source=news_source,
+        )
+    return events
+
+
+def _semantic_events_by_keys(
+    session: Session,
+    keys: list[tuple[uuid.UUID, int]],
+) -> dict[tuple[uuid.UUID, int], ActivityEventResponse]:
+    row_ids = sorted({row_id for row_id, _ in keys})
+    if not row_ids:
+        return {}
+    wanted_indexes_by_row: dict[uuid.UUID, set[int]] = {}
+    for row_id, index in keys:
+        wanted_indexes_by_row.setdefault(row_id, set()).add(index)
+    rows = (
+        session.execute(select(NewsSemanticInterpretation).where(NewsSemanticInterpretation.id.in_(row_ids)))
+        .scalars()
+        .all()
     )
     articles = _news_articles_by_id(session, [row.article_id for row in rows])
     source_names = _news_sources_by_id(
@@ -162,79 +715,33 @@ def list_activity_semantic_metrics(
         session,
         [row.extraction_id for row in rows],
     )
-    semantic_items: list[tuple[NewsSemanticInterpretation, dict[str, Any], uuid.UUID | None]] = []
+    event_specs: list[tuple[NewsSemanticInterpretation, int, dict[str, Any], uuid.UUID | None]] = []
     for row in rows:
         references = references_by_extraction.get(row.extraction_id, [])
-        for interpretation in _semantic_payloads(row):
+        wanted_indexes = wanted_indexes_by_row.get(row.id, set())
+        for index, interpretation in enumerate(_semantic_payloads(row)):
+            if index not in wanted_indexes:
+                continue
             project_id = _semantic_project_id_for_interpretation(interpretation, references)
-            semantic_items.append((row, interpretation, project_id))
-    projects = _projects_by_id(session, [project_id for _, _, project_id in semantic_items])
-    total: Counter[tuple[str | None, str | None, str | None, str, str]] = Counter()
-    gaps: Counter[tuple[str | None, str | None, str | None, str, str]] = Counter()
-    unmappable: Counter[tuple[str | None, str | None, str | None, str, str]] = Counter()
-    for row, interpretation, project_id in semantic_items:
+            event_specs.append((row, index, interpretation, project_id))
+    projects = _projects_by_id(session, [project_id for _, _, _, project_id in event_specs])
+    events: dict[tuple[uuid.UUID, int], ActivityEventResponse] = {}
+    for row, index, interpretation, project_id in event_specs:
         article = articles.get(row.article_id)
-        source_row = (
+        news_source = (
             source_names.get(article.news_source_id)
             if article is not None and article.news_source_id is not None
             else None
         )
-        project = projects.get(project_id) if project_id is not None else None
-        if market and (project is None or project.market != market):
-            continue
-        field_name = _clean_text(interpretation.get("field_name"))
-        reason_code = _clean_text(interpretation.get("reason_code"))
-        if field_name is None or reason_code is None:
-            continue
-        if field and field_name != field:
-            continue
-        key = (
-            project.market if project is not None else None,
-            source_row.slug if source_row is not None else None,
-            source_row.name if source_row is not None else None,
-            field_name,
-            reason_code,
+        events[(row.id, index)] = _semantic_event(
+            row,
+            index=index,
+            interpretation=interpretation,
+            project=projects.get(project_id) if project_id is not None else None,
+            article=article,
+            news_source=news_source,
         )
-        total[key] += 1
-        signal_flags = _mapping_or_empty(interpretation.get("signal_flags"))
-        if signal_flags.get("glossary_gap_observed") is True:
-            gaps[key] += 1
-        if reason_code.endswith("_unmappable"):
-            unmappable[key] += 1
-    metrics = [
-        ActivitySemanticMetricResponse(
-            market=metric_market,
-            source_slug=source_slug,
-            source_name=source_name,
-            field_name=field_name,
-            field_label=_field_label(field_name),
-            reason_code=reason_code,
-            total_count=count,
-            glossary_gap_count=gaps[key],
-            unmappable_count=unmappable[key],
-            glossary_gap_rate=gaps[key] / count if count else 0.0,
-            unmappable_rate=unmappable[key] / count if count else 0.0,
-        )
-        for key, count in total.items()
-        for metric_market, source_slug, source_name, field_name, reason_code in [key]
-    ]
-    metrics.sort(
-        key=lambda item: (
-            item.market or "",
-            item.source_slug or "",
-            item.field_name,
-            item.reason_code,
-        )
-    )
-    return ActivitySemanticMetricsResponse(
-        generated_at=datetime.now(UTC).isoformat(),
-        thresholds={
-            "glossary_gap_rate": SEMANTIC_GAP_RATE_THRESHOLD,
-            "unmappable_rate": SEMANTIC_UNMAPPABLE_RATE_THRESHOLD,
-            "reviewer_rejection_sigma": SEMANTIC_REJECTION_SIGMA_THRESHOLD,
-        },
-        metrics=metrics,
-    )
+    return events
 
 
 def _change_events(

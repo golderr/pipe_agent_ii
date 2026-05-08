@@ -35,9 +35,13 @@ project, article, review-item, semantic reason-code, agent reasoning, cost, and
 timing context where available.
 
 Supported filters include `view`, `event_type`, `source`, `field`, `actor`,
-`project_id`, `from_date`, `to_date`, and `limit`. The first saved-view presets
-are `agent`, `auto_applied`, and `semantic`; later AGENT.2 step 11 work can add
-market/jurisdiction slicing on the feed and richer evidence drill-through.
+`project_id`, `market`, `jurisdiction`, `from_date`, `to_date`, and `limit`.
+The first saved-view presets are `agent`, `auto_applied`, and `semantic`;
+richer evidence drill-through remains a later AGENT.2 step 11 follow-up.
+Candidate rows are selected with one ordered SQL union across change,
+resolution, agent, and semantic sources before hydration, so `limit` applies to
+the newest rows across the whole feed rather than independently per source
+type.
 
 `source` is an exact event-source filter. Change rows match `change_log.source`.
 Resolution rows match only `resolution_engine`. News-agent rows match either the
@@ -58,9 +62,11 @@ semantic event source is `semantic.news_v1`; publisher-source filters such as
 `GET /activity/semantic-metrics` is a companion aggregation endpoint for Pass 2c
 monitoring. Supported filters are `source`, `field`, `market`, `from_date`, and
 `to_date`. It returns source/field/market-aware reason-code counts with
-glossary-gap and unmappable rates. Reviewer-rejection-rate metrics are present
-in the response shape but remain `0` / `null` until review decisions can be
-joined back to semantic-origin rows consistently.
+glossary-gap and unmappable rates. Aggregation runs in SQL against
+`news_semantic_interpretations` rows rather than a capped Python sample.
+Reviewer-rejection-rate metrics are present in the response shape but remain
+`0` / `null` until review decisions can be joined back to semantic-origin rows
+consistently.
 
 For news-agent rows, the response exposes both `article_fetched_at` and
 `agent_created_at` so researchers can distinguish article arrival time from the

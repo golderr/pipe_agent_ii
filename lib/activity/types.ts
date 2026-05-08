@@ -80,6 +80,8 @@ export type ActivityQuery = {
   field: string | null;
   actor: string | null;
   projectId: string | null;
+  market: string | null;
+  jurisdiction: string | null;
   from: string | null;
   to: string | null;
 };

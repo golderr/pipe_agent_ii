@@ -19,6 +19,8 @@ export async function getActivityData(query: ActivityQuery): Promise<ActivityDat
     appendParam(params, "field", query.field);
     appendParam(params, "actor", query.actor);
     appendParam(params, "project_id", query.projectId);
+    appendParam(params, "market", query.market);
+    appendParam(params, "jurisdiction", query.jurisdiction);
     appendParam(params, "from_date", query.from);
     appendParam(params, "to_date", query.to);
     params.set("limit", "300");
@@ -52,6 +54,7 @@ export async function getActivitySemanticMetrics(
     const params = new URLSearchParams();
     appendParam(params, "source", query.source);
     appendParam(params, "field", query.field);
+    appendParam(params, "market", query.market);
     appendParam(params, "from_date", query.from);
     appendParam(params, "to_date", query.to);
 

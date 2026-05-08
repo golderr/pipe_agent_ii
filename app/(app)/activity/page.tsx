@@ -75,6 +75,8 @@ function activityHrefForView(query: ActivityQuery, view: string) {
   setQueryParam(params, "field", query.field);
   setQueryParam(params, "actor", query.actor);
   setQueryParam(params, "project_id", query.projectId);
+  setQueryParam(params, "market", query.market);
+  setQueryParam(params, "jurisdiction", query.jurisdiction);
   setQueryParam(params, "from", query.from);
   setQueryParam(params, "to", query.to);
   return `/activity?${params.toString()}`;
@@ -95,6 +97,8 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
     field: firstQueryValue(params.field) ?? null,
     actor: firstQueryValue(params.actor) ?? null,
     projectId: firstQueryValue(params.project_id) ?? null,
+    market: firstQueryValue(params.market) ?? null,
+    jurisdiction: firstQueryValue(params.jurisdiction) ?? null,
     from: firstQueryValue(params.from) ?? null,
     to: firstQueryValue(params.to) ?? null
   };
@@ -175,6 +179,8 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
             <FilterSelect label="Field" name="field" options={FIELD_OPTIONS} value={query.field ?? ""} />
             <FilterInput label="Actor/profile" name="actor" value={query.actor ?? ""} />
             <FilterInput label="Project ID" name="project_id" value={query.projectId ?? ""} />
+            <FilterInput label="Market" name="market" value={query.market ?? ""} />
+            <FilterInput label="Jurisdiction" name="jurisdiction" value={query.jurisdiction ?? ""} />
             <FilterInput label="From" name="from" type="date" value={query.from ?? ""} />
             <FilterInput label="To" name="to" type="date" value={query.to ?? ""} />
             <button
@@ -187,6 +193,7 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
           <SemanticMetricsPanel
             error={semanticMetricsResult.error}
             metrics={semanticMetricsResult.data?.metrics ?? []}
+            thresholds={semanticMetricsResult.data?.thresholds ?? {}}
           />
         </aside>
       </div>
@@ -388,12 +395,16 @@ function eventTypeLabel(eventType: ActivityEvent["event_type"]) {
 
 function SemanticMetricsPanel({
   error,
-  metrics
+  metrics,
+  thresholds
 }: {
   error: string | null;
   metrics: ActivitySemanticMetric[];
+  thresholds: Record<string, number>;
 }) {
   const visible = metrics.slice(0, 6);
+  const gapThreshold = thresholds.glossary_gap_rate ?? 0.15;
+  const unmappableThreshold = thresholds.unmappable_rate ?? 0.05;
   return (
     <div className="mt-5 border-t border-slate-200 pt-4">
       <div className="flex items-center gap-2">
@@ -403,25 +414,36 @@ function SemanticMetricsPanel({
       {error ? <p className="mt-2 text-xs text-red-700">{error}</p> : null}
       {!error && visible.length ? (
         <div className="mt-3 space-y-2">
-          {visible.map((metric) => (
-            <div
-              className="rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-xs"
-              key={`${metric.market ?? "none"}:${metric.source_slug ?? "none"}:${metric.field_name}:${metric.reason_code}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate font-medium text-slate-900">
-                  {metric.field_label}
-                </span>
-                <span className="text-slate-500">{metric.total_count}</span>
+          {visible.map((metric) => {
+            const alert =
+              metric.glossary_gap_rate > gapThreshold ||
+              metric.unmappable_rate > unmappableThreshold;
+            return (
+              <div
+                className={cn(
+                  "rounded-md border px-2 py-2 text-xs",
+                  alert
+                    ? "border-amber-300 bg-amber-50 text-amber-950"
+                    : "border-slate-200 bg-slate-50"
+                )}
+                key={`${metric.market ?? "none"}:${metric.source_slug ?? "none"}:${metric.field_name}:${metric.reason_code}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate font-medium text-slate-900">
+                    {metric.field_label}
+                  </span>
+                  <span className="text-slate-500">{metric.total_count}</span>
+                </div>
+                <p className="mt-1 truncate text-slate-500">{metric.reason_code}</p>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+                  <span>gap {(metric.glossary_gap_rate * 100).toFixed(0)}%</span>
+                  <span>unmappable {(metric.unmappable_rate * 100).toFixed(0)}%</span>
+                  {metric.market ? <span>{metric.market}</span> : null}
+                  {alert ? <span className="font-medium text-amber-800">threshold exceeded</span> : null}
+                </div>
               </div>
-              <p className="mt-1 truncate text-slate-500">{metric.reason_code}</p>
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
-                <span>gap {(metric.glossary_gap_rate * 100).toFixed(0)}%</span>
-                <span>unmappable {(metric.unmappable_rate * 100).toFixed(0)}%</span>
-                {metric.market ? <span>{metric.market}</span> : null}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       {!error && !visible.length ? (
