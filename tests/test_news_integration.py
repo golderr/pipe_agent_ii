@@ -1487,7 +1487,6 @@ def test_news_integration_agent_creates_override_contradiction_item(
     client = FakeNewsAgentClient(
         {
             "decision": "recommend_accept_new",
-            "field": "workforce_units",
             "confidence": 0.81,
             "reason": "The article gives a newer explicit workforce-unit count.",
         }
@@ -1538,6 +1537,87 @@ def test_news_integration_agent_creates_override_contradiction_item(
         (agent_run.id, review_item.id),
     )
     assert link is not None
+
+
+def test_news_integration_override_contradiction_skips_raw_status_signal(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2160 Override Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Override Status Tower",
+    )
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    upsert_researcher_overrides(
+        postgres_session,
+        project,
+        {
+            "pipeline_status": {
+                "value": PipelineStatus.UNDER_CONSTRUCTION.value,
+                "set_by": "reviewer@example.com",
+                "set_at": "2026-04-01T12:00:00+00:00",
+                "mode": "review_protected",
+                "baseline": {
+                    "evidence_date": "2026-04-01",
+                    "collected_at": "2026-04-01T12:00:00+00:00",
+                    "source_tier": 3,
+                    "source_type": "costar",
+                },
+            }
+        },
+    )
+    extraction, _reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Override Status Tower",
+                candidate_address="2160 Override Boulevard, Los Angeles, CA 90012",
+                candidate_status_signal="topped_out",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient(
+        {
+            "decision": "recommend_accept_new",
+            "confidence": 0.81,
+            "reason": "Unused because raw status signals should not trigger override review.",
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests == []
+    assert postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one_or_none() is None
+    assert postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+        )
+    ).scalar_one_or_none() is None
 
 
 def test_news_integration_creates_possible_match_review_item(
@@ -2758,6 +2838,7 @@ def _reference_payload(
     candidate_identifiers: dict[str, list[str]] | None = None,
     candidate_product_type: str | None = None,
     candidate_age_restriction: str | None = None,
+    candidate_status_signal: str | None = None,
     candidate_confidence: str = "high",
     passage_excerpts: list[dict] | None = None,
     registry_project_id: str | None = None,
@@ -2772,7 +2853,7 @@ def _reference_payload(
         "candidate_unit_workforce": candidate_unit_workforce,
         "candidate_product_type": candidate_product_type,
         "candidate_age_restriction": candidate_age_restriction,
-        "candidate_status_signal": None,
+        "candidate_status_signal": candidate_status_signal,
         "candidate_delivery_year_text": None,
         "candidate_delivery_year_normalized": None,
         "candidate_signal_flags": {},

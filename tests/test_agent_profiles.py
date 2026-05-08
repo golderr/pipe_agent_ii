@@ -54,6 +54,8 @@ def test_news_agent_prompt_defines_override_contradiction_contract() -> None:
     assert "recommend_accept_new" in prompt
     assert "recommend_keep_override" in prompt
     assert "proposed alternatives" in prompt
+    assert "full override_contradictions payload" in prompt
+    assert '"field": "<field_name>"' not in prompt
 
 
 def test_normalize_agent_triggers_accepts_enums_and_strings() -> None:

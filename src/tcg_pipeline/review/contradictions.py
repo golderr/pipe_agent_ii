@@ -102,7 +102,7 @@ def detect_project_contradictions(
     field_resolutions: Mapping[str, FieldResolution],
     skip_review_item_ids: set[uuid.UUID] | None = None,
 ) -> ContradictionDetectionResult:
-    active_override_ids = _active_override_ids_by_field(session, project)
+    active_override_ids = active_override_ids_by_field(session, project)
     existing_items = _existing_override_contradiction_items_by_field(session, project)
     skip_review_item_ids = skip_review_item_ids or set()
     result = ContradictionDetectionResult()
@@ -308,7 +308,7 @@ def contradiction_payload(
     }
 
 
-def _active_override_ids_by_field(
+def active_override_ids_by_field(
     session: Session,
     project: Project,
 ) -> dict[str, uuid.UUID]:

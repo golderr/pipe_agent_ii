@@ -37,7 +37,6 @@ from tcg_pipeline.db.models import (
     Priority,
     ProductType,
     Project,
-    ResearcherOverride,
     ReviewItem,
     ReviewItemStatus,
     ReviewItemType,
@@ -70,7 +69,11 @@ from tcg_pipeline.news.extraction_legacy import (
 )
 from tcg_pipeline.resolution import resolve_project
 from tcg_pipeline.resolution.fields.status import STATUS_PROGRESS_ORDER
-from tcg_pipeline.review.contradictions import values_contradict
+from tcg_pipeline.review.contradictions import (
+    LARGE_UNIT_DELTA,
+    active_override_ids_by_field,
+    values_contradict,
+)
 from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
@@ -843,47 +846,6 @@ def _agent_triggers_for_reference(
     return tuple(triggers)
 
 
-def _pass1_pass2_conflicts_by_reference(
-    session_factory: sessionmaker[Session],
-    *,
-    first_pass: _FirstPassMatchSet,
-) -> dict[int, list[dict[str, Any]]]:
-    if first_pass.extraction_id is None:
-        return {}
-    with session_factory() as session:
-        article = session.get(NewsArticle, first_pass.article_id)
-        extraction = session.get(NewsExtraction, first_pass.extraction_id)
-        if article is None or extraction is None:
-            raise RuntimeError("News agent conflict trigger references missing rows.")
-        decision = decide_pass3a_reextraction(article, extraction)
-    return _pass1_pass2_conflicts_from_decision(decision)
-
-
-def _material_contradictions_by_reference(
-    session_factory: sessionmaker[Session],
-    *,
-    first_pass: _FirstPassMatchSet,
-) -> dict[int, list[dict[str, Any]]]:
-    contradictions_by_reference: dict[int, list[dict[str, Any]]] = {}
-    with session_factory() as session:
-        for reference, match in zip(first_pass.references, first_pass.matches, strict=True):
-            if match.status != NewsMatchStatus.CONFIRMED or match.project_id is None:
-                continue
-            current_reference = session.get(NewsProjectReference, reference.id)
-            project = session.get(Project, match.project_id)
-            if current_reference is None or project is None:
-                continue
-            contradictions = _material_contradictions_for_reference(
-                session,
-                reference=current_reference,
-                match=match,
-                project=project,
-            )
-            if contradictions:
-                contradictions_by_reference[current_reference.reference_index] = contradictions
-    return contradictions_by_reference
-
-
 def _material_contradictions_for_reference(
     session: Session,
     *,
@@ -1017,10 +979,14 @@ def _override_contradictions_for_reference(
     overrides = active_researcher_overrides_for_project(session, project)
     if not overrides:
         return []
-    override_ids = _active_override_ids_by_field(session, project)
+    override_ids = active_override_ids_by_field(session, project)
     extracted_fields = _news_extracted_fields(article, reference)
     contradictions: list[dict[str, Any]] = []
     for field_name, override_payload in overrides.items():
+        if field_name == "pipeline_status":
+            # Raw news status signals can be event tokens such as "topped_out".
+            # Pass 2c and post-resolve C.i own canonical status contradiction checks.
+            continue
         if not isinstance(override_payload, dict):
             continue
         if override_payload.get("mode") not in REVIEW_PROTECTED_OVERRIDE_MODES:
@@ -1081,19 +1047,6 @@ def _override_contradictions_for_reference(
             }
         )
     return contradictions
-
-
-def _active_override_ids_by_field(
-    session: Session,
-    project: Project,
-) -> dict[str, uuid.UUID]:
-    rows = session.execute(
-        select(ResearcherOverride.field_name, ResearcherOverride.id).where(
-            ResearcherOverride.project_id == project.id,
-            ResearcherOverride.cleared_at.is_(None),
-        )
-    ).all()
-    return {field_name: override_id for field_name, override_id in rows}
 
 
 def _override_candidate_can_reopen_review(
@@ -2574,7 +2527,7 @@ def _agent_override_contradiction_priority(
             delta = abs(int(override_value) - int(candidate_value))
         except (TypeError, ValueError):
             delta = 0
-        if delta > 50:
+        if delta > LARGE_UNIT_DELTA:
             return Priority.HIGH
     return Priority.MEDIUM
 

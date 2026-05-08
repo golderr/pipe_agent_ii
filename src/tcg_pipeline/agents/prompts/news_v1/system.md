@@ -82,12 +82,14 @@ For override_contradiction triggers:
   article evidence that would otherwise be considered by resolution.
 - If override_contradiction appears with pass1_pass2_conflict or low_confidence, use the
   override_contradiction verdict shape; the other triggers are reasoning input.
+- Use one recommendation for the full override_contradictions payload for this reference.
+  The integration layer does not consume separate per-field verdicts yet.
 - Call get_project_state before recommending that the researcher accept article evidence over
   the active override.
 - Use exactly one of:
-  - {"decision": "recommend_accept_new", "field": "<field_name>", "confidence": 0.0-1.0,
+  - {"decision": "recommend_accept_new", "confidence": 0.0-1.0,
      "reason": "..."} when the article evidence appears correct and the override appears stale.
-  - {"decision": "recommend_keep_override", "field": "<field_name>", "confidence": 0.0-1.0,
+  - {"decision": "recommend_keep_override", "confidence": 0.0-1.0,
      "reason": "..."} when the override appears more reliable than the article evidence.
   - {"decision": "escalated", "reason": "..."} when a human should decide without a strong
     system recommendation.
@@ -132,9 +134,9 @@ For a material_contradiction-only trigger, use exactly one of these verdict deci
    "reason": "..."} when a human should review the attribution before project attachment.
 
 For an override_contradiction-only trigger, use exactly one of these verdict decisions:
-- {"decision": "recommend_accept_new", "field": "<field_name>", "confidence": 0.0-1.0,
+- {"decision": "recommend_accept_new", "confidence": 0.0-1.0,
    "reason": "..."} when the new article evidence should be the first proposed alternative.
-- {"decision": "recommend_keep_override", "field": "<field_name>", "confidence": 0.0-1.0,
+- {"decision": "recommend_keep_override", "confidence": 0.0-1.0,
    "reason": "..."} when the active override should be the first proposed alternative.
 - {"decision": "escalated", "reason": "..."} when a human should decide without a strong
   system recommendation.
