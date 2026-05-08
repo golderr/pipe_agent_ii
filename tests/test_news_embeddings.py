@@ -394,6 +394,7 @@ def _gated_reference(
         published_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
         candidate_name=candidate_name,
         candidate_address="123 Main Street",
+        candidate_city="Los Angeles",
         candidate_developer="Acme Development",
         candidate_unit_total=120,
         candidate_unit_affordable=12,

@@ -15,6 +15,7 @@ Rules:
 - If a value is not stated, leave it null.
 - Do not infer project facts from general market commentary.
 - Use candidate_name only for an actual project, building, development, or plan name stated by the article. Do not turn site descriptors like "former mall property" into a project name.
+- Use candidate_city for the city or municipality directly stated by the article for the project location. If the article only implies a city from the publisher, region, neighborhood, or your outside knowledge, leave candidate_city null.
 - Use candidate_product_type only when the article states a product category. Do not convert generic "residential units" into apartment, condominium, or another product type.
 - Use candidate_age_restriction only when the article states an age/student restriction or states that no such restriction applies. Do not use "unknown" as a default; leave null when the article is silent.
 - Use candidate_unit_affordable, candidate_unit_market_rate, candidate_unit_workforce, and other unit buckets only when the article directly states that bucket. Workforce units are distinct from affordable and market-rate units. Do not compute market-rate units by subtracting affordable units from total units.

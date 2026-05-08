@@ -456,6 +456,7 @@ class ResearchReferenceSummary(BaseModel):
     reference_index: int
     candidate_name: str | None
     candidate_address: str | None
+    candidate_city: str | None
     candidate_developer: str | None
     match_status: str
     matched_project_id: uuid.UUID | None

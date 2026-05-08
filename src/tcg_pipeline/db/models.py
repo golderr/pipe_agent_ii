@@ -1408,6 +1408,7 @@ class NewsProjectReference(Base, TimestampMixin):
         Index("ix_news_project_references_article_id", "article_id"),
         Index("ix_news_project_references_matched_project_id", "matched_project_id"),
         Index("ix_news_project_references_match_status", "match_status"),
+        Index("ix_news_project_references_candidate_city", "candidate_city"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -1424,6 +1425,7 @@ class NewsProjectReference(Base, TimestampMixin):
     reference_index: Mapped[int] = mapped_column(Integer, nullable=False)
     candidate_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_city: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_developer: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_unit_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_unit_affordable: Mapped[int | None] = mapped_column(Integer, nullable=True)

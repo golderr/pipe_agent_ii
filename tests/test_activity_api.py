@@ -432,6 +432,11 @@ def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
     postgres_session: Session,
 ) -> None:
     project = _project(postgres_session, "300 Activity Way")
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        created_at=datetime(2026, 5, 8, 10, 7, tzinfo=UTC),
+    )
     review_item = ReviewItem(
         project_id=project.id,
         item_type=ReviewItemType.STATUS_CHANGE,
@@ -517,6 +522,49 @@ def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
         ("agent", None),
     ]
     assert response.events[-1].id == f"agent:{unlinked_agent.id}"
+
+
+def test_activity_feed_global_order_uses_stable_tiebreak(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "350 Activity Way")
+    timestamp = datetime(2026, 5, 8, 10, 0, tzinfo=UTC)
+    agent_run = _agent_run(postgres_session, project, created_at=timestamp)
+    change = ChangeLog(
+        project_id=project.id,
+        timestamp=timestamp,
+        source="urbanize_la",
+        field="pipeline_status",
+        old_value="Approved",
+        new_value="Under Construction",
+        change_type=ChangeType.RESEARCHER_CONFIRMED,
+        priority=Priority.HIGH,
+    )
+    resolution = ResolutionLog(
+        project_id=project.id,
+        field="total_units",
+        current_value=90,
+        resolved_value=100,
+        evidence_ids=[],
+        rule_applied="most_recent_wins",
+        confidence=StatusConfidence.HIGH,
+        created_at=timestamp,
+    )
+    postgres_session.add_all([change, resolution])
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert [event.id for event in response.events] == [
+        f"agent:{agent_run.id}",
+        f"change:{change.id}",
+        f"resolution:{resolution.id}",
+    ]
 
 
 def test_activity_feed_semantic_view_uses_pass2c_interpretation_rows(

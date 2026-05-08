@@ -14,6 +14,8 @@ This retry exists only to repair output quality:
   buckets, product type, age restrictions, or project IDs.
 - Keep workforce units in candidate_unit_workforce only; do not fold them into
   candidate_unit_affordable or candidate_unit_market_rate.
+- Keep candidate_city as the city or municipality directly stated for the
+  project location. If city is only implied, leave it null.
 - Every extracted non-null value must have at least one passage_excerpt anchoring it.
 - Use offset_start and offset_end from the original article body, not from offset
   marker text.

@@ -489,7 +489,7 @@ Detect intersection patterns ("corner of A and B", "intersection of A and B", "A
 - `signal_flags={"candidate_address_imprecise": true, "address_form": "intersection"}`.
 - `confidence=medium` on any address-derived match.
 
-The downstream geocoder (Geocodio + Esri fallback, already shipped) typically handles intersection queries with reduced confidence. The matcher consumes `candidate_address_imprecise=true` as a hint to weight name + developer + city more heavily than address proximity for ambiguous cases.
+The downstream geocoder (Geocodio + Esri fallback, already shipped) typically handles intersection queries with reduced confidence. The matcher consumes `candidate_address_imprecise=true` as a hint to weight name + developer + `candidate_city` more heavily than address proximity for ambiguous cases.
 
 Reason code: `news_address_intersection_synthesized`.
 
@@ -507,7 +507,7 @@ The Pass-2 extractor emits `candidate_name`, but the interpreter cleans it befor
 
 - Strip generic suffixes: "the project", "the development", "the proposed development", "the planned community".
 - Normalize capitalization (Title Case for proper nouns; preserve known stylizations like "ARBOR" or "iO" if explicitly stated).
-- Strip location parentheticals already covered elsewhere: "Helio (Los Angeles)" → `Helio` (city already in `candidate_address`).
+- Strip location parentheticals already covered elsewhere: "Helio (Los Angeles)" → `Helio` (city already in `candidate_city` or `candidate_address`).
 
 Detect aliases mentioned in the same article:
 
@@ -1003,3 +1003,7 @@ Testing for the LLM-backed Pass 2c interpreter follows the same pattern as the e
   - Event-token canonical values from the model (`topped_out`, `first_move_ins`) are normalized by reason-code mapping before project evidence/review proposed values are written.
   - Render cutover sets `NEWS_USE_LEGACY_SEMANTIC=false` on API and worker; legacy Pass 3 and AGENT.2 tool-loop kill switches remain unchanged.
   - The `interpret_v1` prompt now explicitly enumerates valid `pipeline_status.canonical_value` strings and says `glossary_gap_observed=true` is only for genuinely unfamiliar article phrasing.
+- **2026-05-08 (revision 10)** - `candidate_city` extraction context:
+  - News extraction now stores a nullable `candidate_city` on `news_project_references` when the article directly states or supports a project city/municipality.
+  - Pass 2c receives `candidate_city` in `pass2b_references` as context for ambiguous address/name/developer interpretation; it remains a classifier signal, not a matcher gate.
+  - The field exists primarily for H.0 multi-market source-overlap work: discard-reason classification and market-activation rematch over historical discarded references.

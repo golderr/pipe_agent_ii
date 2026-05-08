@@ -309,6 +309,7 @@ def test_news_integration_semantic_strong_status_auto_promotes(
             _reference_payload(
                 candidate_name="Semantic Tower",
                 candidate_address="1234 Semantic Boulevard, Los Angeles, CA 90026",
+                candidate_city="Los Angeles",
             )
         ],
     )
@@ -347,6 +348,7 @@ def test_news_integration_semantic_strong_status_auto_promotes(
     assert len(semantic_client.prompts) == 1
     prompt_payload = _json_payload(semantic_client.prompts[0].user_text)
     assert prompt_payload["project_context"][0]["project_id"] == str(project.id)
+    assert prompt_payload["pass2b_references"][0]["candidate_city"] == "Los Angeles"
     postgres_session.expire_all()
     refreshed_project = postgres_session.get(Project, project.id)
     assert refreshed_project is not None
@@ -2860,6 +2862,7 @@ def _reference_from_payload(
         reference_index=index,
         candidate_name=payload.get("candidate_name"),
         candidate_address=payload.get("candidate_address"),
+        candidate_city=payload.get("candidate_city"),
         candidate_developer=payload.get("candidate_developer"),
         candidate_unit_total=payload.get("candidate_unit_total"),
         candidate_unit_affordable=payload.get("candidate_unit_affordable"),
@@ -2885,6 +2888,7 @@ def _reference_payload(
     *,
     candidate_name: str | None = "Helio",
     candidate_address: str | None = None,
+    candidate_city: str | None = None,
     candidate_developer: str | None = None,
     candidate_unit_total: int | None = None,
     candidate_unit_workforce: int | None = None,
@@ -2899,6 +2903,7 @@ def _reference_payload(
     return {
         "candidate_name": candidate_name,
         "candidate_address": candidate_address,
+        "candidate_city": candidate_city,
         "candidate_developer": candidate_developer,
         "candidate_unit_total": candidate_unit_total,
         "candidate_unit_affordable": None,

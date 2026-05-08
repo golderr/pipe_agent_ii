@@ -266,6 +266,7 @@ class ProjectReferencePayload(BaseModel):
 
     candidate_name: str | None = None
     candidate_address: str | None = None
+    candidate_city: str | None = None
     candidate_developer: str | None = None
     candidate_unit_total: int | None = Field(default=None, ge=0)
     candidate_unit_affordable: int | None = Field(default=None, ge=0)
@@ -309,6 +310,7 @@ class ProjectReferencePayload(BaseModel):
     @field_validator(
         "candidate_name",
         "candidate_address",
+        "candidate_city",
         "candidate_developer",
         "candidate_delivery_year_text",
         "candidate_neighborhood",
@@ -890,6 +892,7 @@ def _reference_from_payload(
         reference_index=reference_index,
         candidate_name=payload.get("candidate_name"),
         candidate_address=payload.get("candidate_address"),
+        candidate_city=payload.get("candidate_city"),
         candidate_developer=payload.get("candidate_developer"),
         candidate_unit_total=payload.get("candidate_unit_total"),
         candidate_unit_affordable=payload.get("candidate_unit_affordable"),

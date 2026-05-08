@@ -95,6 +95,8 @@ def test_news_research_indexes_are_declared() -> None:
     assert "output_json" in NewsSemanticInterpretation.__table__.columns
     assert "prompt_hash" in NewsSemanticInterpretation.__table__.columns
     assert "ix_news_project_references_match_status" in reference_indexes
+    assert "ix_news_project_references_candidate_city" in reference_indexes
+    assert "candidate_city" in NewsProjectReference.__table__.columns
     assert "ix_news_signal_flag_registry_active" in flag_indexes
 
 

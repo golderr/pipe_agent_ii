@@ -543,11 +543,15 @@ def test_render_extraction_prompt_omits_registry_glossary(
     assert "Do not compute market-rate units by subtracting affordable units" in (
         rendered_prompt.system_text
     )
+    assert "Use candidate_city for the city or municipality directly stated" in (
+        rendered_prompt.system_text
+    )
     assert "Do not normalize seasons, quarters, month-only, year-only" in (
         rendered_prompt.system_text
     )
     assert "Permits alone are not Under Construction" in rendered_prompt.system_text
     required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
+    assert "candidate_city" in required
     assert "registry_developer_id" not in required
     assert "registry_project_id" not in required
     diagnostic_properties = rendered_prompt.schema["properties"]["diagnostic"]["properties"]
@@ -707,6 +711,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
         select(NewsProjectReference).where(NewsProjectReference.extraction_id == extraction.id)
     ).scalar_one()
     assert reference.candidate_name == "Helio"
+    assert reference.candidate_city == "Los Angeles"
     assert reference.candidate_unit_total == 140
     assert reference.candidate_unit_workforce == 16
     assert reference.candidate_signal_flags == {"groundbreaking_announced": True}
@@ -1600,6 +1605,7 @@ def _payload(
     *,
     candidate_signal_flags: dict[str, bool] | None = None,
     candidate_address: str = "1234 Sunset Boulevard",
+    candidate_city: str | None = "Los Angeles",
     candidate_unit_total: int = 140,
     candidate_unit_workforce: int | None = None,
     candidate_confidence: str = "high",
@@ -1629,6 +1635,7 @@ def _payload(
             {
                 "candidate_name": "Helio",
                 "candidate_address": candidate_address,
+                "candidate_city": candidate_city,
                 "candidate_developer": "Atlas Development",
                 "candidate_unit_total": candidate_unit_total,
                 "candidate_unit_affordable": 14,

@@ -482,6 +482,7 @@ CREATE TABLE news_project_references (
   -- LLM-extracted signals about the referenced project
   candidate_name      TEXT,
   candidate_address   TEXT,
+  candidate_city      TEXT,
   candidate_developer TEXT,
   candidate_unit_total INTEGER,
   candidate_unit_affordable INTEGER,
@@ -782,7 +783,7 @@ FROM news_extractions;
 CREATE VIEW news_project_references_summary
 WITH (security_invoker = false) AS
 SELECT id, extraction_id, article_id, reference_index, candidate_name, candidate_address,
-       candidate_developer, candidate_unit_total, candidate_unit_affordable,
+       candidate_city, candidate_developer, candidate_unit_total, candidate_unit_affordable,
        candidate_unit_market_rate, candidate_unit_workforce,
        candidate_product_type, candidate_age_restriction,
        candidate_status_signal, candidate_delivery_year_text,
@@ -1352,6 +1353,7 @@ Your job:
 2. For each project_reference, extract:
    - candidate_name (project name, if stated)
    - candidate_address (street address, if stated)
+   - candidate_city (city/municipality, if directly stated)
    - candidate_developer (developer/sponsor entity, if stated)
    - candidate_unit_total, candidate_unit_affordable, candidate_unit_market_rate, candidate_unit_workforce
    - candidate_product_type (apartment | condo | townhome | single_family | micro_co_living | other)
@@ -1391,6 +1393,7 @@ Schema: <see §8.5>
     {
       "candidate_name": "string | null",
       "candidate_address": "string | null",
+      "candidate_city": "string | null",
       "candidate_developer": "string | null",
       "candidate_unit_total": "integer | null",
       "candidate_unit_affordable": "integer | null",

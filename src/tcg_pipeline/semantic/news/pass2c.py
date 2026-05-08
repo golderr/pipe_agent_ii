@@ -767,6 +767,7 @@ def _reference_payload(reference: NewsProjectReference) -> dict[str, Any]:
         "reference_index": reference.reference_index,
         "candidate_name": reference.candidate_name,
         "candidate_address": reference.candidate_address,
+        "candidate_city": reference.candidate_city,
         "candidate_developer": reference.candidate_developer,
         "candidate_unit_total": reference.candidate_unit_total,
         "candidate_unit_affordable": reference.candidate_unit_affordable,

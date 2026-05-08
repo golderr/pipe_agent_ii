@@ -34,6 +34,7 @@ CANNED_EXTRACTION_PAYLOAD = {
         {
             "candidate_name": "Test Tower",
             "candidate_address": "123 Main Street",
+            "candidate_city": "Los Angeles",
             "candidate_developer": "Acme Development",
             "candidate_unit_total": 42,
             "candidate_unit_affordable": None,
@@ -243,6 +244,7 @@ def test_run_extraction_ab_harness_rolls_back_projection_writes(
     assert reference_result["candidate_age_restriction"] == "non_age_restricted"
     assert reference_result["candidate_status_signal"] == "Proposed"
     assert reference_result["candidate_neighborhood"] == "Downtown Los Angeles"
+    assert reference_result["candidate_city"] == "Los Angeles"
     assert reference_result["passage_excerpts"][0]["field"] == "candidate_name"
 
 

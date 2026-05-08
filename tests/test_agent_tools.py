@@ -335,6 +335,7 @@ def test_search_articles_similar_returns_compact_chunk_results(
         reference_index=0,
         candidate_name="Accepted Tower",
         candidate_address="123 Main St",
+        candidate_city="Los Angeles",
         candidate_developer="HPG",
         candidate_confidence="high",
         match_status=NewsMatchStatus.CONFIRMED.value,
@@ -394,6 +395,7 @@ def test_search_articles_similar_returns_compact_chunk_results(
     assert match["similarity"] == 1
     assert len(match["excerpt"]) <= 200
     assert match["match_status"] == NewsMatchStatus.CONFIRMED.value
+    assert match["candidate_city"] == "Los Angeles"
     assert match["matched_project_id"] == str(project.id)
     assert match["matched_evidence_id"] == str(evidence.id)
     assert result.summary["tool"] == "search_articles_similar"

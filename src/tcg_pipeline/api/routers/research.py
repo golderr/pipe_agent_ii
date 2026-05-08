@@ -455,6 +455,7 @@ def _serialize_reference(reference: NewsProjectReference) -> ResearchReferenceSu
         reference_index=reference.reference_index,
         candidate_name=reference.candidate_name,
         candidate_address=reference.candidate_address,
+        candidate_city=reference.candidate_city,
         candidate_developer=reference.candidate_developer,
         match_status=reference.match_status,
         matched_project_id=reference.matched_project_id,

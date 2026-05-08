@@ -151,6 +151,7 @@ def test_news_summary_views_hide_raw_content_and_use_reader_role(
     assert "input_tokens_cache_creation" in extraction_columns
 
     reference_columns = _relation_columns(postgres_session, "news_project_references_summary")
+    assert "candidate_city" in reference_columns
     assert "passage_excerpts" not in reference_columns
 
     assert _has_select(postgres_session, "authenticated", "news_articles_summary")
@@ -281,6 +282,11 @@ def _ensure_news_schema(postgres_session: Session) -> None:
         pytest.skip("Apply migration 202604290022 before running news schema tests.")
     if "input_tokens_cache_creation" not in cost_columns:
         pytest.skip("Apply migration 202605040028 before running news schema tests.")
+    reference_columns = {
+        column["name"] for column in inspector.get_columns("news_project_references")
+    }
+    if "candidate_city" not in reference_columns:
+        pytest.skip("Apply migration 202605080035 before running news schema tests.")
     missing_views = [
         view_name
         for view_name in (

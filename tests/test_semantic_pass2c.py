@@ -162,6 +162,7 @@ def test_render_interpret_prompt_uses_default_files(postgres_session: Session) -
     assert prompt.schema["properties"]["interpretations"]["type"] == "array"
     assert str(reference.id) in prompt.user_text
     assert "Semantic Tower" in prompt.user_text
+    assert "Los Angeles" in prompt.user_text
 
 
 def test_render_interpret_prompt_includes_loaded_jurisdiction_policy(
@@ -377,6 +378,7 @@ def _semantic_fixture(
         extraction_id=extraction.id,
         reference_index=0,
         candidate_name="Semantic Tower",
+        candidate_city="Los Angeles",
         candidate_confidence="high",
         candidate_signal_flags={},
         candidate_identifiers={"case_number": [], "permit_number": [], "apn": []},

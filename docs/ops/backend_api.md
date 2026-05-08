@@ -43,6 +43,11 @@ resolution, agent, and semantic sources before hydration, so `limit` applies to
 the newest rows across the whole feed rather than independently per source
 type.
 
+The `auto_applied` preset shows canonical applied-change rows from `change_log`,
+`resolution_log`, and non-review-linked agent runs. It does not duplicate the
+upstream Pass 2c semantic interpretation row behind a semantic auto-promotion;
+use the `semantic` preset for that reasoning trail.
+
 `source` is an exact event-source filter. Change rows match `change_log.source`.
 Resolution rows match only `resolution_engine`. News-agent rows match either the
 logical intake source (`news_article`) or the linked `news_sources.slug`, so a

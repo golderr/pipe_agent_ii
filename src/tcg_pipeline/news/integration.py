@@ -688,6 +688,7 @@ def _pass3b_context(first_pass: _FirstPassMatchSet) -> dict[str, Any]:
                 "reference_index": reference.reference_index,
                 "candidate_name": reference.candidate_name,
                 "candidate_address": reference.candidate_address,
+                "candidate_city": reference.candidate_city,
                 "candidate_developer": reference.candidate_developer,
                 "candidate_unit_total": reference.candidate_unit_total,
                 "candidate_unit_affordable": reference.candidate_unit_affordable,
@@ -938,6 +939,7 @@ def _material_contradictions_for_reference(
             "reference_index": reference.reference_index,
             "candidate_name": reference.candidate_name,
             "candidate_address": reference.candidate_address,
+            "candidate_city": reference.candidate_city,
             "project": project_context,
         }
         for contradiction in contradictions
@@ -1062,6 +1064,7 @@ def _override_contradictions_for_reference(
                 "reference_index": reference.reference_index,
                 "candidate_name": reference.candidate_name,
                 "candidate_address": reference.candidate_address,
+                "candidate_city": reference.candidate_city,
                 "project": {
                     "project_id": str(project.id),
                     "project_name": project.project_name,
@@ -1227,6 +1230,7 @@ def _agent_reference_payload(
         "candidate_name": reference.candidate_name,
         "candidate_address": reference.candidate_address,
         "canonical_address": canonical_address_for_reference(article, reference),
+        "candidate_city": reference.candidate_city,
         "candidate_developer": reference.candidate_developer,
         "candidate_unit_total": reference.candidate_unit_total,
         "candidate_unit_affordable": reference.candidate_unit_affordable,

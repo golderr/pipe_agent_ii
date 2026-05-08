@@ -70,7 +70,9 @@ function firstQueryValue(value: string | string[] | undefined) {
 function activityHrefForView(query: ActivityQuery, view: string) {
   const params = new URLSearchParams();
   params.set("view", view);
-  setQueryParam(params, "type", query.eventType);
+  if (view === "all") {
+    setQueryParam(params, "type", query.eventType);
+  }
   setQueryParam(params, "source", query.source);
   setQueryParam(params, "field", query.field);
   setQueryParam(params, "actor", query.actor);

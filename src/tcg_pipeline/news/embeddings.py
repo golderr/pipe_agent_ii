@@ -137,6 +137,7 @@ class GatedNewsReference:
     published_at: datetime | None
     candidate_name: str | None
     candidate_address: str | None
+    candidate_city: str | None
     candidate_developer: str | None
     candidate_unit_total: int | None
     candidate_unit_affordable: int | None
@@ -653,6 +654,7 @@ def _gated_reference_from_rows(
         published_at=article.published_at,
         candidate_name=reference.candidate_name,
         candidate_address=reference.candidate_address,
+        candidate_city=reference.candidate_city,
         candidate_developer=reference.candidate_developer,
         candidate_unit_total=reference.candidate_unit_total,
         candidate_unit_affordable=reference.candidate_unit_affordable,
@@ -696,6 +698,7 @@ def _field_lines(reference: GatedNewsReference) -> list[str]:
     raw_fields: list[tuple[str, Any]] = [
         ("Project", reference.candidate_name),
         ("Address", reference.candidate_address),
+        ("City", reference.candidate_city),
         ("Developer", reference.candidate_developer),
         ("Total units", reference.candidate_unit_total),
         ("Affordable units", reference.candidate_unit_affordable),
