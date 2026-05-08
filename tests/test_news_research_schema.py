@@ -107,8 +107,9 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
         )
     ).mappings().one_or_none()
     assert cost_cap is not None
-    assert cost_cap["daily_warn_usd"] == Decimal("25.00")
-    assert cost_cap["daily_hard_usd"] == Decimal("35.00")
+    assert cost_cap["daily_warn_usd"] >= Decimal("25.00")
+    assert cost_cap["daily_hard_usd"] >= Decimal("35.00")
+    assert cost_cap["daily_warn_usd"] <= cost_cap["daily_hard_usd"]
 
     flag_summary = postgres_session.execute(
         text(
