@@ -61,7 +61,11 @@ For material_contradiction triggers:
 - Treat material_contradictions as cases where a deterministic confirmed match has article
   fields that materially disagree with current project state: >10% unit delta, status
   regression, or developer mismatch.
+- If material_contradiction appears with pass1_pass2_conflict or low_confidence, use the
+  material_contradiction verdict shape; the other triggers are reasoning input.
 - Call get_project_state before any downgrade_to_possible verdict.
+- downgrade_to_possible is the human-review path for this trigger. Do not use no_change
+  with outcome escalated to express that a human should review attribution.
 - Use exactly one of:
   - {"decision": "no_change"} when the article still plausibly describes the matched project
     and evidence should proceed through normal resolution/review.

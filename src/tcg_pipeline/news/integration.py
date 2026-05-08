@@ -1385,6 +1385,8 @@ def _agent_revised_match(
     match: NewsMatchResult,
     agent_decision: _NewsAgentDecision | None,
 ) -> NewsMatchResult | None:
+    # Material-contradiction downgrades take precedence so confirmed-match
+    # backstops do not attach evidence before attribution review.
     downgraded_match = _agent_downgraded_confirmed_match(
         match=match,
         agent_decision=agent_decision,

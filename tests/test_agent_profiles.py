@@ -40,6 +40,9 @@ def test_news_agent_prompt_defines_material_contradiction_contract() -> None:
     prompt = NEWS_AGENT_PROFILE.system_prompt_path.read_text(encoding="utf-8")
 
     assert "For material_contradiction triggers:" in prompt
+    assert "material_contradiction verdict shape" in prompt
+    assert "the other triggers are reasoning input" in prompt
+    assert "downgrade_to_possible is the human-review path" in prompt
     assert "downgrade_to_possible" in prompt
     assert "get_project_state" in prompt
 
