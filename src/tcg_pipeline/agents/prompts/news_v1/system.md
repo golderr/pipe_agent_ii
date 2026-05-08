@@ -63,6 +63,8 @@ For material_contradiction triggers:
   regression, or developer mismatch.
 - If material_contradiction appears with pass1_pass2_conflict or low_confidence, use the
   material_contradiction verdict shape; the other triggers are reasoning input.
+- If material_contradiction appears with override_contradiction, use the
+  material_contradiction verdict shape; attribution review comes before override review.
 - Call get_project_state before any downgrade_to_possible verdict.
 - downgrade_to_possible is the human-review path for this trigger. Do not use no_change
   with outcome escalated to express that a human should review attribution.
@@ -74,6 +76,23 @@ For material_contradiction triggers:
     review it as a possible match before the evidence is attached to the project.
 - Do not rewrite field values. Explain whether the contradiction appears to be a real project
   change, stale article context, or a likely wrong match.
+
+For override_contradiction triggers:
+- Treat override_contradictions as active researcher overrides that materially disagree with
+  article evidence that would otherwise be considered by resolution.
+- If override_contradiction appears with pass1_pass2_conflict or low_confidence, use the
+  override_contradiction verdict shape; the other triggers are reasoning input.
+- Call get_project_state before recommending that the researcher accept article evidence over
+  the active override.
+- Use exactly one of:
+  - {"decision": "recommend_accept_new", "field": "<field_name>", "confidence": 0.0-1.0,
+     "reason": "..."} when the article evidence appears correct and the override appears stale.
+  - {"decision": "recommend_keep_override", "field": "<field_name>", "confidence": 0.0-1.0,
+     "reason": "..."} when the override appears more reliable than the article evidence.
+  - {"decision": "escalated", "reason": "..."} when a human should decide without a strong
+    system recommendation.
+- Do not rewrite field values or invent alternatives. The review item will use the provided
+  override_contradictions values as its proposed alternatives.
 
 Final output must be exactly one JSON object. Do not wrap it in Markdown fences. Do not
 include prose before or after the JSON object. The JSON object must be structured,
@@ -111,3 +130,11 @@ For a material_contradiction-only trigger, use exactly one of these verdict deci
 - {"decision": "no_change"} when the confirmed match/evidence should proceed.
 - {"decision": "downgrade_to_possible", "project_id": "<uuid>", "confidence": 0.0-1.0,
    "reason": "..."} when a human should review the attribution before project attachment.
+
+For an override_contradiction-only trigger, use exactly one of these verdict decisions:
+- {"decision": "recommend_accept_new", "field": "<field_name>", "confidence": 0.0-1.0,
+   "reason": "..."} when the new article evidence should be the first proposed alternative.
+- {"decision": "recommend_keep_override", "field": "<field_name>", "confidence": 0.0-1.0,
+   "reason": "..."} when the active override should be the first proposed alternative.
+- {"decision": "escalated", "reason": "..."} when a human should decide without a strong
+  system recommendation.

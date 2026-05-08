@@ -1260,6 +1260,109 @@ def test_commit_staged_override_contradiction_accept_new_does_not_invalidate_ite
     assert decision.state == REVIEW_DECISION_STATE_COMMITTED
 
 
+def test_commit_staged_override_contradiction_candidate_uses_proposed_alternative_source(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_tables(postgres_session)
+    reviewer_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    project = _build_project(
+        "714 ALT CONTRADICTION WAY LOS ANGELES CA 90012",
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    upsert_researcher_overrides(
+        postgres_session,
+        project,
+        {
+            "total_units": {
+                "value": 100,
+                "set_by": "reviewer@example.com",
+                "set_at": "2026-04-27T12:00:00+00:00",
+                "mode": "review_protected",
+                "baseline": {
+                    "evidence_date": "2026-04-01",
+                    "collected_at": "2026-04-01T12:00:00+00:00",
+                    "source_tier": 3,
+                    "source_type": "costar",
+                },
+            }
+        },
+        set_by_user_id=reviewer_id,
+    )
+    evidence = Evidence(
+        project_id=project.id,
+        source_type="news_article",
+        source_tier=2,
+        ingest_method="manual",
+        source_record_id="alt-contradiction-news",
+        collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 1),
+        extracted_fields={"total_units": {"value": 260, "confidence": "medium"}},
+    )
+    postgres_session.add(evidence)
+    postgres_session.flush()
+    review_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.OVERRIDE_CONTRADICTION,
+        status=ReviewItemStatus.OPEN,
+        state=REVIEW_ITEM_STATE_OPEN,
+        priority=Priority.HIGH,
+        field_name="total_units",
+        winning_evidence_id=evidence.id,
+        payload={
+            "origin": "override_contradiction_detection",
+            "agent_origin": "agent_override_contradiction",
+            "field_name": "total_units",
+            "current_override": {"value": 100},
+            "proposed_alternatives": [
+                {
+                    "value": 260,
+                    "source_evidence_id": str(evidence.id),
+                    "source_summary": "News article",
+                    "agent_confidence": 0.81,
+                    "source_url": "https://example.com/override-alt",
+                },
+                {
+                    "value": 100,
+                    "source_evidence_id": None,
+                    "source_summary": "Active researcher override",
+                    "agent_confidence": 0.81,
+                },
+            ],
+            "evidence_ids": [str(evidence.id)],
+        },
+    )
+    postgres_session.add(review_item)
+    postgres_session.flush()
+
+    stage_review_decision(
+        postgres_session,
+        review_item_id=review_item.id,
+        staged_by=reviewer_id,
+        staged_by_email="reviewer@example.com",
+        decision_type="candidate_1",
+    )
+    commit_staged_decisions(
+        postgres_session,
+        committed_by=reviewer_id,
+        committed_by_email="reviewer@example.com",
+    )
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    active_override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "total_units",
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one()
+
+    assert project.total_units == 260
+    assert active_override.value == 260
+    assert active_override.source_url == "https://example.com/override-alt"
+
+
 def test_commit_staged_decisions_rolls_back_all_decisions_when_one_fails(
     postgres_session: Session,
 ) -> None:

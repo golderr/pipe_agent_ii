@@ -208,6 +208,9 @@ def field_name_for_payload(
 def proposed_value_for_payload(payload: Mapping[str, Any], field_name: str | None = None) -> Any:
     if "proposed_value" in payload:
         return payload.get("proposed_value")
+    alternatives = _mapping_list(payload.get("proposed_alternatives"))
+    if alternatives and "value" in alternatives[0]:
+        return alternatives[0].get("value")
     candidate = _mapping(payload.get("candidate"))
     if "value" in candidate:
         return candidate.get("value")

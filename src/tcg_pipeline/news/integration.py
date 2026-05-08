@@ -37,12 +37,14 @@ from tcg_pipeline.db.models import (
     Priority,
     ProductType,
     Project,
+    ResearcherOverride,
     ReviewItem,
     ReviewItemStatus,
     ReviewItemType,
     ScrapeTriggerType,
     SourceRun,
 )
+from tcg_pipeline.db.researcher_overrides import active_researcher_overrides_for_project
 from tcg_pipeline.matching.differ import (
     DetectedChange,
     DiffResult,
@@ -88,6 +90,7 @@ from tcg_pipeline.semantic.news.prompting import assemble_interpret_system_promp
 from tcg_pipeline.semantic.reason_codes import ReasonCode, ReasonCodeRegistry
 from tcg_pipeline.semantic.types import SemanticInterpretation
 from tcg_pipeline.settings import Settings, get_settings
+from tcg_pipeline.source_tiers import get_source_tier_for_source_name
 
 NEWS_SOURCE_TYPE = "news_article"
 AGENT_PROMOTED_EXISTING_PROJECT_MATCH = "agent_promoted_existing_project"
@@ -96,8 +99,16 @@ AGENT_DOWNGRADED_CONFIRMED_MATCH = "agent_downgraded_confirmed_match"
 AGENT_PROMOTE_EXISTING_PROJECT_DECISION = "promote_existing_project"
 AGENT_CONFIRM_EXISTING_PROJECT_DECISION = "confirm_existing_project"
 AGENT_DOWNGRADE_TO_POSSIBLE_DECISION = "downgrade_to_possible"
+AGENT_RECOMMEND_ACCEPT_NEW_DECISION = "recommend_accept_new"
+AGENT_RECOMMEND_KEEP_OVERRIDE_DECISION = "recommend_keep_override"
 AGENT_ESCALATED_DECISION = "escalated"
 ACTIVE_REVIEW_STATES = {"open", "staged"}
+REVIEW_PROTECTED_OVERRIDE_MODES = {
+    "review_protected",
+    "until_newer_evidence",
+    "sticky",
+    None,
+}
 MATERIAL_UNIT_DELTA_RATIO = 0.10
 REFERENCE_FIELD_TO_PROJECT_FIELD = {
     "candidate_name": "project_name",
@@ -269,6 +280,7 @@ class _ConfirmedReference:
     agent_revised_verdict: dict[str, Any] | None = None
     agent_reasoning_trace: str | None = None
     pass1_pass2_conflicts: tuple[dict[str, Any], ...] = ()
+    override_contradictions: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(slots=True)
@@ -421,6 +433,16 @@ class _NewsAgentDecision:
     result: AgentRunResult
     pass1_pass2_conflicts: tuple[dict[str, Any], ...] = ()
     material_contradictions: tuple[dict[str, Any], ...] = ()
+    override_contradictions: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _AgentReferenceContext:
+    reference: NewsProjectReference
+    match: NewsMatchResult
+    pass1_pass2_conflicts: tuple[dict[str, Any], ...] = ()
+    material_contradictions: tuple[dict[str, Any], ...] = ()
+    override_contradictions: tuple[dict[str, Any], ...] = ()
 
 
 def _load_current_references_and_matches(
@@ -644,45 +666,22 @@ def _run_news_agents_for_first_pass(
 ) -> dict[uuid.UUID, _NewsAgentDecision]:
     if first_pass.extraction_id is None:
         return {}
-    pass1_pass2_conflicts = _pass1_pass2_conflicts_by_reference(
+    contexts = _gather_agent_context(
         session_factory,
         first_pass=first_pass,
+        now=now,
     )
-    material_contradictions = _material_contradictions_by_reference(
-        session_factory,
-        first_pass=first_pass,
-    )
-    agent_pairs: list[
-        tuple[
-            NewsProjectReference,
-            NewsMatchResult,
-            tuple[AgentTrigger, ...],
-            list[dict[str, Any]],
-            list[dict[str, Any]],
-        ]
-    ] = []
-    for reference, match in zip(first_pass.references, first_pass.matches, strict=True):
-        reference_conflicts = pass1_pass2_conflicts.get(reference.reference_index, [])
-        reference_material_contradictions = material_contradictions.get(
-            reference.reference_index,
-            [],
-        )
+    agent_pairs: list[tuple[_AgentReferenceContext, tuple[AgentTrigger, ...]]] = []
+    for context in contexts:
         triggers = _agent_triggers_for_reference(
-            reference=reference,
-            match=match,
-            pass1_pass2_conflicts=reference_conflicts,
-            material_contradictions=reference_material_contradictions,
+            reference=context.reference,
+            match=context.match,
+            pass1_pass2_conflicts=list(context.pass1_pass2_conflicts),
+            material_contradictions=list(context.material_contradictions),
+            override_contradictions=list(context.override_contradictions),
         )
         if triggers:
-            agent_pairs.append(
-                (
-                    reference,
-                    match,
-                    triggers,
-                    reference_conflicts,
-                    reference_material_contradictions,
-                )
-            )
+            agent_pairs.append((context, triggers))
     if not agent_pairs:
         return {}
     client = agent_client
@@ -695,29 +694,27 @@ def _run_news_agents_for_first_pass(
         client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
 
     decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
-    for (
-        reference,
-        match,
-        triggers,
-        pass1_pass2_conflicts_for_reference,
-        material_contradictions_for_reference,
-    ) in agent_pairs:
+    for context, triggers in agent_pairs:
         with session_factory() as session:
             article = session.get(NewsArticle, first_pass.article_id)
             extraction = session.get(NewsExtraction, first_pass.extraction_id)
-            current_reference = session.get(NewsProjectReference, reference.id)
+            current_reference = session.get(NewsProjectReference, context.reference.id)
             if article is None or extraction is None or current_reference is None:
                 raise RuntimeError("News agent references missing article/extraction/reference.")
             payload = _agent_intake_payload(
                 article=article,
                 extraction=extraction,
                 reference=current_reference,
-                match=match,
+                match=context.match,
                 force_project_id=force_project_id,
-                pass1_pass2_conflicts=pass1_pass2_conflicts_for_reference,
-                material_contradictions=material_contradictions_for_reference,
+                pass1_pass2_conflicts=list(context.pass1_pass2_conflicts),
+                material_contradictions=list(context.material_contradictions),
+                override_contradictions=list(context.override_contradictions),
             )
-            matcher_payload = _agent_matcher_payload(reference=current_reference, match=match)
+            matcher_payload = _agent_matcher_payload(
+                reference=current_reference,
+                match=context.match,
+            )
         result = run_agent_for_intake(
             IntakeRecord(
                 source_type=NEWS_SOURCE_TYPE,
@@ -734,16 +731,92 @@ def _run_news_agents_for_first_pass(
             session_factory=session_factory,
             now=now,
         )
-        decisions[reference.id] = _NewsAgentDecision(
+        decisions[context.reference.id] = _NewsAgentDecision(
             result=result,
             pass1_pass2_conflicts=tuple(
-                serialize_json(pass1_pass2_conflicts_for_reference)
+                serialize_json(list(context.pass1_pass2_conflicts))
             ),
             material_contradictions=tuple(
-                serialize_json(material_contradictions_for_reference)
+                serialize_json(list(context.material_contradictions))
+            ),
+            override_contradictions=tuple(
+                serialize_json(list(context.override_contradictions))
             ),
         )
     return decisions
+
+
+def _gather_agent_context(
+    session_factory: sessionmaker[Session],
+    *,
+    first_pass: _FirstPassMatchSet,
+    now: datetime,
+) -> list[_AgentReferenceContext]:
+    if first_pass.extraction_id is None:
+        return []
+    with session_factory() as session:
+        article = session.get(NewsArticle, first_pass.article_id)
+        extraction = session.get(NewsExtraction, first_pass.extraction_id)
+        if article is None or extraction is None:
+            raise RuntimeError("News agent context references missing article/extraction rows.")
+        pass1_pass2_conflicts = _pass1_pass2_conflicts_from_decision(
+            decide_pass3a_reextraction(article, extraction)
+        )
+        contexts: list[_AgentReferenceContext] = []
+        for reference, match in zip(first_pass.references, first_pass.matches, strict=True):
+            current_reference = session.get(NewsProjectReference, reference.id)
+            if current_reference is None:
+                continue
+            reference_material_contradictions: list[dict[str, Any]] = []
+            reference_override_contradictions: list[dict[str, Any]] = []
+            if match.status == NewsMatchStatus.CONFIRMED and match.project_id is not None:
+                project = session.get(Project, match.project_id)
+                if project is not None:
+                    reference_material_contradictions = _material_contradictions_for_reference(
+                        session,
+                        reference=current_reference,
+                        match=match,
+                        project=project,
+                    )
+                    reference_override_contradictions = (
+                        _override_contradictions_for_reference(
+                            session,
+                            article=article,
+                            reference=current_reference,
+                            match=match,
+                            project=project,
+                            now=now,
+                        )
+                    )
+            contexts.append(
+                _AgentReferenceContext(
+                    reference=reference,
+                    match=match,
+                    pass1_pass2_conflicts=tuple(
+                        pass1_pass2_conflicts.get(reference.reference_index, ())
+                    ),
+                    material_contradictions=tuple(reference_material_contradictions),
+                    override_contradictions=tuple(reference_override_contradictions),
+                )
+            )
+        return contexts
+
+
+def _pass1_pass2_conflicts_from_decision(
+    decision,
+) -> dict[int, list[dict[str, Any]]]:
+    if decision is None or decision.triggered_by != PASS3A_TRIGGER_PASS1_PASS2_CONFLICT:
+        return {}
+    conflicts_by_reference: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for conflict in decision.context.get("conflicts") or []:
+        if not isinstance(conflict, dict):
+            continue
+        try:
+            reference_index = int(conflict.get("reference_index"))
+        except (TypeError, ValueError):
+            continue
+        conflicts_by_reference[reference_index].append(dict(conflict))
+    return dict(conflicts_by_reference)
 
 
 def _agent_triggers_for_reference(
@@ -752,12 +825,15 @@ def _agent_triggers_for_reference(
     match: NewsMatchResult,
     pass1_pass2_conflicts: list[dict[str, Any]] | None = None,
     material_contradictions: list[dict[str, Any]] | None = None,
+    override_contradictions: list[dict[str, Any]] | None = None,
 ) -> tuple[AgentTrigger, ...]:
     triggers: list[AgentTrigger] = []
     if pass1_pass2_conflicts:
         triggers.append(AgentTrigger.PASS1_PASS2_CONFLICT)
     if material_contradictions:
         triggers.append(AgentTrigger.MATERIAL_CONTRADICTION)
+    if override_contradictions:
+        triggers.append(AgentTrigger.OVERRIDE_CONTRADICTION)
     if match.status == NewsMatchStatus.NEW_CANDIDATE:
         triggers.append(AgentTrigger.NEW_CANDIDATE)
     if match.status == NewsMatchStatus.POSSIBLE and len(match.candidate_project_ids) > 0:
@@ -780,18 +856,7 @@ def _pass1_pass2_conflicts_by_reference(
         if article is None or extraction is None:
             raise RuntimeError("News agent conflict trigger references missing rows.")
         decision = decide_pass3a_reextraction(article, extraction)
-    if decision is None or decision.triggered_by != PASS3A_TRIGGER_PASS1_PASS2_CONFLICT:
-        return {}
-    conflicts_by_reference: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for conflict in decision.context.get("conflicts") or []:
-        if not isinstance(conflict, dict):
-            continue
-        try:
-            reference_index = int(conflict.get("reference_index"))
-        except (TypeError, ValueError):
-            continue
-        conflicts_by_reference[reference_index].append(dict(conflict))
-    return dict(conflicts_by_reference)
+    return _pass1_pass2_conflicts_from_decision(decision)
 
 
 def _material_contradictions_by_reference(
@@ -940,6 +1005,170 @@ def _material_developer_mismatch(
     }
 
 
+def _override_contradictions_for_reference(
+    session: Session,
+    *,
+    article: NewsArticle,
+    reference: NewsProjectReference,
+    match: NewsMatchResult,
+    project: Project,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    overrides = active_researcher_overrides_for_project(session, project)
+    if not overrides:
+        return []
+    override_ids = _active_override_ids_by_field(session, project)
+    extracted_fields = _news_extracted_fields(article, reference)
+    contradictions: list[dict[str, Any]] = []
+    for field_name, override_payload in overrides.items():
+        if not isinstance(override_payload, dict):
+            continue
+        if override_payload.get("mode") not in REVIEW_PROTECTED_OVERRIDE_MODES:
+            continue
+        candidate_payload = extracted_fields.get(field_name)
+        if not isinstance(candidate_payload, dict) or "value" not in candidate_payload:
+            continue
+        candidate_value = candidate_payload.get("value")
+        override_value = override_payload.get("value")
+        if not values_contradict(
+            field_name,
+            override_value,
+            candidate_value,
+            session=session,
+        ):
+            continue
+        if not _override_candidate_can_reopen_review(
+            article=article,
+            override_payload=override_payload,
+            now=now,
+        ):
+            continue
+        contradictions.append(
+            {
+                "field": field_name,
+                "reference_index": reference.reference_index,
+                "candidate_name": reference.candidate_name,
+                "candidate_address": reference.candidate_address,
+                "project": {
+                    "project_id": str(project.id),
+                    "project_name": project.project_name,
+                    "match_type": match.match_type,
+                    "match_confidence": match.confidence,
+                },
+                "current_override": {
+                    "id": str(override_ids[field_name])
+                    if field_name in override_ids
+                    else None,
+                    "value": serialize_json(override_value),
+                    "set_by": override_payload.get("set_by"),
+                    "set_at": override_payload.get("set_at"),
+                    "note": override_payload.get("note"),
+                    "mode": override_payload.get("mode"),
+                    "baseline": serialize_json(override_payload.get("baseline")),
+                    "source_url": override_payload.get("source_url"),
+                },
+                "candidate": {
+                    "value": serialize_json(candidate_value),
+                    "confidence": candidate_payload.get("confidence"),
+                    "source_type": NEWS_SOURCE_TYPE,
+                    "source_record_id": str(reference.id),
+                    "evidence_date": _article_evidence_date(article, now=now).isoformat(),
+                    "passage_highlights": serialize_json(
+                        candidate_payload.get("highlights") or []
+                    ),
+                },
+                "reason": "article evidence would contradict an active researcher override",
+            }
+        )
+    return contradictions
+
+
+def _active_override_ids_by_field(
+    session: Session,
+    project: Project,
+) -> dict[str, uuid.UUID]:
+    rows = session.execute(
+        select(ResearcherOverride.field_name, ResearcherOverride.id).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).all()
+    return {field_name: override_id for field_name, override_id in rows}
+
+
+def _override_candidate_can_reopen_review(
+    *,
+    article: NewsArticle,
+    override_payload: dict[str, Any],
+    now: datetime,
+) -> bool:
+    baseline = override_payload.get("baseline")
+    if not isinstance(baseline, dict):
+        return True
+    source = article.source
+    if source is None:
+        return False
+    try:
+        source_tier = get_source_tier_for_source_name(source.slug)
+    except (KeyError, ValueError):
+        return False
+    candidate_frontier = {
+        "evidence_date": _article_evidence_date(article, now=now).isoformat(),
+        "collected_at": now.isoformat(),
+        "source_tier": source_tier,
+        "source_type": NEWS_SOURCE_TYPE,
+    }
+    candidate_key = _override_frontier_key(candidate_frontier)
+    baseline_key = _override_frontier_key(baseline)
+    return candidate_key is not None and baseline_key is not None and candidate_key > baseline_key
+
+
+def _override_frontier_key(value: Any) -> tuple[int, float, int] | None:
+    if not isinstance(value, dict):
+        return None
+    evidence_date = _date_value(value.get("evidence_date"))
+    collected_at = _datetime_value(value.get("collected_at"))
+    try:
+        source_tier = int(value.get("source_tier"))
+    except (TypeError, ValueError):
+        return None
+    if evidence_date is None or collected_at is None:
+        return None
+    return (evidence_date.toordinal(), collected_at.timestamp(), -source_tier)
+
+
+def _date_value(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _datetime_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
 def _low_confidence_populated_fields(reference: NewsProjectReference) -> list[str]:
     if reference.candidate_confidence != "low":
         return []
@@ -959,6 +1188,7 @@ def _agent_intake_payload(
     force_project_id: uuid.UUID | None,
     pass1_pass2_conflicts: list[dict[str, Any]] | None = None,
     material_contradictions: list[dict[str, Any]] | None = None,
+    override_contradictions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     source = article.source
     return {
@@ -979,6 +1209,7 @@ def _agent_intake_payload(
         "matcher": _agent_matcher_payload(reference=reference, match=match),
         "pass1_pass2_conflicts": serialize_json(pass1_pass2_conflicts or []),
         "material_contradictions": serialize_json(material_contradictions or []),
+        "override_contradictions": serialize_json(override_contradictions or []),
         "low_confidence_fields": _low_confidence_populated_fields(reference),
         "force_project_id": str(force_project_id) if force_project_id is not None else None,
         "body_access": "Use get_article_body(article_id) if full article text is needed.",
@@ -1199,6 +1430,11 @@ def _integrate_current_extraction(
                     ),
                     pass1_pass2_conflicts=(
                         agent_decision.pass1_pass2_conflicts
+                        if agent_decision is not None
+                        else ()
+                    ),
+                    override_contradictions=(
+                        agent_decision.override_contradictions
                         if agent_decision is not None
                         else ()
                     ),
@@ -2044,7 +2280,22 @@ def _integrate_confirmed_project(
     if project is None:
         return 0
     previous_snapshot = snapshot_project_for_diff(project)
-    resolution_result = resolve_project(project_id, session, apply=True)
+    override_review_item_ids, override_review_count = (
+        _upsert_agent_override_contradiction_review_items(
+            session,
+            project=project,
+            source_run=source_run,
+            article=article,
+            extraction=extraction,
+            context=context,
+        )
+    )
+    resolution_result = resolve_project(
+        project_id,
+        session,
+        apply=True,
+        skip_contradiction_review_item_ids=override_review_item_ids or None,
+    )
     session.flush()
     current_snapshot = snapshot_project_for_diff(project)
     diff_result = diff_project_snapshots(
@@ -2056,9 +2307,9 @@ def _integrate_confirmed_project(
         review_flags=list(resolution_result.review_flags),
     )
     reviewed_fields: set[str] = set()
-    review_count = 0
+    review_count = override_review_count
     if not diff_result.has_reviewable_changes:
-        return _upsert_agent_structural_conflict_review_items(
+        return review_count + _upsert_agent_structural_conflict_review_items(
             session,
             project=project,
             source_run=source_run,
@@ -2088,6 +2339,244 @@ def _integrate_confirmed_project(
         excluded_fields=reviewed_fields,
     )
     return review_count
+
+
+def _upsert_agent_override_contradiction_review_items(
+    session: Session,
+    *,
+    project: Project,
+    source_run: SourceRun,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    context: _ProjectIntegrationContext,
+) -> tuple[set[uuid.UUID], int]:
+    review_item_ids: set[uuid.UUID] = set()
+    created_count = 0
+    for confirmed in context.references:
+        if not _agent_reviewed_override_contradiction(confirmed):
+            continue
+        for contradiction in confirmed.override_contradictions:
+            field_name = _clean_text(contradiction.get("field"))
+            if field_name is None:
+                continue
+            payload = _agent_override_contradiction_payload(
+                project=project,
+                article=article,
+                extraction=extraction,
+                confirmed=confirmed,
+                contradiction=contradiction,
+                field_name=field_name,
+            )
+            proposed_alternatives = payload.get("proposed_alternatives")
+            proposed_value = (
+                proposed_alternatives[0].get("value")
+                if isinstance(proposed_alternatives, list)
+                and proposed_alternatives
+                and isinstance(proposed_alternatives[0], dict)
+                else payload.get("proposed_value")
+            )
+            item, created = upsert_decision_card_review_item(
+                session,
+                project_id=project.id,
+                source_run_id=source_run.id,
+                item_type=ReviewItemType.OVERRIDE_CONTRADICTION,
+                field_name=field_name,
+                priority=_agent_override_contradiction_priority(field_name, contradiction),
+                match_confidence=confirmed.match.confidence,
+                payload=payload,
+                proposed_value=proposed_value,
+                winning_evidence_id=confirmed.evidence.id,
+                contradicted_override_id=_contradicted_override_id(contradiction),
+                contradiction_priority=_agent_override_contradiction_priority(
+                    field_name,
+                    contradiction,
+                ).value,
+            )
+            confirmed.reference.review_item_id = item.id
+            review_item_ids.add(item.id)
+            if confirmed.agent_run_id is not None:
+                _link_agent_run_review_item(
+                    session,
+                    agent_run_id=confirmed.agent_run_id,
+                    review_item_id=item.id,
+                )
+            if created:
+                created_count += 1
+    return review_item_ids, created_count
+
+
+def _agent_reviewed_override_contradiction(confirmed: _ConfirmedReference) -> bool:
+    if not confirmed.override_contradictions:
+        return False
+    verdict = confirmed.agent_revised_verdict or {}
+    decision = verdict.get("decision") if isinstance(verdict, dict) else None
+    return confirmed.agent_outcome in {
+        AgentRunOutcome.COMPLETED.value,
+        AgentRunOutcome.ESCALATED.value,
+    } and decision in {
+        AGENT_RECOMMEND_ACCEPT_NEW_DECISION,
+        AGENT_RECOMMEND_KEEP_OVERRIDE_DECISION,
+        AGENT_ESCALATED_DECISION,
+    }
+
+
+def _agent_override_contradiction_payload(
+    *,
+    project: Project,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    confirmed: _ConfirmedReference,
+    contradiction: dict[str, Any],
+    field_name: str,
+) -> dict[str, Any]:
+    proposed_alternatives = _agent_override_proposed_alternatives(
+        article=article,
+        confirmed=confirmed,
+        contradiction=contradiction,
+    )
+    proposed_value = proposed_alternatives[0]["value"] if proposed_alternatives else None
+    return {
+        "origin": "override_contradiction_detection",
+        "agent_origin": "agent_override_contradiction",
+        "field_name": field_name,
+        "source_record_id": str(confirmed.reference.id),
+        "current_value": serialize_json(getattr(project, field_name, None)),
+        "proposed_value": serialize_json(proposed_value),
+        "proposed_alternatives": proposed_alternatives,
+        "current_override": serialize_json(contradiction.get("current_override") or {}),
+        "candidate": serialize_json(contradiction.get("candidate") or {}),
+        "evidence_ids": [str(confirmed.evidence.id)],
+        "winning_evidence_id": str(confirmed.evidence.id),
+        "agent_run_id": str(confirmed.agent_run_id) if confirmed.agent_run_id is not None else None,
+        "agent_outcome": confirmed.agent_outcome,
+        "agent_revised_verdict": serialize_json(confirmed.agent_revised_verdict or {}),
+        "reasoning_trace": confirmed.agent_reasoning_trace,
+        "system_recommendation": _agent_override_system_recommendation(
+            confirmed.agent_revised_verdict,
+        ),
+        "message": (
+            "Newer article evidence contradicts a manual override. The agent reviewed "
+            "the override and evidence before creating this contradiction item."
+        ),
+        "news_context": _news_context(
+            article=article,
+            extraction=extraction,
+            reference=confirmed.reference,
+            field_name=field_name,
+            evidence_id=confirmed.evidence.id,
+        ),
+        "match": confirmed.match.candidates_payload(),
+        "mapped_fields": _field_values(_news_extracted_fields(article, confirmed.reference)),
+    }
+
+
+def _agent_override_proposed_alternatives(
+    *,
+    article: NewsArticle,
+    confirmed: _ConfirmedReference,
+    contradiction: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_candidate = contradiction.get("candidate") if isinstance(contradiction, dict) else {}
+    raw_override = (
+        contradiction.get("current_override") if isinstance(contradiction, dict) else {}
+    )
+    candidate = raw_candidate if isinstance(raw_candidate, dict) else {}
+    current_override = raw_override if isinstance(raw_override, dict) else {}
+    candidate_alt = {
+        "value": serialize_json(candidate.get("value")),
+        "source_evidence_id": str(confirmed.evidence.id),
+        "source_summary": _article_source_summary(article),
+        "agent_confidence": _agent_verdict_confidence(confirmed.agent_revised_verdict),
+        "source_url": article.url_canonical,
+        "kind": "article_evidence",
+    }
+    override_alt = {
+        "value": serialize_json(current_override.get("value")),
+        "source_evidence_id": None,
+        "source_summary": _override_source_summary(current_override),
+        "agent_confidence": _agent_verdict_confidence(confirmed.agent_revised_verdict),
+        "source_url": current_override.get("source_url"),
+        "kind": "active_override",
+    }
+    verdict = confirmed.agent_revised_verdict or {}
+    decision = verdict.get("decision") if isinstance(verdict, dict) else None
+    if decision == AGENT_RECOMMEND_KEEP_OVERRIDE_DECISION:
+        return [override_alt, candidate_alt]
+    return [candidate_alt, override_alt]
+
+
+def _agent_override_system_recommendation(verdict: dict[str, Any] | None) -> dict[str, Any]:
+    decision = verdict.get("decision") if isinstance(verdict, dict) else None
+    if decision == AGENT_RECOMMEND_ACCEPT_NEW_DECISION:
+        action = "researcher_accept_new_recommended"
+    elif decision == AGENT_RECOMMEND_KEEP_OVERRIDE_DECISION:
+        action = "researcher_keep_override_recommended"
+    else:
+        action = "researcher_review_required"
+    return {
+        "action": action,
+        "reason": verdict.get("reason") if isinstance(verdict, dict) else None,
+        "confidence": _agent_verdict_confidence(verdict),
+    }
+
+
+def _agent_verdict_confidence(verdict: dict[str, Any] | None) -> float | None:
+    if not isinstance(verdict, dict):
+        return None
+    return _agent_confidence(verdict.get("confidence"))
+
+
+def _article_source_summary(article: NewsArticle) -> str:
+    title = _clean_text(article.title) or "News article"
+    if article.published_at is not None:
+        return f"{title} ({article.published_at.date().isoformat()})"
+    return title
+
+
+def _override_source_summary(value: Any) -> str:
+    override = value if isinstance(value, dict) else {}
+    set_by = _clean_text(override.get("set_by"))
+    set_at = _clean_text(override.get("set_at"))
+    if set_by and set_at:
+        return f"Active researcher override set by {set_by} at {set_at}"
+    if set_by:
+        return f"Active researcher override set by {set_by}"
+    return "Active researcher override"
+
+
+def _contradicted_override_id(contradiction: dict[str, Any]) -> uuid.UUID | None:
+    current_override = contradiction.get("current_override")
+    if not isinstance(current_override, dict):
+        return None
+    raw_id = current_override.get("id")
+    if raw_id in (None, ""):
+        return None
+    try:
+        return uuid.UUID(str(raw_id))
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_override_contradiction_priority(
+    field_name: str,
+    contradiction: dict[str, Any],
+) -> Priority:
+    if field_name == "pipeline_status":
+        return Priority.HIGH
+    if field_name in {"total_units", "affordable_units", "market_rate_units", "workforce_units"}:
+        current_override = contradiction.get("current_override")
+        candidate = contradiction.get("candidate")
+        override_value = (
+            current_override.get("value") if isinstance(current_override, dict) else None
+        )
+        candidate_value = candidate.get("value") if isinstance(candidate, dict) else None
+        try:
+            delta = abs(int(override_value) - int(candidate_value))
+        except (TypeError, ValueError):
+            delta = 0
+        if delta > 50:
+            return Priority.HIGH
+    return Priority.MEDIUM
 
 
 def _upsert_agent_structural_conflict_review_items(

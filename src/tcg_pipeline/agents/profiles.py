@@ -28,6 +28,7 @@ class AgentTrigger(enum.StrEnum):
     POSSIBLE_MULTI_CANDIDATE = "possible_multi_candidate"
     MULTIPLE_DISTINCT_MENTIONS = "multiple_distinct_mentions"
     MATERIAL_CONTRADICTION = "material_contradiction"
+    OVERRIDE_CONTRADICTION = "override_contradiction"
 
 
 @dataclass(frozen=True, slots=True)

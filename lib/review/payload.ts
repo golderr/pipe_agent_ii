@@ -59,7 +59,10 @@ export function candidateValuesForItem(item: ReviewQueueItem) {
   if (item.itemType === "new_candidate" || item.itemType === "possible_match") {
     return [];
   }
-  const candidates = asRecordArray(item.payload?.candidates);
+  const candidates =
+    asRecordArray(item.payload?.proposed_alternatives).length > 0
+      ? asRecordArray(item.payload?.proposed_alternatives)
+      : asRecordArray(item.payload?.candidates);
   return candidates.map((candidate) => ("value" in candidate ? candidate.value : candidate));
 }
 
@@ -112,10 +115,14 @@ export function currentValueForItem(item: ReviewQueueItem) {
 export function proposedValueForItem(item: ReviewQueueItem) {
   const payload = item.payload;
   const candidate = asRecord(payload?.candidate);
+  const proposedAlternatives = asRecordArray(payload?.proposed_alternatives);
   const statusSuggestion = asRecord(payload?.status_suggestion);
   const change = firstChange(item);
   if (payload && "proposed_value" in payload) {
     return payload.proposed_value;
+  }
+  if (proposedAlternatives[0] && "value" in proposedAlternatives[0]) {
+    return proposedAlternatives[0].value;
   }
   if (candidate && "value" in candidate) {
     return candidate.value;

@@ -47,6 +47,15 @@ def test_news_agent_prompt_defines_material_contradiction_contract() -> None:
     assert "get_project_state" in prompt
 
 
+def test_news_agent_prompt_defines_override_contradiction_contract() -> None:
+    prompt = NEWS_AGENT_PROFILE.system_prompt_path.read_text(encoding="utf-8")
+
+    assert "For override_contradiction triggers:" in prompt
+    assert "recommend_accept_new" in prompt
+    assert "recommend_keep_override" in prompt
+    assert "proposed alternatives" in prompt
+
+
 def test_normalize_agent_triggers_accepts_enums_and_strings() -> None:
     assert normalize_agent_triggers(
         [AgentTrigger.NEW_CANDIDATE, "material_contradiction"]

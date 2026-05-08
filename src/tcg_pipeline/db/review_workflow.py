@@ -1209,7 +1209,8 @@ def _apply_field_or_contradiction_decision(
             actor_user_id=actor_user_id,
             timestamp=timestamp,
             note=decision.decision_notes or decision.notes,
-            source_url=decision.source_url,
+            source_url=decision.source_url
+            or _candidate_source_url_for_decision(review_item, decision_type),
         )
     else:
         raise ValueError(f"{decision_type} cannot be committed.")
@@ -1292,7 +1293,7 @@ def _candidate_value_for_decision(review_item: ReviewItem, decision_type: str) -
     raw_index = int(decision_type.removeprefix(DECISION_CANDIDATE_PREFIX))
     candidate_index = raw_index - 1 if raw_index > 0 else 0
     payload = _payload_mapping(review_item.payload)
-    candidates = payload.get("candidates")
+    candidates = payload.get("proposed_alternatives") or payload.get("candidates")
     if isinstance(candidates, list) and candidate_index < len(candidates):
         candidate = candidates[candidate_index]
     elif candidate_index == 0 and isinstance(payload.get("candidate"), Mapping):
@@ -1302,6 +1303,22 @@ def _candidate_value_for_decision(review_item: ReviewItem, decision_type: str) -
     if isinstance(candidate, Mapping) and "value" in candidate:
         return candidate.get("value")
     return candidate
+
+
+def _candidate_source_url_for_decision(
+    review_item: ReviewItem,
+    decision_type: str,
+) -> str | None:
+    raw_index = int(decision_type.removeprefix(DECISION_CANDIDATE_PREFIX))
+    candidate_index = raw_index - 1 if raw_index > 0 else 0
+    payload = _payload_mapping(review_item.payload)
+    candidates = payload.get("proposed_alternatives") or payload.get("candidates")
+    if not isinstance(candidates, list) or candidate_index >= len(candidates):
+        return None
+    candidate = candidates[candidate_index]
+    if not isinstance(candidate, Mapping):
+        return None
+    return _coerce_text(candidate.get("source_url"))
 
 
 def _upsert_review_override(

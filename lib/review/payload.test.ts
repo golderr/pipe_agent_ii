@@ -77,6 +77,24 @@ describe("review payload helpers", () => {
     expect(warningForItem(item)).toBe("Unit delta exceeds threshold.");
   });
 
+  it("extracts agent contradiction proposed alternatives", () => {
+    const item = reviewItem({
+      payload: {
+        field_name: "workforce_units",
+        current_override: { value: 10 },
+        proposed_alternatives: [
+          { value: 20, source_summary: "News article" },
+          { value: 10, source_summary: "Active researcher override" }
+        ]
+      }
+    });
+
+    expect(fieldNameForItem(item)).toBe("workforce_units");
+    expect(currentValueForItem(item)).toBe(10);
+    expect(proposedValueForItem(item)).toBe(20);
+    expect(candidateValuesForItem(item)).toEqual([20, 10]);
+  });
+
   it("falls back to changes array fields", () => {
     const item = reviewItem({
       itemType: "field_change",

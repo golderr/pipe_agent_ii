@@ -36,6 +36,7 @@ from tcg_pipeline.db.models import (
     SourceRun,
     StatusConfidence,
 )
+from tcg_pipeline.db.researcher_overrides import upsert_researcher_overrides
 from tcg_pipeline.db.review_workflow import accept_review_item
 from tcg_pipeline.matching.news_matcher import NewsMatchResult, match_news_reference
 from tcg_pipeline.matching.normalizer import normalize_address
@@ -1425,6 +1426,113 @@ def test_news_integration_material_contradiction_agent_can_downgrade_to_possible
         select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
     ).scalar_one()
     assert agent_run.triggered_by == ["material_contradiction"]
+    link = postgres_session.get(
+        AgentRunReviewItem,
+        (agent_run.id, review_item.id),
+    )
+    assert link is not None
+
+
+def test_news_integration_agent_creates_override_contradiction_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2150 Override Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Override Conflict Tower",
+        total_units=100,
+    )
+    project.workforce_units = 10
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    upsert_researcher_overrides(
+        postgres_session,
+        project,
+        {
+            "workforce_units": {
+                "value": 10,
+                "set_by": "reviewer@example.com",
+                "set_at": "2026-04-01T12:00:00+00:00",
+                "mode": "review_protected",
+                "baseline": {
+                    "evidence_date": "2026-04-01",
+                    "collected_at": "2026-04-01T12:00:00+00:00",
+                    "source_tier": 3,
+                    "source_type": "costar",
+                },
+            }
+        },
+    )
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Override Conflict Tower",
+                candidate_address="2150 Override Boulevard, Los Angeles, CA 90012",
+                candidate_unit_workforce=20,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient(
+        {
+            "decision": "recommend_accept_new",
+            "field": "workforce_units",
+            "confidence": 0.81,
+            "reason": "The article gives a newer explicit workforce-unit count.",
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests[0].trigger_reasons == ("override_contradiction",)
+    contradiction = client.requests[0].intake.payload["override_contradictions"][0]
+    assert contradiction["field"] == "workforce_units"
+    assert contradiction["current_override"]["value"] == 10
+    assert contradiction["candidate"]["value"] == 20
+    postgres_session.expire_all()
+    refreshed_project = postgres_session.get(Project, project.id)
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_project is not None
+    assert refreshed_project.workforce_units == 10
+    assert refreshed_reference is not None
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.OVERRIDE_CONTRADICTION,
+            ReviewItem.state.in_(["open", "staged"]),
+        )
+    ).scalar_one()
+    alternatives = review_item.payload["proposed_alternatives"]
+    assert [alternative["value"] for alternative in alternatives] == [20, 10]
+    assert review_item.payload["agent_origin"] == "agent_override_contradiction"
+    assert review_item.payload["system_recommendation"]["action"] == (
+        "researcher_accept_new_recommended"
+    )
+    assert refreshed_reference.review_item_id == review_item.id
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["override_contradiction"]
     link = postgres_session.get(
         AgentRunReviewItem,
         (agent_run.id, review_item.id),
