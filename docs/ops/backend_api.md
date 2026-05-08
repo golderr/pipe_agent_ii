@@ -67,11 +67,15 @@ semantic event source is `semantic.news_v1`; publisher-source filters such as
 `GET /activity/semantic-metrics` is a companion aggregation endpoint for Pass 2c
 monitoring. Supported filters are `source`, `field`, `market`, `from_date`, and
 `to_date`. It returns source/field/market-aware reason-code counts with
-glossary-gap and unmappable rates. Aggregation runs in SQL against
-`news_semantic_interpretations` rows rather than a capped Python sample.
-Reviewer-rejection-rate metrics are present in the response shape but remain
-`0` / `null` until review decisions can be joined back to semantic-origin rows
-consistently.
+glossary-gap, unmappable, and reviewer-rejection rates. Aggregation runs in SQL
+against `news_semantic_interpretations` rows rather than a capped Python sample.
+Reviewer rejection is computed only from committed, non-deferred review
+decisions on review items whose payload carries `semantic_interpretation_id`.
+`keep_old` and `custom` count as rejections, `accept_new` counts as acceptance,
+and `candidate_N` compares the selected alternative value against the semantic
+`canonical_value`. Deferred/open review items are excluded from the denominator.
+The returned `reviewer_rejection_sigma` threshold is metadata for the future
+multi-market baseline alert; the UI does not alert on rejection rate yet.
 
 For news-agent rows, the response exposes both `article_fetched_at` and
 `agent_created_at` so researchers can distinguish article arrival time from the

@@ -46,6 +46,12 @@ AGENT_FAILURE_DISPLAY = {
     "failed_error": "Agent failed: Error",
     "killed_by_switch": "Agent killed by switch",
 }
+INTAKE_KIND_LABELS = {
+    "news_article": "News article",
+    "ladbs_permit": "LADBS permit",
+    "costar": "CoStar upload",
+    "pipedream": "Pipedream import",
+}
 SEMANTIC_LOGICAL_SOURCE = "semantic.news_v1"
 SEMANTIC_SOURCE_LABEL = "Semantic Pass 2c"
 SEMANTIC_GAP_RATE_THRESHOLD = 0.15
@@ -476,11 +482,13 @@ def _semantic_metric_rows(
             f"""
 WITH semantic_items AS (
     SELECT
+        nsi.id::text AS semantic_interpretation_id,
         p.market AS market,
         ns.slug AS source_slug,
         ns.name AS source_name,
         interp.item ->> 'field_name' AS field_name,
         interp.item ->> 'reason_code' AS reason_code,
+        interp.item -> 'canonical_value' AS canonical_value,
         (interp.item #>> '{{signal_flags,glossary_gap_observed}}') = 'true'
             AS glossary_gap_observed
     FROM news_semantic_interpretations nsi
@@ -515,22 +523,91 @@ WITH semantic_items AS (
         CAST(:to_at AS timestamp with time zone) IS NULL
         OR nsi.created_at <= CAST(:to_at AS timestamp with time zone)
     )
+),
+latest_committed_decisions AS (
+    SELECT DISTINCT ON (rd.review_item_id)
+        rd.review_item_id,
+        rd.decision_type
+    FROM review_decisions rd
+    WHERE rd.state = 'committed'
+    AND rd.decision_type IS NOT NULL
+    AND rd.decision_type <> 'defer'
+    ORDER BY
+        rd.review_item_id,
+        rd.committed_at DESC NULLS LAST,
+        rd.created_at DESC,
+        rd.id DESC
+),
+semantic_decision_candidates AS (
+    SELECT
+        ri.payload ->> 'semantic_interpretation_id' AS semantic_interpretation_id,
+        COALESCE(
+            ri.field_name,
+            ri.payload ->> 'field_name',
+            ri.payload #>> '{{semantic_interpretation,field_name}}'
+        ) AS field_name,
+        ld.review_item_id,
+        ld.decision_type,
+        CASE
+            WHEN decision_index.candidate_index IS NULL THEN NULL
+            ELSE COALESCE(
+                ri.payload -> 'proposed_alternatives' -> decision_index.candidate_index -> 'value',
+                ri.payload -> 'candidates' -> decision_index.candidate_index -> 'value',
+                CASE
+                    WHEN decision_index.candidate_index = 0
+                    THEN ri.payload -> 'candidate' -> 'value'
+                    ELSE NULL
+                END
+            )
+        END AS selected_candidate_value
+    FROM review_items ri
+    JOIN latest_committed_decisions ld ON ld.review_item_id = ri.id
+    LEFT JOIN LATERAL (
+        SELECT
+            CASE
+                WHEN ld.decision_type ~ '^candidate_[0-9]+$'
+                THEN GREATEST(
+                    (substring(ld.decision_type FROM '^candidate_([0-9]+)$'))::integer - 1,
+                    0
+                )
+                ELSE NULL
+            END AS candidate_index
+    ) decision_index ON true
+    WHERE ri.payload ->> 'semantic_interpretation_id' IS NOT NULL
 )
 SELECT
-    market,
-    source_slug,
-    source_name,
-    field_name,
-    reason_code,
+    si.market,
+    si.source_slug,
+    si.source_name,
+    si.field_name,
+    si.reason_code,
     count(*)::integer AS total_count,
-    count(*) FILTER (WHERE glossary_gap_observed)::integer AS glossary_gap_count,
-    count(*) FILTER (WHERE reason_code LIKE '%\\_unmappable' ESCAPE '\\')::integer
-        AS unmappable_count
-FROM semantic_items
-WHERE field_name IS NOT NULL
-AND reason_code IS NOT NULL
-GROUP BY market, source_slug, source_name, field_name, reason_code
-ORDER BY market NULLS LAST, source_slug NULLS LAST, field_name, reason_code
+    count(*) FILTER (WHERE si.glossary_gap_observed)::integer AS glossary_gap_count,
+    count(*) FILTER (WHERE si.reason_code LIKE '%\\_unmappable' ESCAPE '\\')::integer
+        AS unmappable_count,
+    COALESCE(sum(decision_counts.reviewer_decision_count), 0)::integer
+        AS reviewer_decision_count,
+    COALESCE(sum(decision_counts.reviewer_rejection_count), 0)::integer
+        AS reviewer_rejection_count
+FROM semantic_items si
+LEFT JOIN LATERAL (
+    SELECT
+        count(*)::integer AS reviewer_decision_count,
+        count(*) FILTER (
+            WHERE sdc.decision_type IN ('keep_old', 'custom')
+            OR (
+                sdc.decision_type ~ '^candidate_[0-9]+$'
+                AND sdc.selected_candidate_value IS DISTINCT FROM si.canonical_value
+            )
+        )::integer AS reviewer_rejection_count
+    FROM semantic_decision_candidates sdc
+    WHERE sdc.semantic_interpretation_id = si.semantic_interpretation_id
+    AND sdc.field_name = si.field_name
+) decision_counts ON true
+WHERE si.field_name IS NOT NULL
+AND si.reason_code IS NOT NULL
+GROUP BY si.market, si.source_slug, si.source_name, si.field_name, si.reason_code
+ORDER BY si.market NULLS LAST, si.source_slug NULLS LAST, si.field_name, si.reason_code
 """
         ),
         {
@@ -547,6 +624,8 @@ ORDER BY market NULLS LAST, source_slug NULLS LAST, field_name, reason_code
         total_count = int(row["total_count"] or 0)
         glossary_gap_count = int(row["glossary_gap_count"] or 0)
         unmappable_count = int(row["unmappable_count"] or 0)
+        reviewer_decision_count = int(row["reviewer_decision_count"] or 0)
+        reviewer_rejection_count = int(row["reviewer_rejection_count"] or 0)
         metrics.append(
             ActivitySemanticMetricResponse(
                 market=row["market"],
@@ -560,6 +639,13 @@ ORDER BY market NULLS LAST, source_slug NULLS LAST, field_name, reason_code
                 unmappable_count=unmappable_count,
                 glossary_gap_rate=glossary_gap_count / total_count if total_count else 0.0,
                 unmappable_rate=unmappable_count / total_count if total_count else 0.0,
+                reviewer_decision_count=reviewer_decision_count,
+                reviewer_rejection_count=reviewer_rejection_count,
+                reviewer_rejection_rate=(
+                    reviewer_rejection_count / reviewer_decision_count
+                    if reviewer_decision_count
+                    else None
+                ),
             )
         )
     return metrics
@@ -1122,12 +1208,15 @@ def _article_summary(
 
 def _news_article_intake_summary(
     article_summary: ActivityArticleSummary | None,
-) -> ActivityIntakeSummary | None:
-    if article_summary is None:
-        return None
+) -> ActivityIntakeSummary:
+    label = (
+        article_summary.source_name or article_summary.source_slug
+        if article_summary is not None
+        else None
+    )
     return ActivityIntakeSummary(
         kind="news_article",
-        label=article_summary.source_name or article_summary.source_slug or "News article",
+        label=label or INTAKE_KIND_LABELS["news_article"],
         article=article_summary,
     )
 
@@ -1140,7 +1229,7 @@ def _intake_summary_for_agent_run(
         return _news_article_intake_summary(article_summary)
     return ActivityIntakeSummary(
         kind=row.intake_source_type,
-        label=_source_label(row.intake_source_type),
+        label=INTAKE_KIND_LABELS.get(row.intake_source_type, _source_label(row.intake_source_type)),
     )
 
 

@@ -245,11 +245,20 @@ class ActivityArticleSummary(BaseModel):
     published_at: str | None
 
 
+class ActivityPermitSummary(BaseModel):
+    """Reserved Activity intake branch for AGENT.3 permit events."""
+
+    permit_number: str | None = None
+    permit_type: str | None = None
+    issue_date: str | None = None
+    address: str | None = None
+
+
 class ActivityIntakeSummary(BaseModel):
     kind: str
     label: str | None = None
     article: ActivityArticleSummary | None = None
-    permit: dict[str, Any] | None = None
+    permit: ActivityPermitSummary | None = None
 
 
 class ActivityEventResponse(BaseModel):
@@ -271,7 +280,10 @@ class ActivityEventResponse(BaseModel):
     review_item_id: uuid.UUID | None = None
     review_item_ids: list[uuid.UUID] = Field(default_factory=list)
     article: ActivityArticleSummary | None = None
-    intake_summary: ActivityIntakeSummary | None = None
+    intake_summary: ActivityIntakeSummary | None = Field(
+        default=None,
+        description="Source-row context, populated for agent and semantic events.",
+    )
     article_fetched_at: str | None = None
     agent_created_at: str | None = None
     agent_outcome: str | None = None
@@ -298,6 +310,7 @@ class ActivitySemanticMetricResponse(BaseModel):
     unmappable_count: int
     glossary_gap_rate: float
     unmappable_rate: float
+    reviewer_decision_count: int = 0
     reviewer_rejection_count: int = 0
     reviewer_rejection_rate: float | None = None
 

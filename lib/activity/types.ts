@@ -18,11 +18,18 @@ export type ActivityArticleSummary = {
   published_at: string | null;
 };
 
+export type ActivityPermitSummary = {
+  permit_number: string | null;
+  permit_type: string | null;
+  issue_date: string | null;
+  address: string | null;
+};
+
 export type ActivityIntakeSummary = {
   kind: string;
   label: string | null;
   article: ActivityArticleSummary | null;
-  permit: Record<string, unknown> | null;
+  permit: ActivityPermitSummary | null;
 };
 
 export type ActivityEvent = {
@@ -71,6 +78,7 @@ export type ActivitySemanticMetric = {
   unmappable_count: number;
   glossary_gap_rate: number;
   unmappable_rate: number;
+  reviewer_decision_count: number;
   reviewer_rejection_count: number;
   reviewer_rejection_rate: number | null;
 };

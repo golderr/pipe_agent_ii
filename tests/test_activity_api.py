@@ -31,6 +31,8 @@ from tcg_pipeline.db.models import (
     Priority,
     Project,
     ResolutionLog,
+    ReviewDecision,
+    ReviewDecisionAction,
     ReviewItem,
     ReviewItemStatus,
     ReviewItemType,
@@ -73,7 +75,7 @@ def _project(
 
 def _agent_run(
     postgres_session: Session,
-    project: Project,
+    project: Project | None,
     *,
     article_id: uuid.UUID | None = None,
     intake_source_type: str = "news_article",
@@ -97,7 +99,7 @@ def _agent_run(
 
 
 def _agent_run_model(
-    project: Project,
+    project: Project | None,
     *,
     article_id: uuid.UUID | None = None,
     intake_source_type: str = "news_article",
@@ -109,7 +111,7 @@ def _agent_run_model(
     return AgentRun(
         intake_source_type=intake_source_type,
         intake_record_id=intake_record_id or str(article_id or uuid.uuid4()),
-        project_id=project.id,
+        project_id=project.id if project is not None else None,
         profile_name=profile_name,
         profile_version="v1",
         triggered_by=["low_confidence"],
@@ -250,6 +252,66 @@ def _semantic_interpretation(
     postgres_session.add(semantic)
     postgres_session.flush()
     return semantic
+
+
+def _semantic_review_decision(
+    postgres_session: Session,
+    semantic: NewsSemanticInterpretation,
+    project: Project,
+    *,
+    decision_type: str,
+    canonical_value: object = "Under Construction",
+    proposed_alternatives: list[object] | None = None,
+    committed_at: datetime = datetime(2026, 5, 8, 11, 0, tzinfo=UTC),
+) -> ReviewDecision:
+    payload = {
+        "origin": "semantic_pass2c",
+        "field_name": "pipeline_status",
+        "semantic_interpretation_id": str(semantic.id),
+        "proposed_value": canonical_value,
+        "semantic_interpretation": {
+            "field_name": "pipeline_status",
+            "canonical_value": canonical_value,
+        },
+    }
+    if proposed_alternatives is not None:
+        payload["proposed_alternatives"] = [
+            {"value": value, "source_summary": "test"} for value in proposed_alternatives
+        ]
+    review_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.MEDIUM,
+        field_name="pipeline_status",
+        payload=payload,
+    )
+    postgres_session.add(review_item)
+    postgres_session.flush()
+    action = {
+        "accept_new": ReviewDecisionAction.ACCEPT,
+        "keep_old": ReviewDecisionAction.REJECT,
+        "custom": ReviewDecisionAction.OVERRIDE,
+        "defer": ReviewDecisionAction.DEFER,
+    }.get(
+        decision_type,
+        ReviewDecisionAction.ACCEPT
+        if decision_type.startswith("candidate_")
+        else ReviewDecisionAction.ACCEPT,
+    )
+    decision = ReviewDecision(
+        review_item_id=review_item.id,
+        action=action,
+        actor="tester",
+        state="committed",
+        decision_type=decision_type,
+        committed_at=committed_at,
+        decision_value={"value": canonical_value},
+    )
+    postgres_session.add(decision)
+    postgres_session.flush()
+    return decision
 
 
 def test_activity_feed_combines_change_resolution_and_agent_rows(
@@ -400,7 +462,54 @@ def test_activity_feed_agent_event_exposes_generic_non_news_intake_summary(
     assert event.article is None
     assert event.intake_summary is not None
     assert event.intake_summary.kind == "ladbs_permit"
-    assert event.intake_summary.label == "Ladbs Permit"
+    assert event.intake_summary.label == "LADBS permit"
+
+
+def test_activity_feed_non_news_orphan_agent_keeps_intake_summary(
+    postgres_session: Session,
+) -> None:
+    agent_run = _agent_run(
+        postgres_session,
+        None,
+        intake_source_type="ladbs_permit",
+        intake_record_id="2026LA67890",
+        profile_name="permit_v1",
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        event_type="agent",
+        limit=10,
+    )
+
+    event = next(item for item in response.events if item.id == f"agent:{agent_run.id}")
+    assert event.project is None
+    assert event.article is None
+    assert event.intake_summary is not None
+    assert event.intake_summary.kind == "ladbs_permit"
+    assert event.intake_summary.label == "LADBS permit"
+
+
+def test_activity_feed_news_agent_missing_article_keeps_intake_discriminator(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "176 Missing Article Activity Way")
+    agent_run = _agent_run(postgres_session, project)
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"agent:{agent_run.id}"
+    assert event.article is None
+    assert event.intake_summary is not None
+    assert event.intake_summary.kind == "news_article"
+    assert event.intake_summary.label == "News article"
 
 
 def test_activity_feed_agent_view_filters_to_agent_rows(postgres_session: Session) -> None:
@@ -1213,6 +1322,79 @@ def test_activity_semantic_metrics_aggregate_gap_and_unmappable_rates(
     assert metric.unmappable_rate == 1.0
     assert response.thresholds["glossary_gap_rate"] == 0.15
     assert response.thresholds["unmappable_rate"] == 0.05
+
+
+def test_activity_semantic_metrics_count_reviewer_rejection_rate(
+    postgres_session: Session,
+) -> None:
+    projects = [
+        _project(postgres_session, f"760 Activity Way Unit {index}")
+        for index in range(6)
+    ]
+    source_slug = f"semantic-rejection-source-{uuid.uuid4().hex}"
+    semantics = [
+        _semantic_interpretation(
+            postgres_session,
+            projects[index],
+            source_slug=source_slug,
+            reason_code="news_status_uncorroborated_high_quality_permit_jurisdiction",
+            created_at=datetime(2026, 5, 8, 10, index, tzinfo=UTC),
+        )
+        for index in range(6)
+    ]
+    _semantic_review_decision(
+        postgres_session,
+        semantics[0],
+        projects[0],
+        decision_type="accept_new",
+    )
+    _semantic_review_decision(
+        postgres_session,
+        semantics[1],
+        projects[1],
+        decision_type="keep_old",
+    )
+    _semantic_review_decision(
+        postgres_session,
+        semantics[2],
+        projects[2],
+        decision_type="custom",
+    )
+    _semantic_review_decision(
+        postgres_session,
+        semantics[3],
+        projects[3],
+        decision_type="defer",
+    )
+    _semantic_review_decision(
+        postgres_session,
+        semantics[4],
+        projects[4],
+        decision_type="candidate_1",
+        proposed_alternatives=["Under Construction"],
+    )
+    _semantic_review_decision(
+        postgres_session,
+        semantics[5],
+        projects[5],
+        decision_type="candidate_1",
+        proposed_alternatives=["Approved"],
+    )
+
+    response = list_activity_semantic_metrics(
+        user=_auth_user(),
+        session=postgres_session,
+        source=source_slug,
+        field="pipeline_status",
+    )
+
+    assert len(response.metrics) == 1
+    metric = response.metrics[0]
+    assert metric.total_count == 6
+    assert metric.reviewer_decision_count == 5
+    assert metric.reviewer_rejection_count == 3
+    assert metric.reviewer_rejection_rate == 0.6
+    assert response.thresholds["reviewer_rejection_sigma"] == 2.0
 
 
 def test_activity_semantic_metrics_market_filter_excludes_other_markets(

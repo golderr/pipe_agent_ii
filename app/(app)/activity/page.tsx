@@ -443,6 +443,12 @@ function SemanticMetricsPanel({
                 <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
                   <span>gap {(metric.glossary_gap_rate * 100).toFixed(0)}%</span>
                   <span>unmappable {(metric.unmappable_rate * 100).toFixed(0)}%</span>
+                  {metric.reviewer_rejection_rate !== null ? (
+                    <span>
+                      rejected {(metric.reviewer_rejection_rate * 100).toFixed(0)}%/
+                      {metric.reviewer_decision_count}
+                    </span>
+                  ) : null}
                   {metric.market ? <span>{metric.market}</span> : null}
                   {alert ? <span className="font-medium text-amber-800">threshold exceeded</span> : null}
                 </div>
