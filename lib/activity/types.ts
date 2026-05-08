@@ -18,6 +18,13 @@ export type ActivityArticleSummary = {
   published_at: string | null;
 };
 
+export type ActivityIntakeSummary = {
+  kind: string;
+  label: string | null;
+  article: ActivityArticleSummary | null;
+  permit: Record<string, unknown> | null;
+};
+
 export type ActivityEvent = {
   id: string;
   event_type: "change" | "resolution" | "agent" | "semantic";
@@ -37,6 +44,7 @@ export type ActivityEvent = {
   review_item_id: string | null;
   review_item_ids: string[];
   article: ActivityArticleSummary | null;
+  intake_summary: ActivityIntakeSummary | null;
   article_fetched_at: string | null;
   agent_created_at: string | null;
   agent_outcome: string | null;

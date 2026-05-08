@@ -249,6 +249,9 @@ function DetailRows({ event }: { event: ActivityEvent }) {
           }
         />
       ) : null}
+      {!event.article && event.intake_summary ? (
+        <DetailRow label="Intake" value={intakeSummaryLabel(event.intake_summary)} />
+      ) : null}
       {event.article_fetched_at || event.agent_created_at ? (
         <DetailRow
           label="News timing"
@@ -484,4 +487,8 @@ function CompactId({ id }: { id: string }) {
 function detailString(event: ActivityEvent, key: string) {
   const value = event.detail[key];
   return typeof value === "string" && value.length ? value : null;
+}
+
+function intakeSummaryLabel(summary: NonNullable<ActivityEvent["intake_summary"]>) {
+  return summary.label ?? summary.kind;
 }

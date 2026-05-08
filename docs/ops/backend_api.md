@@ -77,6 +77,13 @@ For news-agent rows, the response exposes both `article_fetched_at` and
 `agent_created_at` so researchers can distinguish article arrival time from the
 agent decision time when child-job queue depth creates lag.
 
+Activity rows also include `intake_summary`, a source-typed wrapper for the
+record that produced the event. Today this is populated as
+`{kind: "news_article", article: ...}` for news agent and Pass 2c semantic
+events, while non-news agent rows get a generic `{kind, label}` placeholder.
+AGENT.3 permit work will fill the `permit` branch without changing the top-level
+activity event shape.
+
 ## Required Environment
 
 ```powershell

@@ -15,6 +15,7 @@ from tcg_pipeline.api.schemas import (
     ActivityArticleSummary,
     ActivityEventResponse,
     ActivityFeedResponse,
+    ActivityIntakeSummary,
     ActivityProjectSummary,
     ActivitySemanticMetricResponse,
     ActivitySemanticMetricsResponse,
@@ -939,19 +940,7 @@ def _agent_event(
         title = f"Agent decision: {trigger_text}"
     else:
         title = "Agent decision"
-    article_summary = (
-        ActivityArticleSummary(
-            id=article.id,
-            title=article.title,
-            url=article.url_canonical,
-            source_slug=news_source.slug if news_source else None,
-            source_name=news_source.name if news_source else None,
-            fetched_at=article.fetched_at.isoformat() if article.fetched_at else None,
-            published_at=article.published_at.isoformat() if article.published_at else None,
-        )
-        if article
-        else None
-    )
+    article_summary = _article_summary(article, news_source)
     return ActivityEventResponse(
         id=f"agent:{row.id}",
         event_type="agent",
@@ -964,6 +953,7 @@ def _agent_event(
         summary=f"{_source_label(row.outcome)} after {row.tool_calls_count} tool calls",
         review_item_ids=review_item_ids,
         article=article_summary,
+        intake_summary=_intake_summary_for_agent_run(row, article_summary),
         article_fetched_at=article_summary.fetched_at if article_summary else None,
         agent_created_at=row.created_at.isoformat(),
         agent_outcome=row.outcome,
@@ -1069,19 +1059,7 @@ def _semantic_event(
     canonical_value = interpretation.get("canonical_value")
     signal_flags = _mapping_or_empty(interpretation.get("signal_flags"))
     metadata = _mapping_or_empty(interpretation.get("metadata"))
-    article_summary = (
-        ActivityArticleSummary(
-            id=article.id,
-            title=article.title,
-            url=article.url_canonical,
-            source_slug=news_source.slug if news_source else None,
-            source_name=news_source.name if news_source else None,
-            fetched_at=article.fetched_at.isoformat() if article.fetched_at else None,
-            published_at=article.published_at.isoformat() if article.published_at else None,
-        )
-        if article
-        else None
-    )
+    article_summary = _article_summary(article, news_source)
     summary_parts = [reason_code]
     if confidence:
         summary_parts.append(confidence)
@@ -1102,6 +1080,7 @@ def _semantic_event(
         new_value=canonical_value,
         change_type="semantic_interpretation",
         article=article_summary,
+        intake_summary=_news_article_intake_summary(article_summary),
         article_fetched_at=article_summary.fetched_at if article_summary else None,
         cost_usd=_decimal_to_float(row.cost_usd),
         detail={
@@ -1121,6 +1100,47 @@ def _semantic_event(
             "metadata": metadata,
             "news_source_slug": news_source.slug if news_source else None,
         },
+    )
+
+
+def _article_summary(
+    article: NewsArticle | None,
+    news_source: NewsSource | None,
+) -> ActivityArticleSummary | None:
+    if article is None:
+        return None
+    return ActivityArticleSummary(
+        id=article.id,
+        title=article.title,
+        url=article.url_canonical,
+        source_slug=news_source.slug if news_source else None,
+        source_name=news_source.name if news_source else None,
+        fetched_at=article.fetched_at.isoformat() if article.fetched_at else None,
+        published_at=article.published_at.isoformat() if article.published_at else None,
+    )
+
+
+def _news_article_intake_summary(
+    article_summary: ActivityArticleSummary | None,
+) -> ActivityIntakeSummary | None:
+    if article_summary is None:
+        return None
+    return ActivityIntakeSummary(
+        kind="news_article",
+        label=article_summary.source_name or article_summary.source_slug or "News article",
+        article=article_summary,
+    )
+
+
+def _intake_summary_for_agent_run(
+    row: AgentRun,
+    article_summary: ActivityArticleSummary | None,
+) -> ActivityIntakeSummary | None:
+    if row.intake_source_type == "news_article":
+        return _news_article_intake_summary(article_summary)
+    return ActivityIntakeSummary(
+        kind=row.intake_source_type,
+        label=_source_label(row.intake_source_type),
     )
 
 

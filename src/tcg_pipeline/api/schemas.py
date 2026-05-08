@@ -245,6 +245,13 @@ class ActivityArticleSummary(BaseModel):
     published_at: str | None
 
 
+class ActivityIntakeSummary(BaseModel):
+    kind: str
+    label: str | None = None
+    article: ActivityArticleSummary | None = None
+    permit: dict[str, Any] | None = None
+
+
 class ActivityEventResponse(BaseModel):
     id: str
     event_type: str
@@ -264,6 +271,7 @@ class ActivityEventResponse(BaseModel):
     review_item_id: uuid.UUID | None = None
     review_item_ids: list[uuid.UUID] = Field(default_factory=list)
     article: ActivityArticleSummary | None = None
+    intake_summary: ActivityIntakeSummary | None = None
     article_fetched_at: str | None = None
     agent_created_at: str | None = None
     agent_outcome: str | None = None

@@ -76,12 +76,18 @@ def _agent_run(
     project: Project,
     *,
     article_id: uuid.UUID | None = None,
+    intake_source_type: str = "news_article",
+    intake_record_id: str | None = None,
+    profile_name: str = "news_v1",
     created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
     outcome: str = AgentRunOutcome.COMPLETED.value,
 ) -> AgentRun:
     agent_run = _agent_run_model(
         project,
         article_id=article_id,
+        intake_source_type=intake_source_type,
+        intake_record_id=intake_record_id,
+        profile_name=profile_name,
         created_at=created_at,
         outcome=outcome,
     )
@@ -94,14 +100,17 @@ def _agent_run_model(
     project: Project,
     *,
     article_id: uuid.UUID | None = None,
+    intake_source_type: str = "news_article",
+    intake_record_id: str | None = None,
+    profile_name: str = "news_v1",
     created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
     outcome: str = AgentRunOutcome.COMPLETED.value,
 ) -> AgentRun:
     return AgentRun(
-        intake_source_type="news_article",
-        intake_record_id=str(article_id or uuid.uuid4()),
+        intake_source_type=intake_source_type,
+        intake_record_id=intake_record_id or str(article_id or uuid.uuid4()),
         project_id=project.id,
-        profile_name="news_v1",
+        profile_name=profile_name,
         profile_version="v1",
         triggered_by=["low_confidence"],
         provider="anthropic",
@@ -359,9 +368,39 @@ def test_activity_feed_combines_change_resolution_and_agent_rows(
     agent_event = next(event for event in response.events if event.event_type == "agent")
     assert agent_event.article is not None
     assert agent_event.article.fetched_at == "2026-05-08T10:00:00+00:00"
+    assert agent_event.intake_summary is not None
+    assert agent_event.intake_summary.kind == "news_article"
+    assert agent_event.intake_summary.article == agent_event.article
     assert agent_event.agent_created_at == "2026-05-08T10:02:00+00:00"
     assert agent_event.review_item_ids == [review_item.id]
     assert agent_event.cost_usd == 0.012345
+
+
+def test_activity_feed_agent_event_exposes_generic_non_news_intake_summary(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "175 Permit Activity Way")
+    agent_run = _agent_run(
+        postgres_session,
+        project,
+        intake_source_type="ladbs_permit",
+        intake_record_id="2026LA12345",
+        profile_name="permit_v1",
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"agent:{agent_run.id}"
+    assert event.article is None
+    assert event.intake_summary is not None
+    assert event.intake_summary.kind == "ladbs_permit"
+    assert event.intake_summary.label == "Ladbs Permit"
 
 
 def test_activity_feed_agent_view_filters_to_agent_rows(postgres_session: Session) -> None:
@@ -605,6 +644,9 @@ def test_activity_feed_semantic_view_uses_pass2c_interpretation_rows(
     assert response.events[0].project is not None
     assert response.events[0].project.id == project.id
     assert response.events[0].article is not None
+    assert response.events[0].intake_summary is not None
+    assert response.events[0].intake_summary.kind == "news_article"
+    assert response.events[0].intake_summary.article == response.events[0].article
     assert response.events[0].detail["reason_code"] == "news_topped_out"
 
 
