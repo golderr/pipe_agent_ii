@@ -99,6 +99,9 @@ type Banner = {
   message: string;
 } | null;
 
+type SourceFamily = "news" | "permit" | "costar" | "pipedream" | "other";
+type SourceFilter = "all" | SourceFamily | "multiple";
+
 const PRIORITY_RANK: Record<string, number> = {
   high: 0,
   medium: 1,
@@ -112,6 +115,26 @@ const SECTION_LABELS: Record<string, string> = {
   deferred: "Deferred"
 };
 
+const SOURCE_FAMILY_LABELS: Record<SourceFamily, string> = {
+  news: "Article",
+  permit: "Permit",
+  costar: "CoStar",
+  pipedream: "Pipedream",
+  other: "Other"
+};
+
+const SOURCE_FAMILY_ORDER: SourceFamily[] = ["news", "permit", "costar", "pipedream", "other"];
+
+const SOURCE_FILTER_OPTIONS: Array<{ value: SourceFilter; label: string }> = [
+  { value: "all", label: "All sources" },
+  { value: "news", label: "Article" },
+  { value: "permit", label: "Permit" },
+  { value: "costar", label: "CoStar" },
+  { value: "pipedream", label: "Pipedream" },
+  { value: "multiple", label: "Multiple" },
+  { value: "other", label: "Other" }
+];
+
 export function ReviewQueueClient({
   activeTab,
   data,
@@ -122,6 +145,7 @@ export function ReviewQueueClient({
   const router = useRouter();
   const [search, setSearch] = useState("");
   const [priorityFilter, setPriorityFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [reviewedFieldFilter, setReviewedFieldFilter] = useState("");
   const [reviewedOutcomeFilter, setReviewedOutcomeFilter] = useState("");
   const [reviewedDeciderFilter, setReviewedDeciderFilter] = useState("");
@@ -139,11 +163,13 @@ export function ReviewQueueClient({
         currentUserId,
         currentUserEmail,
         search,
-        priorityFilter
+        priorityFilter,
+        sourceFilter
       }),
-    [currentUserEmail, currentUserId, data, priorityFilter, search]
+    [currentUserEmail, currentUserId, data, priorityFilter, search, sourceFilter]
   );
   const groups = useMemo(() => sections.flatMap((section) => section.groups), [sections]);
+  const filteredItemCount = groups.reduce((sum, group) => sum + group.items.length, 0);
   const selectedGroup = groups.find((group) => group.key === selectedGroupKey) ?? groups[0] ?? null;
   const focusedItem =
     selectedGroup?.items.find((item) => item.id === focusedItemId) ?? selectedGroup?.items[0] ?? null;
@@ -341,7 +367,7 @@ export function ReviewQueueClient({
             <h1 className="mt-1 text-xl font-semibold tracking-normal text-slate-950">
               {activeTab === "reviewed"
                 ? `${filteredReviewedRows.length.toLocaleString()} reviewed decisions`
-                : `${data.items.length.toLocaleString()} active items`}
+                : `${filteredItemCount.toLocaleString()} active items`}
             </h1>
           </div>
           <div className="grid grid-cols-4 gap-2 text-sm sm:w-[34rem]">
@@ -403,22 +429,37 @@ export function ReviewQueueClient({
               </select>
             </>
           ) : (
-            <select
-              value={priorityFilter}
-              onChange={(event) => setPriorityFilter(event.target.value)}
-              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
-            >
-              <option value="all">All priorities</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
-              <option value="deferred">Deferred</option>
-            </select>
+            <>
+              <select
+                value={priorityFilter}
+                onChange={(event) => setPriorityFilter(event.target.value)}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              >
+                <option value="all">All priorities</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+                <option value="deferred">Deferred</option>
+              </select>
+              <select
+                aria-label="Source"
+                value={sourceFilter}
+                onChange={(event) => setSourceFilter(event.target.value as SourceFilter)}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+              >
+                {SOURCE_FILTER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </>
           )}
           {hasActiveSearchOrFilter({
             activeTab,
             search,
             priorityFilter,
+            sourceFilter,
             reviewedFieldFilter,
             reviewedOutcomeFilter,
             reviewedDeciderFilter
@@ -429,6 +470,7 @@ export function ReviewQueueClient({
               onClick={() => {
                 setSearch("");
                 setPriorityFilter("all");
+                setSourceFilter("all");
                 setReviewedFieldFilter("");
                 setReviewedOutcomeFilter("");
                 setReviewedDeciderFilter("");
@@ -889,6 +931,7 @@ function ReviewItemRow({
   const supportingEvidence = supportingEvidenceForItem(item);
   const dissentingEvidence = dissentingEvidenceForItem(item);
   const newsContext = newsContextForItem(item);
+  const sourceSummary = sourceSummaryForItem(item, sourceRun);
 
   return (
     <article
@@ -923,6 +966,9 @@ function ReviewItemRow({
           </div>
 
           <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+            <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
+              Source: {sourceSummary}
+            </span>
             {sourceRun ? (
               <span className="rounded border border-slate-200 px-2 py-1">
                 {sourceRun.sourceName} - {formatDate(sourceRun.finishedAt ?? sourceRun.runTimestamp)}
@@ -1272,17 +1318,19 @@ function buildSections({
   currentUserId,
   currentUserEmail,
   search,
-  priorityFilter
+  priorityFilter,
+  sourceFilter
 }: {
   data: ReviewQueueData;
   currentUserId: string;
   currentUserEmail: string | null;
   search: string;
   priorityFilter: string;
+  sourceFilter: SourceFilter;
 }): ReviewSection[] {
   const groupMap = new Map<string, ReviewQueueItem[]>();
   for (const item of data.items) {
-    if (!itemMatchesFilters(item, data, search, priorityFilter)) {
+    if (!itemMatchesFilters(item, data, search, priorityFilter, sourceFilter)) {
       continue;
     }
     const key = item.projectId ?? `item-${item.id}`;
@@ -1358,7 +1406,8 @@ function itemMatchesFilters(
   item: ReviewQueueItem,
   data: ReviewQueueData,
   search: string,
-  priorityFilter: string
+  priorityFilter: string,
+  sourceFilter: SourceFilter
 ) {
   if (priorityFilter === "deferred") {
     if (item.activeDecision?.decisionType !== "defer") {
@@ -1367,16 +1416,20 @@ function itemMatchesFilters(
   } else if (priorityFilter !== "all" && item.priority.toLowerCase() !== priorityFilter) {
     return false;
   }
+  const sourceRun = item.sourceRunId ? data.sourceRuns[item.sourceRunId] : null;
+  if (!itemMatchesSourceFilter(item, sourceRun, sourceFilter)) {
+    return false;
+  }
   if (!search.trim()) {
     return true;
   }
   const project = item.projectId ? data.projects[item.projectId] : null;
-  const sourceRun = item.sourceRunId ? data.sourceRuns[item.sourceRunId] : null;
   const haystack = [
     project?.projectName,
     project?.canonicalAddress,
     project?.developer,
     sourceRun?.sourceName,
+    sourceSummaryForItem(item, sourceRun),
     item.itemType,
     item.priority,
     fieldNameForItem(item),
@@ -1387,6 +1440,98 @@ function itemMatchesFilters(
     .join(" ")
     .toLowerCase();
   return haystack.includes(search.trim().toLowerCase());
+}
+
+function itemMatchesSourceFilter(
+  item: ReviewQueueItem,
+  sourceRun: ReviewSourceRunSummary | null | undefined,
+  sourceFilter: SourceFilter
+) {
+  if (sourceFilter === "all") {
+    return true;
+  }
+  const families = sourceFamiliesForItem(item, sourceRun);
+  if (sourceFilter === "multiple") {
+    return families.size > 1;
+  }
+  if (sourceFilter === "other") {
+    return families.size === 0 || (families.size === 1 && families.has("other"));
+  }
+  return families.has(sourceFilter);
+}
+
+function sourceSummaryForItem(
+  item: ReviewQueueItem,
+  sourceRun: ReviewSourceRunSummary | null | undefined
+) {
+  const families = sourceFamiliesForItem(item, sourceRun);
+  if (!families.size) {
+    return SOURCE_FAMILY_LABELS.other;
+  }
+  return SOURCE_FAMILY_ORDER.filter((family) => families.has(family))
+    .map((family) => SOURCE_FAMILY_LABELS[family])
+    .join(" + ");
+}
+
+function sourceFamiliesForItem(
+  item: ReviewQueueItem,
+  sourceRun: ReviewSourceRunSummary | null | undefined
+) {
+  const families = new Set<SourceFamily>();
+  if (newsContextForItem(item)) {
+    families.add("news");
+  }
+  for (const evidence of item.evidenceSummaries) {
+    const family = sourceFamilyForText(evidence.sourceType);
+    if (family) {
+      families.add(family);
+    }
+  }
+  const sourceRunFamily = sourceFamilyForText(sourceRun?.sourceName);
+  if (sourceRunFamily) {
+    families.add(sourceRunFamily);
+  }
+  const payloadSourceFamily = sourceFamilyForText(asString(item.payload?.source_type));
+  if (payloadSourceFamily) {
+    families.add(payloadSourceFamily);
+  }
+  return families;
+}
+
+function sourceFamilyForText(value: string | null | undefined): SourceFamily | null {
+  const normalized = value?.toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized.includes("news") ||
+    normalized.includes("article") ||
+    normalized.includes("urbanize") ||
+    normalized.includes("yimby") ||
+    normalized.includes("bisnow") ||
+    normalized.includes("bizjournals")
+  ) {
+    return "news";
+  }
+  if (normalized.includes("costar")) {
+    return "costar";
+  }
+  if (normalized.includes("pipedream")) {
+    return "pipedream";
+  }
+  if (
+    normalized.includes("ladbs") ||
+    normalized.includes("lahd") ||
+    normalized.includes("permit") ||
+    normalized.includes("inspection") ||
+    normalized.includes("planning") ||
+    normalized.includes("entitlement") ||
+    normalized.includes("socrata") ||
+    normalized.includes("zimas")
+  ) {
+    return "permit";
+  }
+  return "other";
 }
 
 function sectionKeyForGroup(group: ReviewGroup) {
@@ -1476,6 +1621,7 @@ function hasActiveSearchOrFilter({
   activeTab,
   search,
   priorityFilter,
+  sourceFilter,
   reviewedFieldFilter,
   reviewedOutcomeFilter,
   reviewedDeciderFilter
@@ -1483,6 +1629,7 @@ function hasActiveSearchOrFilter({
   activeTab: "queue" | "reviewed";
   search: string;
   priorityFilter: string;
+  sourceFilter: SourceFilter;
   reviewedFieldFilter: string;
   reviewedOutcomeFilter: string;
   reviewedDeciderFilter: string;
@@ -1493,5 +1640,5 @@ function hasActiveSearchOrFilter({
   if (activeTab === "reviewed") {
     return Boolean(reviewedFieldFilter || reviewedOutcomeFilter || reviewedDeciderFilter);
   }
-  return priorityFilter !== "all";
+  return priorityFilter !== "all" || sourceFilter !== "all";
 }
