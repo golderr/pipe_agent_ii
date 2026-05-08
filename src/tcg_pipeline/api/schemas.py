@@ -278,6 +278,28 @@ class ActivityFeedResponse(BaseModel):
     events: list[ActivityEventResponse]
 
 
+class ActivitySemanticMetricResponse(BaseModel):
+    market: str | None
+    source_slug: str | None
+    source_name: str | None
+    field_name: str
+    field_label: str
+    reason_code: str
+    total_count: int
+    glossary_gap_count: int
+    unmappable_count: int
+    glossary_gap_rate: float
+    unmappable_rate: float
+    reviewer_rejection_count: int = 0
+    reviewer_rejection_rate: float | None = None
+
+
+class ActivitySemanticMetricsResponse(BaseModel):
+    generated_at: str
+    thresholds: dict[str, float]
+    metrics: list[ActivitySemanticMetricResponse]
+
+
 class CoverageScrapeRequest(BaseModel):
     source_name: str = Field(min_length=1, max_length=120)
 

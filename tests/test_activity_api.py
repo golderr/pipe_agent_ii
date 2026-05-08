@@ -4,10 +4,15 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
-from tcg_pipeline.api.routers.activity import MAX_INTERNAL_LIMIT, list_activity_events
+from tcg_pipeline.api.routers.activity import (
+    MAX_INTERNAL_LIMIT,
+    list_activity_events,
+    list_activity_semantic_metrics,
+)
 from tcg_pipeline.db.models import (
     AgentRun,
     AgentRunOutcome,
@@ -15,7 +20,12 @@ from tcg_pipeline.db.models import (
     ChangeLog,
     ChangeType,
     NewsArticle,
+    NewsExtraction,
+    NewsExtractionParseStatus,
+    NewsExtractionPass,
     NewsFetchStatus,
+    NewsProjectReference,
+    NewsSemanticInterpretation,
     NewsSource,
     PipelineStatus,
     Priority,
@@ -108,6 +118,118 @@ def _agent_run_model(
         completed_at=created_at,
         created_at=created_at,
     )
+
+
+def _news_article(
+    postgres_session: Session,
+    *,
+    source_slug: str | None = None,
+    title: str = "Activity story",
+    fetched_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+) -> tuple[NewsSource, NewsArticle]:
+    resolved_source_slug = source_slug or f"activity-source-{uuid.uuid4().hex}"
+    source = postgres_session.execute(
+        select(NewsSource).where(NewsSource.slug == resolved_source_slug)
+    ).scalar_one_or_none()
+    if source is None:
+        source = NewsSource(
+            slug=resolved_source_slug,
+            name="Activity Source",
+            base_url="https://example.com",
+            collector_class="PoliteNewsCollector",
+        )
+        postgres_session.add(source)
+        postgres_session.flush()
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical=f"https://example.com/{uuid.uuid4().hex}",
+        url_original=f"https://example.com/{uuid.uuid4().hex}",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        fetched_at=fetched_at,
+        title=title,
+        ingest_method=ScrapeJobKind.NEWS_SCRAPE.value,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    return source, article
+
+
+def _semantic_interpretation(
+    postgres_session: Session,
+    project: Project,
+    *,
+    source_slug: str | None = None,
+    field_name: str = "pipeline_status",
+    reason_code: str = "news_topped_out",
+    canonical_value: object = "Under Construction",
+    signal_flags: dict | None = None,
+    created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+) -> NewsSemanticInterpretation:
+    source, article = _news_article(postgres_session, source_slug=source_slug)
+    extraction = NewsExtraction(
+        article_id=article.id,
+        pass_name=NewsExtractionPass.EXTRACTION.value,
+        triggered_by="test",
+        prompt_id="extract_v2",
+        prompt_version="v2",
+        prompt_hash="extract-hash",
+        model="claude-opus-4-7",
+        model_provider="anthropic",
+        output_json={},
+        parse_status=NewsExtractionParseStatus.OK.value,
+        created_at=created_at - timedelta(minutes=1),
+    )
+    postgres_session.add(extraction)
+    postgres_session.flush()
+    reference = NewsProjectReference(
+        extraction_id=extraction.id,
+        article_id=article.id,
+        reference_index=0,
+        candidate_name=project.project_name,
+        matched_project_id=project.id,
+        match_status="confirmed",
+    )
+    postgres_session.add(reference)
+    postgres_session.flush()
+    semantic = NewsSemanticInterpretation(
+        article_id=article.id,
+        extraction_id=extraction.id,
+        prompt_id="interpret_v1",
+        prompt_version="v1",
+        prompt_hash="semantic-hash",
+        model="claude-opus-4-7",
+        model_provider="anthropic",
+        cost_usd=Decimal("0.010000"),
+        latency_ms=1000,
+        output_json={
+            "interpretations": [
+                {
+                    "field_name": field_name,
+                    "canonical_value": canonical_value,
+                    "confidence": "high",
+                    "reason_code": reason_code,
+                    "signal_flags": {
+                        **(signal_flags or {}),
+                        "reference_id": str(reference.id),
+                        "reference_index": reference.reference_index,
+                    },
+                    "source_anchors": [],
+                    "requires_corroboration": False,
+                    "metadata": {
+                        "reference_id": str(reference.id),
+                        "reference_index": reference.reference_index,
+                    },
+                }
+            ],
+            "diagnostic": {},
+        },
+        parse_status=NewsExtractionParseStatus.OK.value,
+        created_at=created_at,
+    )
+    postgres_session.add(semantic)
+    postgres_session.flush()
+    return semantic
 
 
 def test_activity_feed_combines_change_resolution_and_agent_rows(
@@ -386,43 +508,26 @@ def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
     assert response.events[-1].id == f"agent:{unlinked_agent.id}"
 
 
-def test_activity_feed_semantic_view_filters_status_news_rows(
+def test_activity_feed_semantic_view_uses_pass2c_interpretation_rows(
     postgres_session: Session,
 ) -> None:
     project = _project(postgres_session, "400 Activity Way")
-    postgres_session.add_all(
-        [
-            ChangeLog(
-                project_id=project.id,
-                timestamp=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
-                source="urbanize_la",
-                field="pipeline_status",
-                old_value="Approved",
-                new_value="Under Construction",
-                change_type=ChangeType.RESEARCHER_CONFIRMED,
-                priority=Priority.HIGH,
-            ),
-            ChangeLog(
-                project_id=project.id,
-                timestamp=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
-                source="urbanize_la",
-                field="total_units",
-                old_value=100,
-                new_value=120,
-                change_type=ChangeType.RESEARCHER_CONFIRMED,
-                priority=Priority.MEDIUM,
-            ),
-            ChangeLog(
-                project_id=project.id,
-                timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
-                source="costar",
-                field="pipeline_status",
-                old_value="Approved",
-                new_value="Under Construction",
-                change_type=ChangeType.RESEARCHER_CONFIRMED,
-                priority=Priority.MEDIUM,
-            ),
-        ]
+    semantic = _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=f"semantic-source-{uuid.uuid4().hex}",
+    )
+    postgres_session.add(
+        ChangeLog(
+            project_id=project.id,
+            timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+            source="urbanize_la",
+            field="pipeline_status",
+            old_value="Approved",
+            new_value="Under Construction",
+            change_type=ChangeType.RESEARCHER_CONFIRMED,
+            priority=Priority.HIGH,
+        )
     )
     postgres_session.flush()
 
@@ -434,9 +539,41 @@ def test_activity_feed_semantic_view_filters_status_news_rows(
         limit=10,
     )
 
-    assert [(event.source, event.field) for event in response.events] == [
-        ("urbanize_la", "pipeline_status")
+    assert [(event.event_type, event.source, event.field) for event in response.events] == [
+        ("semantic", "semantic.news_v1", "pipeline_status")
     ]
+    assert response.events[0].id == f"semantic:{semantic.id}:0"
+    assert response.events[0].project is not None
+    assert response.events[0].project.id == project.id
+    assert response.events[0].article is not None
+    assert response.events[0].detail["reason_code"] == "news_topped_out"
+
+
+def test_activity_feed_semantic_source_filter_matches_article_source(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "425 Activity Way")
+    source_slug = f"semantic-source-{uuid.uuid4().hex}"
+    _semantic_interpretation(postgres_session, project, source_slug=source_slug)
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=f"other-semantic-source-{uuid.uuid4().hex}",
+        created_at=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        event_type="semantic",
+        source=source_slug,
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert len(response.events) == 1
+    assert response.events[0].article is not None
+    assert response.events[0].article.source_slug == source_slug
 
 
 def test_activity_feed_source_filter_matches_agent_article_source(
@@ -473,8 +610,7 @@ def test_activity_feed_source_filter_matches_agent_article_source(
         [
             _agent_run_model(
                 project,
-                created_at=datetime(2026, 5, 8, 10, 0, tzinfo=UTC)
-                + timedelta(seconds=index),
+                created_at=datetime(2026, 5, 8, 10, 0, tzinfo=UTC) + timedelta(seconds=index),
             )
             for index in range(MAX_INTERNAL_LIMIT + 1)
         ]
@@ -714,3 +850,66 @@ def test_activity_feed_failed_agent_title_is_outcome_aware(
     )
 
     assert response.events[0].title == "Agent failed: Timeout"
+
+
+def test_activity_feed_killed_agent_title_is_outcome_aware(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "725 Activity Way")
+    _agent_run(
+        postgres_session,
+        project,
+        outcome=AgentRunOutcome.KILLED_BY_SWITCH.value,
+        created_at=datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="agent",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert response.events[0].title == "Agent killed by switch"
+
+
+def test_activity_semantic_metrics_aggregate_gap_and_unmappable_rates(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "750 Activity Way")
+    source_slug = f"semantic-metrics-source-{uuid.uuid4().hex}"
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=source_slug,
+        reason_code="news_status_unmappable",
+        signal_flags={"glossary_gap_observed": True},
+    )
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=source_slug,
+        reason_code="news_status_unmappable",
+        signal_flags={"glossary_gap_observed": False},
+        created_at=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+    )
+
+    response = list_activity_semantic_metrics(
+        user=_auth_user(),
+        session=postgres_session,
+        source=source_slug,
+        field="pipeline_status",
+    )
+
+    assert len(response.metrics) == 1
+    metric = response.metrics[0]
+    assert metric.market == "los_angeles"
+    assert metric.source_slug == source_slug
+    assert metric.field_name == "pipeline_status"
+    assert metric.reason_code == "news_status_unmappable"
+    assert metric.total_count == 2
+    assert metric.glossary_gap_count == 1
+    assert metric.unmappable_count == 2
+    assert metric.glossary_gap_rate == 0.5
+    assert metric.unmappable_rate == 1.0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Any
@@ -16,12 +17,17 @@ from tcg_pipeline.api.schemas import (
     ActivityEventResponse,
     ActivityFeedResponse,
     ActivityProjectSummary,
+    ActivitySemanticMetricResponse,
+    ActivitySemanticMetricsResponse,
 )
 from tcg_pipeline.db.models import (
     AgentRun,
     AgentRunReviewItem,
     ChangeLog,
     NewsArticle,
+    NewsExtractionParseStatus,
+    NewsProjectReference,
+    NewsSemanticInterpretation,
     NewsSource,
     Project,
     ResolutionLog,
@@ -31,10 +37,22 @@ router = APIRouter(prefix="/activity", tags=["activity"])
 AUTH_USER = Depends(require_user)
 DB_SESSION = Depends(get_db_session)
 
-EVENT_TYPES = {"change", "resolution", "agent"}
+EVENT_TYPES = {"change", "resolution", "agent", "semantic"}
 VIEW_PRESETS = {"all", "agent", "auto_applied", "semantic"}
 AGENT_FAILURE_OUTCOMES = {"failed_timeout", "failed_budget", "failed_error", "killed_by_switch"}
+AGENT_FAILURE_DISPLAY = {
+    "failed_timeout": "Agent failed: Timeout",
+    "failed_budget": "Agent failed: Over budget",
+    "failed_error": "Agent failed: Error",
+    "killed_by_switch": "Agent killed by switch",
+}
+SEMANTIC_LOGICAL_SOURCE = "semantic.news_v1"
+SEMANTIC_SOURCE_LABEL = "Semantic Pass 2c"
+SEMANTIC_GAP_RATE_THRESHOLD = 0.15
+SEMANTIC_UNMAPPABLE_RATE_THRESHOLD = 0.05
+SEMANTIC_REJECTION_SIGMA_THRESHOLD = 2.0
 MAX_INTERNAL_LIMIT = 500
+MAX_SEMANTIC_METRIC_ROWS = 5000
 
 
 @router.get("/events")
@@ -92,16 +110,130 @@ def list_activity_events(
                 limit=limit,
             )
         )
+    if normalized_type in (None, "semantic"):
+        events.extend(
+            _semantic_events(
+                session,
+                source=source,
+                field=field,
+                project_id=project_id,
+                from_date=from_date,
+                to_date=to_date,
+                limit=limit,
+            )
+        )
 
-    filtered_events = [
-        event
-        for event in events
-        if _event_matches_view(event, normalized_view)
-    ]
+    filtered_events = [event for event in events if _event_matches_view(event, normalized_view)]
     filtered_events.sort(key=_event_sort_key, reverse=True)
     return ActivityFeedResponse(
         generated_at=datetime.now(UTC).isoformat(),
         events=filtered_events[:limit],
+    )
+
+
+@router.get("/semantic-metrics")
+def list_activity_semantic_metrics(
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+    source: Annotated[str | None, Query(max_length=120)] = None,
+    field: Annotated[str | None, Query(max_length=120)] = None,
+    market: Annotated[str | None, Query(max_length=120)] = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> ActivitySemanticMetricsResponse:
+    del user
+    rows = _semantic_rows(
+        session,
+        source=source,
+        from_date=from_date,
+        to_date=to_date,
+        limit=MAX_SEMANTIC_METRIC_ROWS,
+    )
+    articles = _news_articles_by_id(session, [row.article_id for row in rows])
+    source_names = _news_sources_by_id(
+        session,
+        [
+            article.news_source_id
+            for article in articles.values()
+            if article.news_source_id is not None
+        ],
+    )
+    references_by_extraction = _semantic_references_by_extraction(
+        session,
+        [row.extraction_id for row in rows],
+    )
+    semantic_items: list[tuple[NewsSemanticInterpretation, dict[str, Any], uuid.UUID | None]] = []
+    for row in rows:
+        references = references_by_extraction.get(row.extraction_id, [])
+        for interpretation in _semantic_payloads(row):
+            project_id = _semantic_project_id_for_interpretation(interpretation, references)
+            semantic_items.append((row, interpretation, project_id))
+    projects = _projects_by_id(session, [project_id for _, _, project_id in semantic_items])
+    total: Counter[tuple[str | None, str | None, str | None, str, str]] = Counter()
+    gaps: Counter[tuple[str | None, str | None, str | None, str, str]] = Counter()
+    unmappable: Counter[tuple[str | None, str | None, str | None, str, str]] = Counter()
+    for row, interpretation, project_id in semantic_items:
+        article = articles.get(row.article_id)
+        source_row = (
+            source_names.get(article.news_source_id)
+            if article is not None and article.news_source_id is not None
+            else None
+        )
+        project = projects.get(project_id) if project_id is not None else None
+        if market and (project is None or project.market != market):
+            continue
+        field_name = _clean_text(interpretation.get("field_name"))
+        reason_code = _clean_text(interpretation.get("reason_code"))
+        if field_name is None or reason_code is None:
+            continue
+        if field and field_name != field:
+            continue
+        key = (
+            project.market if project is not None else None,
+            source_row.slug if source_row is not None else None,
+            source_row.name if source_row is not None else None,
+            field_name,
+            reason_code,
+        )
+        total[key] += 1
+        signal_flags = _mapping_or_empty(interpretation.get("signal_flags"))
+        if signal_flags.get("glossary_gap_observed") is True:
+            gaps[key] += 1
+        if reason_code.endswith("_unmappable"):
+            unmappable[key] += 1
+    metrics = [
+        ActivitySemanticMetricResponse(
+            market=metric_market,
+            source_slug=source_slug,
+            source_name=source_name,
+            field_name=field_name,
+            field_label=_field_label(field_name),
+            reason_code=reason_code,
+            total_count=count,
+            glossary_gap_count=gaps[key],
+            unmappable_count=unmappable[key],
+            glossary_gap_rate=gaps[key] / count if count else 0.0,
+            unmappable_rate=unmappable[key] / count if count else 0.0,
+        )
+        for key, count in total.items()
+        for metric_market, source_slug, source_name, field_name, reason_code in [key]
+    ]
+    metrics.sort(
+        key=lambda item: (
+            item.market or "",
+            item.source_slug or "",
+            item.field_name,
+            item.reason_code,
+        )
+    )
+    return ActivitySemanticMetricsResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        thresholds={
+            "glossary_gap_rate": SEMANTIC_GAP_RATE_THRESHOLD,
+            "unmappable_rate": SEMANTIC_UNMAPPABLE_RATE_THRESHOLD,
+            "reviewer_rejection_sigma": SEMANTIC_REJECTION_SIGMA_THRESHOLD,
+        },
+        metrics=metrics,
     )
 
 
@@ -181,11 +313,13 @@ def _resolution_events(
 ) -> list[ActivityEventResponse]:
     if source and source != "resolution_engine":
         return []
-    statement = select(ResolutionLog).order_by(
-        ResolutionLog.created_at.desc(),
-        ResolutionLog.id.asc(),
-    ).where(
-        ResolutionLog.current_value.is_distinct_from(ResolutionLog.resolved_value)
+    statement = (
+        select(ResolutionLog)
+        .order_by(
+            ResolutionLog.created_at.desc(),
+            ResolutionLog.id.asc(),
+        )
+        .where(ResolutionLog.current_value.is_distinct_from(ResolutionLog.resolved_value))
     )
     if field:
         statement = statement.where(ResolutionLog.field == field)
@@ -290,7 +424,10 @@ def _agent_event(
 ) -> ActivityEventResponse:
     trigger_text = ", ".join(row.triggered_by)
     if row.outcome in AGENT_FAILURE_OUTCOMES:
-        title = f"Agent failed: {_source_label(_agent_failure_suffix(row.outcome))}"
+        title = AGENT_FAILURE_DISPLAY.get(
+            row.outcome,
+            f"Agent failed: {_source_label(row.outcome)}",
+        )
     elif trigger_text:
         title = f"Agent decision: {trigger_text}"
     else:
@@ -340,6 +477,237 @@ def _agent_event(
     )
 
 
+def _semantic_events(
+    session: Session,
+    *,
+    source: str | None,
+    field: str | None,
+    project_id: uuid.UUID | None,
+    from_date: date | None,
+    to_date: date | None,
+    limit: int,
+) -> list[ActivityEventResponse]:
+    rows = _semantic_rows(
+        session,
+        source=source,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit if project_id is None and field is None else MAX_INTERNAL_LIMIT,
+    )
+    articles = _news_articles_by_id(session, [row.article_id for row in rows])
+    source_names = _news_sources_by_id(
+        session,
+        [
+            article.news_source_id
+            for article in articles.values()
+            if article.news_source_id is not None
+        ],
+    )
+    references_by_extraction = _semantic_references_by_extraction(
+        session,
+        [row.extraction_id for row in rows],
+    )
+    event_specs: list[tuple[NewsSemanticInterpretation, int, dict[str, Any], uuid.UUID | None]] = []
+    for row in rows:
+        references = references_by_extraction.get(row.extraction_id, [])
+        for index, interpretation in enumerate(_semantic_payloads(row)):
+            field_name = _clean_text(interpretation.get("field_name"))
+            if field_name is None:
+                continue
+            if field and field_name != field:
+                continue
+            resolved_project_id = _semantic_project_id_for_interpretation(
+                interpretation,
+                references,
+            )
+            if project_id is not None and resolved_project_id != project_id:
+                continue
+            event_specs.append((row, index, interpretation, resolved_project_id))
+    projects = _projects_by_id(session, [project_id for _, _, _, project_id in event_specs])
+    events: list[ActivityEventResponse] = []
+    for row, index, interpretation, resolved_project_id in event_specs:
+        article = articles.get(row.article_id)
+        news_source = (
+            source_names.get(article.news_source_id)
+            if article is not None and article.news_source_id is not None
+            else None
+        )
+        events.append(
+            _semantic_event(
+                row,
+                index=index,
+                interpretation=interpretation,
+                project=projects.get(resolved_project_id)
+                if resolved_project_id is not None
+                else None,
+                article=article,
+                news_source=news_source,
+            )
+        )
+    return events[:limit]
+
+
+def _semantic_event(
+    row: NewsSemanticInterpretation,
+    *,
+    index: int,
+    interpretation: dict[str, Any],
+    project: Project | None,
+    article: NewsArticle | None,
+    news_source: NewsSource | None,
+) -> ActivityEventResponse:
+    field_name = _clean_text(interpretation.get("field_name")) or "semantic"
+    reason_code = _clean_text(interpretation.get("reason_code")) or "unknown"
+    confidence = _clean_text(interpretation.get("confidence"))
+    canonical_value = interpretation.get("canonical_value")
+    signal_flags = _mapping_or_empty(interpretation.get("signal_flags"))
+    metadata = _mapping_or_empty(interpretation.get("metadata"))
+    article_summary = (
+        ActivityArticleSummary(
+            id=article.id,
+            title=article.title,
+            url=article.url_canonical,
+            source_slug=news_source.slug if news_source else None,
+            source_name=news_source.name if news_source else None,
+            fetched_at=article.fetched_at.isoformat() if article.fetched_at else None,
+            published_at=article.published_at.isoformat() if article.published_at else None,
+        )
+        if article
+        else None
+    )
+    summary_parts = [reason_code]
+    if confidence:
+        summary_parts.append(confidence)
+    if canonical_value is not None:
+        summary_parts.append(_format_value(canonical_value))
+    return ActivityEventResponse(
+        id=f"semantic:{row.id}:{index}",
+        event_type="semantic",
+        occurred_at=row.created_at.isoformat(),
+        project=_project_summary(project),
+        source=SEMANTIC_LOGICAL_SOURCE,
+        source_label=SEMANTIC_SOURCE_LABEL,
+        field=field_name,
+        field_label=_field_label(field_name),
+        actor_label=row.prompt_id,
+        title=f"{_field_label(field_name)} interpreted",
+        summary=" | ".join(summary_parts),
+        new_value=canonical_value,
+        change_type="semantic_interpretation",
+        article=article_summary,
+        article_fetched_at=article_summary.fetched_at if article_summary else None,
+        cost_usd=_decimal_to_float(row.cost_usd),
+        detail={
+            "semantic_interpretation_id": str(row.id),
+            "prompt_id": row.prompt_id,
+            "prompt_version": row.prompt_version,
+            "prompt_hash": row.prompt_hash,
+            "model": row.model,
+            "model_provider": row.model_provider,
+            "parse_status": row.parse_status,
+            "latency_ms": row.latency_ms,
+            "reason_code": reason_code,
+            "confidence": confidence,
+            "requires_corroboration": interpretation.get("requires_corroboration"),
+            "signal_flags": signal_flags,
+            "source_anchors": interpretation.get("source_anchors") or [],
+            "metadata": metadata,
+            "news_source_slug": news_source.slug if news_source else None,
+        },
+    )
+
+
+def _semantic_rows(
+    session: Session,
+    *,
+    source: str | None,
+    from_date: date | None,
+    to_date: date | None,
+    limit: int,
+) -> list[NewsSemanticInterpretation]:
+    statement = (
+        select(NewsSemanticInterpretation)
+        .join(NewsArticle, NewsSemanticInterpretation.article_id == NewsArticle.id)
+        .outerjoin(NewsSource, NewsArticle.news_source_id == NewsSource.id)
+        .where(NewsSemanticInterpretation.parse_status == NewsExtractionParseStatus.OK.value)
+        .order_by(NewsSemanticInterpretation.created_at.desc(), NewsSemanticInterpretation.id.asc())
+    )
+    if source and source not in {SEMANTIC_LOGICAL_SOURCE, "semantic"}:
+        statement = statement.where(NewsSource.slug == source)
+    statement = _date_window(
+        statement,
+        NewsSemanticInterpretation.created_at,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    return list(session.execute(statement.limit(limit)).scalars().all())
+
+
+def _semantic_payloads(row: NewsSemanticInterpretation) -> list[dict[str, Any]]:
+    output_json = row.output_json if isinstance(row.output_json, dict) else {}
+    interpretations = output_json.get("interpretations")
+    if not isinstance(interpretations, list):
+        return []
+    return [item for item in interpretations if isinstance(item, dict)]
+
+
+def _semantic_references_by_extraction(
+    session: Session,
+    extraction_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, list[NewsProjectReference]]:
+    ids = sorted(set(extraction_ids))
+    if not ids:
+        return {}
+    rows = (
+        session.execute(
+            select(NewsProjectReference)
+            .where(NewsProjectReference.extraction_id.in_(ids))
+            .order_by(NewsProjectReference.reference_index.asc())
+        )
+        .scalars()
+        .all()
+    )
+    by_extraction: dict[uuid.UUID, list[NewsProjectReference]] = {}
+    for row in rows:
+        by_extraction.setdefault(row.extraction_id, []).append(row)
+    return by_extraction
+
+
+def _semantic_project_id_for_interpretation(
+    interpretation: dict[str, Any],
+    references: list[NewsProjectReference],
+) -> uuid.UUID | None:
+    if not references:
+        return None
+    metadata = _mapping_or_empty(interpretation.get("metadata"))
+    signal_flags = _mapping_or_empty(interpretation.get("signal_flags"))
+    reference_id = _first_clean_text(
+        metadata.get("reference_id"),
+        metadata.get("source_reference_id"),
+        metadata.get("pass2b_reference_id"),
+        signal_flags.get("reference_id"),
+        signal_flags.get("source_reference_id"),
+        signal_flags.get("pass2b_reference_id"),
+    )
+    reference_index = _first_int(
+        metadata.get("reference_index"),
+        signal_flags.get("reference_index"),
+    )
+    if reference_id is not None:
+        parsed_id = _uuid_or_none(reference_id)
+        if parsed_id is not None:
+            for reference in references:
+                if reference.id == parsed_id:
+                    return reference.matched_project_id
+    if reference_index is not None:
+        for reference in references:
+            if reference.reference_index == reference_index:
+                return reference.matched_project_id
+    if len(references) == 1:
+        return references[0].matched_project_id
+    return None
+
+
 def _date_window(
     statement: Any,
     column: Any,
@@ -376,10 +744,7 @@ def _event_matches_view(event: ActivityEventResponse, view: str) -> bool:
             return True
         return False
     if view == "semantic":
-        if event.field != "pipeline_status":
-            return False
-        source_key = event.source.lower()
-        return "news" in source_key or "semantic" in source_key or "urbanize" in source_key
+        return event.event_type == "semantic"
     return True
 
 
@@ -400,9 +765,13 @@ def _review_item_ids_by_agent(
 ) -> dict[uuid.UUID, list[uuid.UUID]]:
     if not agent_run_ids:
         return {}
-    links = session.execute(
-        select(AgentRunReviewItem).where(AgentRunReviewItem.agent_run_id.in_(agent_run_ids))
-    ).scalars().all()
+    links = (
+        session.execute(
+            select(AgentRunReviewItem).where(AgentRunReviewItem.agent_run_id.in_(agent_run_ids))
+        )
+        .scalars()
+        .all()
+    )
     by_agent: dict[uuid.UUID, list[uuid.UUID]] = {}
     for link in links:
         by_agent.setdefault(link.agent_run_id, []).append(link.review_item_id)
@@ -422,9 +791,9 @@ def _news_articles_by_id(
 
 def _news_sources_by_id(
     session: Session,
-    source_ids: list[uuid.UUID],
+    source_ids: list[uuid.UUID | None],
 ) -> dict[uuid.UUID, NewsSource]:
-    ids = sorted(set(source_ids))
+    ids = sorted({source_id for source_id in source_ids if source_id is not None})
     if not ids:
         return {}
     rows = session.execute(select(NewsSource).where(NewsSource.id.in_(ids))).scalars().all()
@@ -484,12 +853,6 @@ def _source_label(value: str) -> str:
     return value.replace("_", " ").replace("-", " ").title()
 
 
-def _agent_failure_suffix(outcome: str) -> str:
-    if outcome.startswith("failed_"):
-        return outcome.removeprefix("failed_")
-    return outcome
-
-
 def _actor_label(
     email: str | None,
     legacy_actor: str | None,
@@ -516,3 +879,33 @@ def _decimal_to_float(value: Any) -> float | None:
     if isinstance(value, Decimal):
         return float(value)
     return float(value)
+
+
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _first_clean_text(*values: Any) -> str | None:
+    for value in values:
+        text = _clean_text(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None

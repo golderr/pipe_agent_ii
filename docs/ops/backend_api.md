@@ -29,15 +29,15 @@ the contributor set broadens.
 
 `GET /activity/events` is a privileged FastAPI read endpoint for the
 researcher-facing Activity / Audit Log page. It combines `change_log`,
-`resolution_log`, and `agent_runs` / `agent_run_review_items` into one
-chronological feed and returns project, article, review-item, agent reasoning,
-cost, and timing context where available.
+`resolution_log`, `agent_runs` / `agent_run_review_items`, and Pass 2c
+`news_semantic_interpretations` into one chronological feed and returns
+project, article, review-item, semantic reason-code, agent reasoning, cost, and
+timing context where available.
 
 Supported filters include `view`, `event_type`, `source`, `field`, `actor`,
 `project_id`, `from_date`, `to_date`, and `limit`. The first saved-view presets
 are `agent`, `auto_applied`, and `semantic`; later AGENT.2 step 11 work can add
-market/jurisdiction slicing and reason-code distribution metrics on the same
-endpoint family.
+market/jurisdiction slicing on the feed and richer evidence drill-through.
 
 `source` is an exact event-source filter. Change rows match `change_log.source`.
 Resolution rows match only `resolution_engine`. News-agent rows match either the
@@ -49,9 +49,18 @@ rows are not capped by an in-Python candidate prefetch. No-op resolution rows
 where `current_value` equals `resolved_value` are hidden from the feed by
 default.
 
-The `semantic` preset is still a first Activity-slice status-news filter. The
-next step-11 slice should read `news_semantic_interpretations` directly for
-authoritative Pass 2c semantic activity and per-market glossary-gap metrics.
+The `semantic` preset reads authoritative Pass 2c
+`news_semantic_interpretations` audit rows, not publisher-name heuristics. The
+semantic event source is `semantic.news_v1`; publisher-source filters such as
+`urbanize_la` still work by joining through the linked article's
+`news_sources.slug`.
+
+`GET /activity/semantic-metrics` is a companion aggregation endpoint for Pass 2c
+monitoring. Supported filters are `source`, `field`, `market`, `from_date`, and
+`to_date`. It returns source/field/market-aware reason-code counts with
+glossary-gap and unmappable rates. Reviewer-rejection-rate metrics are present
+in the response shape but remain `0` / `null` until review decisions can be
+joined back to semantic-origin rows consistently.
 
 For news-agent rows, the response exposes both `article_fetched_at` and
 `agent_created_at` so researchers can distinguish article arrival time from the

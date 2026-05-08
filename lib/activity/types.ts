@@ -20,7 +20,7 @@ export type ActivityArticleSummary = {
 
 export type ActivityEvent = {
   id: string;
-  event_type: "change" | "resolution" | "agent";
+  event_type: "change" | "resolution" | "agent" | "semantic";
   occurred_at: string;
   project: ActivityProjectSummary | null;
   source: string;
@@ -51,6 +51,28 @@ export type ActivityFeedData = {
   events: ActivityEvent[];
 };
 
+export type ActivitySemanticMetric = {
+  market: string | null;
+  source_slug: string | null;
+  source_name: string | null;
+  field_name: string;
+  field_label: string;
+  reason_code: string;
+  total_count: number;
+  glossary_gap_count: number;
+  unmappable_count: number;
+  glossary_gap_rate: number;
+  unmappable_rate: number;
+  reviewer_rejection_count: number;
+  reviewer_rejection_rate: number | null;
+};
+
+export type ActivitySemanticMetricsData = {
+  generated_at: string;
+  thresholds: Record<string, number>;
+  metrics: ActivitySemanticMetric[];
+};
+
 export type ActivityQuery = {
   view: string | null;
   eventType: string | null;
@@ -64,4 +86,8 @@ export type ActivityQuery = {
 
 export type ActivityDataResult =
   | { data: ActivityFeedData; error: null }
+  | { data: null; error: string };
+
+export type ActivitySemanticMetricsResult =
+  | { data: ActivitySemanticMetricsData; error: null }
   | { data: null; error: string };

@@ -5,10 +5,15 @@ import {
   CheckCircle2,
   ExternalLink,
   Filter,
-  GitCommit
+  GitCommit,
+  Sparkles
 } from "lucide-react";
-import { getActivityData } from "@/lib/activity/data";
-import type { ActivityEvent, ActivityQuery } from "@/lib/activity/types";
+import { getActivityData, getActivitySemanticMetrics } from "@/lib/activity/data";
+import type {
+  ActivityEvent,
+  ActivityQuery,
+  ActivitySemanticMetric
+} from "@/lib/activity/types";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +33,8 @@ const EVENT_TYPES = [
   { value: "", label: "All types" },
   { value: "change", label: "Change log" },
   { value: "resolution", label: "Resolution" },
-  { value: "agent", label: "Agent run" }
+  { value: "agent", label: "Agent run" },
+  { value: "semantic", label: "Semantic" }
 ];
 
 const FIELD_OPTIONS = [
@@ -46,6 +52,7 @@ const FIELD_OPTIONS = [
 const SOURCE_OPTIONS = [
   // TODO(AGENT.2 step 11): derive news-source slugs from active news_sources rows.
   { value: "", label: "All sources" },
+  { value: "semantic.news_v1", label: "Semantic Pass 2c" },
   { value: "news_article", label: "News article" },
   { value: "urbanize_la", label: "Urbanize LA" },
   { value: "resolution_engine", label: "Resolution engine" },
@@ -91,7 +98,10 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
     from: firstQueryValue(params.from) ?? null,
     to: firstQueryValue(params.to) ?? null
   };
-  const result = await getActivityData(query);
+  const [result, semanticMetricsResult] = await Promise.all([
+    getActivityData(query),
+    getActivitySemanticMetrics(query)
+  ]);
 
   if (result.error || !result.data) {
     return (
@@ -174,6 +184,10 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
               Apply
             </button>
           </form>
+          <SemanticMetricsPanel
+            error={semanticMetricsResult.error}
+            metrics={semanticMetricsResult.data?.metrics ?? []}
+          />
         </aside>
       </div>
     </main>
@@ -235,6 +249,8 @@ function DetailRows({ event }: { event: ActivityEvent }) {
       {event.agent_triggers.length ? <DetailRow label="Triggers" value={event.agent_triggers.join(", ")} /> : null}
       {event.agent_outcome ? <DetailRow label="Outcome" value={event.agent_outcome} /> : null}
       {event.cost_usd !== null ? <DetailRow label="Cost" value={`$${event.cost_usd.toFixed(6)}`} /> : null}
+      {detailString(event, "reason_code") ? <DetailRow label="Reason code" value={detailString(event, "reason_code")} /> : null}
+      {detailString(event, "confidence") ? <DetailRow label="Confidence" value={detailString(event, "confidence")} /> : null}
       {event.review_item_id ? (
         <DetailRow
           label="Review item"
@@ -348,6 +364,9 @@ function ActivityEventIcon({ eventType }: { eventType: ActivityEvent["event_type
   if (eventType === "agent") {
     return <Bot className="size-4 text-slate-500" aria-hidden="true" />;
   }
+  if (eventType === "semantic") {
+    return <Sparkles className="size-4 text-slate-500" aria-hidden="true" />;
+  }
   if (eventType === "resolution") {
     return <CheckCircle2 className="size-4 text-slate-500" aria-hidden="true" />;
   }
@@ -361,7 +380,55 @@ function eventTypeLabel(eventType: ActivityEvent["event_type"]) {
   if (eventType === "resolution") {
     return "Resolution";
   }
+  if (eventType === "semantic") {
+    return "Semantic";
+  }
   return "Change";
+}
+
+function SemanticMetricsPanel({
+  error,
+  metrics
+}: {
+  error: string | null;
+  metrics: ActivitySemanticMetric[];
+}) {
+  const visible = metrics.slice(0, 6);
+  return (
+    <div className="mt-5 border-t border-slate-200 pt-4">
+      <div className="flex items-center gap-2">
+        <Sparkles className="size-4 text-slate-500" aria-hidden="true" />
+        <h2 className="text-sm font-semibold text-slate-950">Semantic Metrics</h2>
+      </div>
+      {error ? <p className="mt-2 text-xs text-red-700">{error}</p> : null}
+      {!error && visible.length ? (
+        <div className="mt-3 space-y-2">
+          {visible.map((metric) => (
+            <div
+              className="rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-xs"
+              key={`${metric.market ?? "none"}:${metric.source_slug ?? "none"}:${metric.field_name}:${metric.reason_code}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-medium text-slate-900">
+                  {metric.field_label}
+                </span>
+                <span className="text-slate-500">{metric.total_count}</span>
+              </div>
+              <p className="mt-1 truncate text-slate-500">{metric.reason_code}</p>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+                <span>gap {(metric.glossary_gap_rate * 100).toFixed(0)}%</span>
+                <span>unmappable {(metric.unmappable_rate * 100).toFixed(0)}%</span>
+                {metric.market ? <span>{metric.market}</span> : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {!error && !visible.length ? (
+        <p className="mt-2 text-xs text-slate-500">No semantic rows</p>
+      ) : null}
+    </div>
+  );
 }
 
 function formatDateTime(value: string | null | undefined) {
@@ -388,4 +455,9 @@ function formatUnknown(value: unknown) {
 
 function CompactId({ id }: { id: string }) {
   return <span className="font-mono text-xs">{id.slice(0, 8)}</span>;
+}
+
+function detailString(event: ActivityEvent, key: string) {
+  const value = event.detail[key];
+  return typeof value === "string" && value.length ? value : null;
 }
