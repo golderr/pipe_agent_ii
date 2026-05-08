@@ -28,11 +28,11 @@ from tcg_pipeline.news.extraction import (
     EXTRACTION_ESTIMATED_COST_USD,
     ExtractionLLMResponse,
     NewsExtractionRunResult,
-    decide_pass3a_reextraction,
     parse_extraction_response,
     persist_extraction_response,
     run_news_extraction_for_article,
 )
+from tcg_pipeline.news.extraction_legacy import decide_pass3a_reextraction
 from tcg_pipeline.news.llm import LLMUsage
 from tcg_pipeline.news.prompts import (
     load_prompt,

@@ -38,9 +38,9 @@ from tcg_pipeline.news.extraction import (
     OpenAIExtractionClient,
     _reference_from_payload,
     build_extraction_client,
-    decide_pass3a_reextraction,
     parse_extraction_response,
 )
+from tcg_pipeline.news.extraction_legacy import decide_pass3a_reextraction
 from tcg_pipeline.news.integration import NewsIntegrationResult, run_news_integration_for_article
 from tcg_pipeline.news.llm import (
     calculate_llm_cost_usd,

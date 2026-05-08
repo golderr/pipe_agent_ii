@@ -49,7 +49,17 @@ from tcg_pipeline.news.integration import (
 from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
 from tcg_pipeline.resolution.fields import FieldResolution
 from tcg_pipeline.semantic.news.pass2c import RenderedInterpretPrompt, SemanticLLMResponse
-from tcg_pipeline.settings import Settings
+from tcg_pipeline.settings import Settings, get_settings
+
+
+@pytest.fixture(autouse=True)
+def default_news_integration_tests_to_legacy_semantic(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("NEWS_USE_LEGACY_SEMANTIC", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 class FakeNewsAgentClient:

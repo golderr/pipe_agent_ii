@@ -57,9 +57,11 @@ from tcg_pipeline.matching.news_matcher import (
 )
 from tcg_pipeline.matching.normalizer import normalize_address
 from tcg_pipeline.news.extraction import (
-    PASS3B_TRIGGER_NEW_CANDIDATE,
     ExtractionLLMClient,
     NewsExtractionRunResult,
+)
+from tcg_pipeline.news.extraction_legacy import (
+    PASS3B_TRIGGER_NEW_CANDIDATE,
     run_news_reextraction_for_article,
 )
 from tcg_pipeline.resolution import resolve_project
