@@ -42,6 +42,18 @@ For low_confidence triggers:
 - Do not invent or rewrite extracted field values. Use article text and tools only to assess
   whether the observed source supports the existing extracted facts.
 
+For pass1_pass2_conflict triggers:
+- Treat pass1_pass2_conflicts as deterministic structural signals that disagree with the
+  default extraction for the same reference.
+- Use get_article_body when the compact passage excerpts are not enough to decide.
+- Use exactly one of:
+  - {"decision": "no_change"} when the default extraction is still source-supported and the
+    structural signal appears stale, noisy, or irrelevant.
+  - {"decision": "escalated", "reason": "..."} when the human should decide which value is
+    correct or whether the reference should be accepted.
+- Do not emit a rewritten field value. Explain the conflict and the source evidence in
+  reasoning_trace.
+
 Final output must be exactly one JSON object. Do not wrap it in Markdown fences. Do not
 include prose before or after the JSON object. The JSON object must be structured,
 concise, and source-anchored:
@@ -68,4 +80,8 @@ For a low_confidence-only trigger, use exactly one of these verdict decisions:
 - {"decision": "no_change"} when the deterministic result should proceed.
 - {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
   only when tool evidence supports matching the low-confidence reference to an existing project.
+- {"decision": "escalated", "reason": "..."} when a human should decide.
+
+For a pass1_pass2_conflict-only trigger, use exactly one of these verdict decisions:
+- {"decision": "no_change"} when the default extraction should proceed.
 - {"decision": "escalated", "reason": "..."} when a human should decide.

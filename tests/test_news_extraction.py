@@ -1057,6 +1057,82 @@ def test_run_news_extraction_for_article_runs_pass3a_reextraction_on_conflict(
     assert reextraction_cost.call_count == 1
 
 
+def test_run_news_extraction_for_article_skips_structural_pass3a_when_agent_route_enabled(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_extraction_tables(postgres_session)
+    source = _news_source(postgres_session)
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "unit_count",
+                "raw_match": "310-unit",
+                "offset_start": 36,
+                "offset_end": 44,
+                "canonical": 310,
+                "confidence": 0.95,
+                "metadata": {"label": "unit"},
+            }
+        ],
+    }
+    postgres_session.add(article)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    class FakeExtractionClient:
+        model = "claude-opus-4-7"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, _prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return ExtractionLLMResponse(
+                payload=_payload(candidate_unit_total=250),
+                text="{}",
+                model=self.model,
+                usage=LLMUsage(
+                    input_tokens_uncached=100,
+                    input_tokens_cache_creation=0,
+                    input_tokens_cached=10,
+                    output_tokens=20,
+                ),
+                latency_ms=100,
+                stop_reason="tool_use",
+            )
+
+    client = FakeExtractionClient()
+
+    result = run_news_extraction_for_article(
+        article.id,
+        client=client,
+        session_factory=task_session_factory,
+        settings=Settings(
+            agent_enabled_for_news=True,
+            agent_allow_live_llm=True,
+            news_use_legacy_pass3=False,
+        ),
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+    )
+
+    assert client.calls == 1
+    assert result.extraction_id is not None
+    assert result.reextraction_id is None
+    postgres_session.expire_all()
+    refreshed_article = postgres_session.get(NewsArticle, article.id)
+    assert refreshed_article is not None
+    assert refreshed_article.current_extraction_id == result.extraction_id
+    assert refreshed_article.current_extraction_version == 1
+
+
 def test_run_news_extraction_for_article_does_not_reextract_without_trigger(
     postgres_session: Session,
 ) -> None:

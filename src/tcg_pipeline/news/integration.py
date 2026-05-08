@@ -61,7 +61,9 @@ from tcg_pipeline.news.extraction import (
     NewsExtractionRunResult,
 )
 from tcg_pipeline.news.extraction_legacy import (
+    PASS3A_TRIGGER_PASS1_PASS2_CONFLICT,
     PASS3B_TRIGGER_NEW_CANDIDATE,
+    decide_pass3a_reextraction,
     run_news_reextraction_for_article,
 )
 from tcg_pipeline.resolution import resolve_project
@@ -630,11 +632,22 @@ def _run_news_agents_for_first_pass(
 ) -> dict[uuid.UUID, _NewsAgentDecision]:
     if first_pass.extraction_id is None:
         return {}
-    agent_pairs = [
-        (reference, match, triggers)
-        for reference, match in zip(first_pass.references, first_pass.matches, strict=True)
-        if (triggers := _agent_triggers_for_reference(reference=reference, match=match))
-    ]
+    pass1_pass2_conflicts = _pass1_pass2_conflicts_by_reference(
+        session_factory,
+        first_pass=first_pass,
+    )
+    agent_pairs: list[
+        tuple[NewsProjectReference, NewsMatchResult, tuple[AgentTrigger, ...], list[dict[str, Any]]]
+    ] = []
+    for reference, match in zip(first_pass.references, first_pass.matches, strict=True):
+        reference_conflicts = pass1_pass2_conflicts.get(reference.reference_index, [])
+        triggers = _agent_triggers_for_reference(
+            reference=reference,
+            match=match,
+            pass1_pass2_conflicts=reference_conflicts,
+        )
+        if triggers:
+            agent_pairs.append((reference, match, triggers, reference_conflicts))
     if not agent_pairs:
         return {}
     client = agent_client
@@ -647,7 +660,7 @@ def _run_news_agents_for_first_pass(
         client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
 
     decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
-    for reference, match, triggers in agent_pairs:
+    for reference, match, triggers, pass1_pass2_conflicts_for_reference in agent_pairs:
         with session_factory() as session:
             article = session.get(NewsArticle, first_pass.article_id)
             extraction = session.get(NewsExtraction, first_pass.extraction_id)
@@ -660,6 +673,7 @@ def _run_news_agents_for_first_pass(
                 reference=current_reference,
                 match=match,
                 force_project_id=force_project_id,
+                pass1_pass2_conflicts=pass1_pass2_conflicts_for_reference,
             )
             matcher_payload = _agent_matcher_payload(reference=current_reference, match=match)
         result = run_agent_for_intake(
@@ -686,8 +700,11 @@ def _agent_triggers_for_reference(
     *,
     reference: NewsProjectReference,
     match: NewsMatchResult,
+    pass1_pass2_conflicts: list[dict[str, Any]] | None = None,
 ) -> tuple[AgentTrigger, ...]:
     triggers: list[AgentTrigger] = []
+    if pass1_pass2_conflicts:
+        triggers.append(AgentTrigger.PASS1_PASS2_CONFLICT)
     if match.status == NewsMatchStatus.NEW_CANDIDATE:
         triggers.append(AgentTrigger.NEW_CANDIDATE)
     if match.status == NewsMatchStatus.POSSIBLE and len(match.candidate_project_ids) > 0:
@@ -695,6 +712,33 @@ def _agent_triggers_for_reference(
     if _low_confidence_populated_fields(reference):
         triggers.append(AgentTrigger.LOW_CONFIDENCE)
     return tuple(triggers)
+
+
+def _pass1_pass2_conflicts_by_reference(
+    session_factory: sessionmaker[Session],
+    *,
+    first_pass: _FirstPassMatchSet,
+) -> dict[int, list[dict[str, Any]]]:
+    if first_pass.extraction_id is None:
+        return {}
+    with session_factory() as session:
+        article = session.get(NewsArticle, first_pass.article_id)
+        extraction = session.get(NewsExtraction, first_pass.extraction_id)
+        if article is None or extraction is None:
+            raise RuntimeError("News agent conflict trigger references missing rows.")
+        decision = decide_pass3a_reextraction(article, extraction)
+    if decision is None or decision.triggered_by != PASS3A_TRIGGER_PASS1_PASS2_CONFLICT:
+        return {}
+    conflicts_by_reference: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for conflict in decision.context.get("conflicts") or []:
+        if not isinstance(conflict, dict):
+            continue
+        try:
+            reference_index = int(conflict.get("reference_index"))
+        except (TypeError, ValueError):
+            continue
+        conflicts_by_reference[reference_index].append(dict(conflict))
+    return dict(conflicts_by_reference)
 
 
 def _low_confidence_populated_fields(reference: NewsProjectReference) -> list[str]:
@@ -714,6 +758,7 @@ def _agent_intake_payload(
     reference: NewsProjectReference,
     match: NewsMatchResult,
     force_project_id: uuid.UUID | None,
+    pass1_pass2_conflicts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     source = article.source
     return {
@@ -732,6 +777,7 @@ def _agent_intake_payload(
         },
         "reference": _agent_reference_payload(article=article, reference=reference),
         "matcher": _agent_matcher_payload(reference=reference, match=match),
+        "pass1_pass2_conflicts": serialize_json(pass1_pass2_conflicts or []),
         "low_confidence_fields": _low_confidence_populated_fields(reference),
         "force_project_id": str(force_project_id) if force_project_id is not None else None,
         "body_access": "Use get_article_body(article_id) if full article text is needed.",

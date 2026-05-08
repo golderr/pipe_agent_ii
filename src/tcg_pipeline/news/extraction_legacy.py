@@ -233,6 +233,13 @@ def maybe_run_pass3a_reextraction(
             and not settings.news_use_legacy_pass3
         ):
             return None
+        if (
+            decision.triggered_by == PASS3A_TRIGGER_PASS1_PASS2_CONFLICT
+            and settings.agent_enabled_for_news
+            and settings.agent_allow_live_llm
+            and not settings.news_use_legacy_pass3
+        ):
+            return None
         rendered_prompt = render_reextraction_prompt(
             session,
             article,

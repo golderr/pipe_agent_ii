@@ -1109,6 +1109,82 @@ def test_force_project_id_is_honored_for_single_reference_and_reported_for_multi
     assert multi_result.progress_payload["force_project_id_dropped_reason"] == ("multi_reference")
 
 
+def test_news_integration_routes_pass1_pass2_conflict_to_agent(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2100 Conflict Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Conflict Check Tower",
+        total_units=250,
+    )
+    article = _article(source)
+    article.structural_signals = {
+        "extractor_version": "v1",
+        "ran_at": "2026-04-29T12:00:00+00:00",
+        "signals": [
+            {
+                "extractor": "unit_count",
+                "raw_match": "310 apartments",
+                "offset_start": 15,
+                "offset_end": 29,
+                "canonical": 310,
+                "confidence": 0.95,
+                "metadata": {"label": "unit"},
+            }
+        ],
+    }
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Conflict Check Tower",
+                candidate_address="2100 Conflict Boulevard, Los Angeles, CA 90012",
+                candidate_unit_total=250,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient({"decision": "no_change"})
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests
+    request = client.requests[0]
+    assert request.trigger_reasons == ("pass1_pass2_conflict",)
+    assert request.intake.payload["pass1_pass2_conflicts"][0]["field"] == "total_units"
+    assert request.intake.payload["pass1_pass2_conflicts"][0]["structural_value"] == 310
+    assert request.intake.payload["pass1_pass2_conflicts"][0]["extracted_value"] == 250
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["pass1_pass2_conflict"]
+
+
 def test_news_integration_creates_possible_match_review_item(
     postgres_session: Session,
 ) -> None:
