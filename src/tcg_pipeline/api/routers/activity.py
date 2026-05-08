@@ -33,6 +33,7 @@ DB_SESSION = Depends(get_db_session)
 
 EVENT_TYPES = {"change", "resolution", "agent"}
 VIEW_PRESETS = {"all", "agent", "auto_applied", "semantic"}
+AGENT_FAILURE_OUTCOMES = {"failed_timeout", "failed_budget", "failed_error", "killed_by_switch"}
 MAX_INTERNAL_LIMIT = 500
 
 
@@ -97,7 +98,7 @@ def list_activity_events(
         for event in events
         if _event_matches_view(event, normalized_view)
     ]
-    filtered_events.sort(key=lambda event: event.occurred_at, reverse=True)
+    filtered_events.sort(key=_event_sort_key, reverse=True)
     return ActivityFeedResponse(
         generated_at=datetime.now(UTC).isoformat(),
         events=filtered_events[:limit],
@@ -183,6 +184,8 @@ def _resolution_events(
     statement = select(ResolutionLog).order_by(
         ResolutionLog.created_at.desc(),
         ResolutionLog.id.asc(),
+    ).where(
+        ResolutionLog.current_value.is_distinct_from(ResolutionLog.resolved_value)
     )
     if field:
         statement = statement.where(ResolutionLog.field == field)
@@ -234,14 +237,13 @@ def _agent_events(
     limit: int,
 ) -> list[ActivityEventResponse]:
     statement = select(AgentRun).order_by(AgentRun.created_at.desc(), AgentRun.id.asc())
-    if source:
-        statement = statement.where(AgentRun.intake_source_type == source)
     if actor:
         statement = statement.where((AgentRun.profile_name == actor) | (AgentRun.outcome == actor))
     if project_id is not None:
         statement = statement.where(AgentRun.project_id == project_id)
     statement = _date_window(statement, AgentRun.created_at, from_date=from_date, to_date=to_date)
-    rows = session.execute(statement.limit(limit)).scalars().all()
+    query_limit = MAX_INTERNAL_LIMIT if source else limit
+    rows = session.execute(statement.limit(query_limit)).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows if row.project_id])
     review_item_ids_by_agent = _review_item_ids_by_agent(session, [row.id for row in rows])
     articles = _news_articles_by_id(session, [_news_article_id(row) for row in rows])
@@ -249,18 +251,23 @@ def _agent_events(
         session,
         [article.news_source_id for article in articles.values()],
     )
-    return [
-        _agent_event(
-            row,
-            project=projects.get(row.project_id) if row.project_id else None,
-            review_item_ids=review_item_ids_by_agent.get(row.id, []),
-            article=articles.get(_news_article_id(row)),
-            news_source=source_names.get(articles[_news_article_id(row)].news_source_id)
-            if _news_article_id(row) in articles
-            else None,
+    events: list[ActivityEventResponse] = []
+    for row in rows:
+        article_id = _news_article_id(row)
+        article = articles.get(article_id) if article_id is not None else None
+        news_source = source_names.get(article.news_source_id) if article is not None else None
+        if not _agent_source_matches(row, article=article, news_source=news_source, source=source):
+            continue
+        events.append(
+            _agent_event(
+                row,
+                project=projects.get(row.project_id) if row.project_id else None,
+                review_item_ids=review_item_ids_by_agent.get(row.id, []),
+                article=article,
+                news_source=news_source,
+            )
         )
-        for row in rows
-    ]
+    return events[:limit]
 
 
 def _agent_event(
@@ -272,9 +279,12 @@ def _agent_event(
     news_source: NewsSource | None,
 ) -> ActivityEventResponse:
     trigger_text = ", ".join(row.triggered_by)
-    title = "Agent decision"
-    if trigger_text:
+    if row.outcome in AGENT_FAILURE_OUTCOMES:
+        title = f"Agent failed: {_source_label(row.outcome)}"
+    elif trigger_text:
         title = f"Agent decision: {trigger_text}"
+    else:
+        title = "Agent decision"
     article_summary = (
         ActivityArticleSummary(
             id=article.id,
@@ -332,6 +342,14 @@ def _date_window(
     if to_date is not None:
         statement = statement.where(column <= datetime.combine(to_date, time.max, tzinfo=UTC))
     return statement
+
+
+def _event_sort_key(event: ActivityEventResponse) -> datetime:
+    value = event.occurred_at.replace("Z", "+00:00")
+    occurred_at = datetime.fromisoformat(value)
+    if occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=UTC)
+    return occurred_at.astimezone(UTC)
 
 
 def _event_matches_view(event: ActivityEventResponse, view: str) -> bool:
@@ -401,6 +419,22 @@ def _news_sources_by_id(
         return {}
     rows = session.execute(select(NewsSource).where(NewsSource.id.in_(ids))).scalars().all()
     return {row.id: row for row in rows}
+
+
+def _agent_source_matches(
+    row: AgentRun,
+    *,
+    article: NewsArticle | None,
+    news_source: NewsSource | None,
+    source: str | None,
+) -> bool:
+    if source is None:
+        return True
+    if row.intake_source_type == source:
+        return True
+    if article is None or news_source is None:
+        return False
+    return news_source.slug == source
 
 
 def _news_article_id(row: AgentRun) -> uuid.UUID | None:

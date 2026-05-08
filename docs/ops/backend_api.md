@@ -39,6 +39,17 @@ are `agent`, `auto_applied`, and `semantic`; later AGENT.2 step 11 work can add
 market/jurisdiction slicing and reason-code distribution metrics on the same
 endpoint family.
 
+`source` is an exact event-source filter. Change rows match `change_log.source`.
+Resolution rows match only `resolution_engine`. News-agent rows match either the
+logical intake source (`news_article`) or the linked `news_sources.slug`, so a
+publisher filter such as `urbanize_la` includes agent rows for articles from
+that publisher. No-op resolution rows where `current_value` equals
+`resolved_value` are hidden from the feed by default.
+
+The `semantic` preset is still a first Activity-slice status-news filter. The
+next step-11 slice should read `news_semantic_interpretations` directly for
+authoritative Pass 2c semantic activity and per-market glossary-gap metrics.
+
 For news-agent rows, the response exposes both `article_fetched_at` and
 `agent_created_at` so researchers can distinguish article arrival time from the
 agent decision time when child-job queue depth creates lag.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -27,6 +27,72 @@ from tcg_pipeline.db.models import (
     ScrapeJobKind,
     StatusConfidence,
 )
+
+
+def _auth_user() -> AuthenticatedUser:
+    return AuthenticatedUser(
+        user_id=uuid.uuid4(),
+        email="allowed@example.com",
+        role="authenticated",
+        claims={},
+    )
+
+
+def _project(postgres_session: Session, address: str) -> Project:
+    project = Project(
+        canonical_address=address,
+        raw_addresses=[address],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        project_name=address,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    return project
+
+
+def _agent_run(
+    postgres_session: Session,
+    project: Project,
+    *,
+    article_id: uuid.UUID | None = None,
+    created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+    outcome: str = AgentRunOutcome.COMPLETED.value,
+) -> AgentRun:
+    agent_run = AgentRun(
+        intake_source_type="news_article",
+        intake_record_id=str(article_id or uuid.uuid4()),
+        project_id=project.id,
+        profile_name="news_v1",
+        profile_version="v1",
+        triggered_by=["low_confidence"],
+        provider="anthropic",
+        model="claude-opus-4-7",
+        prompt_version="agent_news_v1",
+        input_tokens_uncached=100,
+        input_tokens_cache_creation=0,
+        input_tokens_cached=20,
+        output_tokens=30,
+        cost_usd=Decimal("0.010000"),
+        latency_ms=1000,
+        reasoning_trace="Agent checked attribution.",
+        evidence_consulted=[],
+        tool_calls_summary=[],
+        outcome=outcome,
+        error_text="timed out" if outcome.startswith("failed_") else None,
+        budget_consumed_usd=Decimal("0.010000"),
+        tool_calls_count=0,
+        wallclock_seconds=1,
+        started_at=created_at,
+        completed_at=created_at,
+        created_at=created_at,
+    )
+    postgres_session.add(agent_run)
+    postgres_session.flush()
+    return agent_run
 
 
 def test_activity_feed_combines_change_resolution_and_agent_rows(
@@ -131,12 +197,7 @@ def test_activity_feed_combines_change_resolution_and_agent_rows(
     postgres_session.flush()
 
     response = list_activity_events(
-        user=AuthenticatedUser(
-            user_id=uuid.uuid4(),
-            email="allowed@example.com",
-            role="authenticated",
-            claims={},
-        ),
+        user=_auth_user(),
         session=postgres_session,
         project_id=project.id,
         limit=10,
@@ -209,12 +270,7 @@ def test_activity_feed_agent_view_filters_to_agent_rows(postgres_session: Sessio
     postgres_session.flush()
 
     response = list_activity_events(
-        user=AuthenticatedUser(
-            user_id=uuid.uuid4(),
-            email="allowed@example.com",
-            role="authenticated",
-            claims={},
-        ),
+        user=_auth_user(),
         session=postgres_session,
         view="agent",
         project_id=project.id,
@@ -222,3 +278,281 @@ def test_activity_feed_agent_view_filters_to_agent_rows(postgres_session: Sessio
     )
 
     assert [event.event_type for event in response.events] == ["agent"]
+
+
+def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "300 Activity Way")
+    review_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        status=ReviewItemStatus.OPEN,
+        priority=Priority.MEDIUM,
+        field_name="pipeline_status",
+        payload={},
+    )
+    postgres_session.add(review_item)
+    postgres_session.flush()
+    unlinked_agent = _agent_run(
+        postgres_session,
+        project,
+        created_at=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+    )
+    linked_agent = _agent_run(
+        postgres_session,
+        project,
+        created_at=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
+    )
+    postgres_session.add(
+        AgentRunReviewItem(agent_run_id=linked_agent.id, review_item_id=review_item.id)
+    )
+    postgres_session.add_all(
+        [
+            ChangeLog(
+                project_id=project.id,
+                review_item_id=None,
+                timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+                source="inline_override",
+                field="total_units",
+                old_value=100,
+                new_value=110,
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.LOW,
+            ),
+            ChangeLog(
+                project_id=project.id,
+                review_item_id=review_item.id,
+                timestamp=datetime(2026, 5, 8, 10, 4, tzinfo=UTC),
+                source="urbanize_la",
+                field="pipeline_status",
+                old_value="Approved",
+                new_value="Under Construction",
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.HIGH,
+            ),
+            ResolutionLog(
+                project_id=project.id,
+                field="affordable_units",
+                current_value=10,
+                resolved_value=20,
+                evidence_ids=[],
+                rule_applied="most_recent_wins",
+                confidence=StatusConfidence.HIGH,
+                created_at=datetime(2026, 5, 8, 10, 5, tzinfo=UTC),
+            ),
+            ResolutionLog(
+                project_id=project.id,
+                field="market_rate_units",
+                current_value=90,
+                resolved_value=90,
+                evidence_ids=[],
+                rule_applied="most_recent_wins",
+                confidence=StatusConfidence.HIGH,
+                created_at=datetime(2026, 5, 8, 10, 6, tzinfo=UTC),
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="auto_applied",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert [(event.event_type, event.field) for event in response.events] == [
+        ("resolution", "affordable_units"),
+        ("change", "total_units"),
+        ("agent", None),
+    ]
+    assert response.events[-1].id == f"agent:{unlinked_agent.id}"
+
+
+def test_activity_feed_semantic_view_filters_status_news_rows(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "400 Activity Way")
+    postgres_session.add_all(
+        [
+            ChangeLog(
+                project_id=project.id,
+                timestamp=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+                source="urbanize_la",
+                field="pipeline_status",
+                old_value="Approved",
+                new_value="Under Construction",
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.HIGH,
+            ),
+            ChangeLog(
+                project_id=project.id,
+                timestamp=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
+                source="urbanize_la",
+                field="total_units",
+                old_value=100,
+                new_value=120,
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.MEDIUM,
+            ),
+            ChangeLog(
+                project_id=project.id,
+                timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+                source="costar",
+                field="pipeline_status",
+                old_value="Approved",
+                new_value="Under Construction",
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.MEDIUM,
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="semantic",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert [(event.source, event.field) for event in response.events] == [
+        ("urbanize_la", "pipeline_status")
+    ]
+
+
+def test_activity_feed_source_filter_matches_agent_article_source(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "500 Activity Way")
+    source = NewsSource(
+        slug=f"activity-source-{uuid.uuid4().hex}",
+        name="Activity Source",
+        base_url="https://example.com",
+        collector_class="PoliteNewsCollector",
+    )
+    postgres_session.add(source)
+    postgres_session.flush()
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical="https://example.com/activity-source-filter",
+        url_original="https://example.com/activity-source-filter",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        fetched_at=datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+        title="Activity source filter",
+        ingest_method=ScrapeJobKind.NEWS_SCRAPE.value,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    _agent_run(
+        postgres_session,
+        project,
+        article_id=article.id,
+        created_at=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+    )
+    postgres_session.add(
+        ChangeLog(
+            project_id=project.id,
+            timestamp=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
+            source=source.slug,
+            field="total_units",
+            old_value=100,
+            new_value=110,
+            change_type=ChangeType.RESEARCHER_CONFIRMED,
+            priority=Priority.MEDIUM,
+        )
+    )
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        source=source.slug,
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert [event.event_type for event in response.events] == ["change", "agent"]
+
+
+def test_activity_feed_filters_by_date_and_actor(postgres_session: Session) -> None:
+    project = _project(postgres_session, "600 Activity Way")
+    reviewer_id = uuid.uuid4()
+    postgres_session.add_all(
+        [
+            ChangeLog(
+                project_id=project.id,
+                timestamp=datetime(2026, 5, 7, 10, 0, tzinfo=UTC),
+                source="inline_override",
+                field="total_units",
+                old_value=100,
+                new_value=101,
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.LOW,
+                reviewed_by="researcher",
+                reviewed_by_user_id=reviewer_id,
+                reviewed_by_email="researcher@example.com",
+            ),
+            ChangeLog(
+                project_id=project.id,
+                timestamp=datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+                source="inline_override",
+                field="total_units",
+                old_value=101,
+                new_value=102,
+                change_type=ChangeType.RESEARCHER_CONFIRMED,
+                priority=Priority.LOW,
+                reviewed_by="other",
+                reviewed_by_user_id=uuid.uuid4(),
+                reviewed_by_email="other@example.com",
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        actor="researcher@example.com",
+        project_id=project.id,
+        from_date=date(2026, 5, 7),
+        to_date=date(2026, 5, 7),
+        limit=10,
+    )
+
+    assert [event.new_value for event in response.events] == [101]
+
+    response_by_uuid = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        actor=str(reviewer_id),
+        project_id=project.id,
+        limit=10,
+    )
+    assert [event.new_value for event in response_by_uuid.events] == [101]
+
+
+def test_activity_feed_failed_agent_title_is_outcome_aware(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "700 Activity Way")
+    _agent_run(
+        postgres_session,
+        project,
+        outcome=AgentRunOutcome.FAILED_TIMEOUT.value,
+        created_at=datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="agent",
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert response.events[0].title == "Agent failed: Failed Timeout"

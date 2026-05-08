@@ -32,6 +32,7 @@ const EVENT_TYPES = [
 ];
 
 const FIELD_OPTIONS = [
+  // TODO(AGENT.2 step 11): derive this from the canonical field registry.
   { value: "", label: "All fields" },
   { value: "pipeline_status", label: "Status" },
   { value: "total_units", label: "Total units" },
@@ -43,6 +44,7 @@ const FIELD_OPTIONS = [
 ];
 
 const SOURCE_OPTIONS = [
+  // TODO(AGENT.2 step 11): derive news-source slugs from active news_sources rows.
   { value: "", label: "All sources" },
   { value: "news_article", label: "News article" },
   { value: "urbanize_la", label: "Urbanize LA" },
@@ -56,6 +58,25 @@ const SOURCE_OPTIONS = [
 
 function firstQueryValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
+}
+
+function activityHrefForView(query: ActivityQuery, view: string) {
+  const params = new URLSearchParams();
+  params.set("view", view);
+  setQueryParam(params, "type", query.eventType);
+  setQueryParam(params, "source", query.source);
+  setQueryParam(params, "field", query.field);
+  setQueryParam(params, "actor", query.actor);
+  setQueryParam(params, "project_id", query.projectId);
+  setQueryParam(params, "from", query.from);
+  setQueryParam(params, "to", query.to);
+  return `/activity?${params.toString()}`;
+}
+
+function setQueryParam(params: URLSearchParams, key: string, value: string | null) {
+  if (value) {
+    params.set(key, value);
+  }
 }
 
 export default async function ActivityPage({ searchParams }: ActivityPageProps) {
@@ -104,7 +125,7 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
                   ? "border-teal-700 bg-teal-700 text-white"
                   : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-950"
               )}
-              href={`/activity?view=${encodeURIComponent(preset.value)}`}
+              href={activityHrefForView(query, preset.value)}
               key={preset.value}
             >
               {preset.label}
@@ -160,7 +181,6 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
 }
 
 function ActivityRow({ event }: { event: ActivityEvent }) {
-  const Icon = eventIcon(event.event_type);
   return (
     <details className="group px-4 py-3">
       <summary
@@ -169,7 +189,7 @@ function ActivityRow({ event }: { event: ActivityEvent }) {
       >
         <span className="text-slate-500">{formatDateTime(event.occurred_at)}</span>
         <span className="inline-flex items-center gap-1.5 font-medium text-slate-950">
-          <Icon className="size-4 text-slate-500" aria-hidden="true" />
+          <ActivityEventIcon eventType={event.event_type} />
           {eventTypeLabel(event.event_type)}
         </span>
         <span className="min-w-0">
@@ -324,14 +344,14 @@ function FilterInput({
   );
 }
 
-function eventIcon(eventType: ActivityEvent["event_type"]) {
+function ActivityEventIcon({ eventType }: { eventType: ActivityEvent["event_type"] }) {
   if (eventType === "agent") {
-    return Bot;
+    return <Bot className="size-4 text-slate-500" aria-hidden="true" />;
   }
   if (eventType === "resolution") {
-    return CheckCircle2;
+    return <CheckCircle2 className="size-4 text-slate-500" aria-hidden="true" />;
   }
-  return GitCommit;
+  return <GitCommit className="size-4 text-slate-500" aria-hidden="true" />;
 }
 
 function eventTypeLabel(eventType: ActivityEvent["event_type"]) {
