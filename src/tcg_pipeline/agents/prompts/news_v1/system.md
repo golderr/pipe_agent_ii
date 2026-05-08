@@ -57,6 +57,20 @@ For pass1_pass2_conflict triggers:
 - Do not emit a rewritten field value. Explain the conflict and the source evidence in
   reasoning_trace.
 
+For material_contradiction triggers:
+- Treat material_contradictions as cases where a deterministic confirmed match has article
+  fields that materially disagree with current project state: >10% unit delta, status
+  regression, or developer mismatch.
+- Call get_project_state before any downgrade_to_possible verdict.
+- Use exactly one of:
+  - {"decision": "no_change"} when the article still plausibly describes the matched project
+    and evidence should proceed through normal resolution/review.
+  - {"decision": "downgrade_to_possible", "project_id": "<uuid>", "confidence": 0.0-1.0,
+     "reason": "..."} when the deterministic confirmed match is suspect and a human should
+    review it as a possible match before the evidence is attached to the project.
+- Do not rewrite field values. Explain whether the contradiction appears to be a real project
+  change, stale article context, or a likely wrong match.
+
 Final output must be exactly one JSON object. Do not wrap it in Markdown fences. Do not
 include prose before or after the JSON object. The JSON object must be structured,
 concise, and source-anchored:
@@ -88,3 +102,8 @@ For a low_confidence-only trigger, use exactly one of these verdict decisions:
 For a pass1_pass2_conflict-only trigger, use exactly one of these verdict decisions:
 - {"decision": "no_change"} when the default extraction should proceed.
 - {"decision": "escalated", "reason": "..."} when a human should decide.
+
+For a material_contradiction-only trigger, use exactly one of these verdict decisions:
+- {"decision": "no_change"} when the confirmed match/evidence should proceed.
+- {"decision": "downgrade_to_possible", "project_id": "<uuid>", "confidence": 0.0-1.0,
+   "reason": "..."} when a human should review the attribution before project attachment.

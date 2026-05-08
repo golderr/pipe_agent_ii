@@ -36,6 +36,14 @@ def test_news_agent_prompt_defines_pass1_conflict_combined_trigger_contract() ->
     assert "the structural conflict is reasoning" in prompt
 
 
+def test_news_agent_prompt_defines_material_contradiction_contract() -> None:
+    prompt = NEWS_AGENT_PROFILE.system_prompt_path.read_text(encoding="utf-8")
+
+    assert "For material_contradiction triggers:" in prompt
+    assert "downgrade_to_possible" in prompt
+    assert "get_project_state" in prompt
+
+
 def test_normalize_agent_triggers_accepts_enums_and_strings() -> None:
     assert normalize_agent_triggers(
         [AgentTrigger.NEW_CANDIDATE, "material_contradiction"]

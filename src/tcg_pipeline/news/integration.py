@@ -67,6 +67,8 @@ from tcg_pipeline.news.extraction_legacy import (
     run_news_reextraction_for_article,
 )
 from tcg_pipeline.resolution import resolve_project
+from tcg_pipeline.resolution.fields.status import STATUS_PROGRESS_ORDER
+from tcg_pipeline.review.contradictions import values_contradict
 from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
@@ -90,10 +92,13 @@ from tcg_pipeline.settings import Settings, get_settings
 NEWS_SOURCE_TYPE = "news_article"
 AGENT_PROMOTED_EXISTING_PROJECT_MATCH = "agent_promoted_existing_project"
 AGENT_CONFIRMED_POSSIBLE_MATCH = "agent_confirmed_possible_match"
+AGENT_DOWNGRADED_CONFIRMED_MATCH = "agent_downgraded_confirmed_match"
 AGENT_PROMOTE_EXISTING_PROJECT_DECISION = "promote_existing_project"
 AGENT_CONFIRM_EXISTING_PROJECT_DECISION = "confirm_existing_project"
+AGENT_DOWNGRADE_TO_POSSIBLE_DECISION = "downgrade_to_possible"
 AGENT_ESCALATED_DECISION = "escalated"
 ACTIVE_REVIEW_STATES = {"open", "staged"}
+MATERIAL_UNIT_DELTA_RATIO = 0.10
 REFERENCE_FIELD_TO_PROJECT_FIELD = {
     "candidate_name": "project_name",
     "candidate_address": "canonical_address",
@@ -415,6 +420,7 @@ class _FirstPassMatchSet:
 class _NewsAgentDecision:
     result: AgentRunResult
     pass1_pass2_conflicts: tuple[dict[str, Any], ...] = ()
+    material_contradictions: tuple[dict[str, Any], ...] = ()
 
 
 def _load_current_references_and_matches(
@@ -642,18 +648,41 @@ def _run_news_agents_for_first_pass(
         session_factory,
         first_pass=first_pass,
     )
+    material_contradictions = _material_contradictions_by_reference(
+        session_factory,
+        first_pass=first_pass,
+    )
     agent_pairs: list[
-        tuple[NewsProjectReference, NewsMatchResult, tuple[AgentTrigger, ...], list[dict[str, Any]]]
+        tuple[
+            NewsProjectReference,
+            NewsMatchResult,
+            tuple[AgentTrigger, ...],
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+        ]
     ] = []
     for reference, match in zip(first_pass.references, first_pass.matches, strict=True):
         reference_conflicts = pass1_pass2_conflicts.get(reference.reference_index, [])
+        reference_material_contradictions = material_contradictions.get(
+            reference.reference_index,
+            [],
+        )
         triggers = _agent_triggers_for_reference(
             reference=reference,
             match=match,
             pass1_pass2_conflicts=reference_conflicts,
+            material_contradictions=reference_material_contradictions,
         )
         if triggers:
-            agent_pairs.append((reference, match, triggers, reference_conflicts))
+            agent_pairs.append(
+                (
+                    reference,
+                    match,
+                    triggers,
+                    reference_conflicts,
+                    reference_material_contradictions,
+                )
+            )
     if not agent_pairs:
         return {}
     client = agent_client
@@ -666,7 +695,13 @@ def _run_news_agents_for_first_pass(
         client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
 
     decisions: dict[uuid.UUID, _NewsAgentDecision] = {}
-    for reference, match, triggers, pass1_pass2_conflicts_for_reference in agent_pairs:
+    for (
+        reference,
+        match,
+        triggers,
+        pass1_pass2_conflicts_for_reference,
+        material_contradictions_for_reference,
+    ) in agent_pairs:
         with session_factory() as session:
             article = session.get(NewsArticle, first_pass.article_id)
             extraction = session.get(NewsExtraction, first_pass.extraction_id)
@@ -680,6 +715,7 @@ def _run_news_agents_for_first_pass(
                 match=match,
                 force_project_id=force_project_id,
                 pass1_pass2_conflicts=pass1_pass2_conflicts_for_reference,
+                material_contradictions=material_contradictions_for_reference,
             )
             matcher_payload = _agent_matcher_payload(reference=current_reference, match=match)
         result = run_agent_for_intake(
@@ -703,6 +739,9 @@ def _run_news_agents_for_first_pass(
             pass1_pass2_conflicts=tuple(
                 serialize_json(pass1_pass2_conflicts_for_reference)
             ),
+            material_contradictions=tuple(
+                serialize_json(material_contradictions_for_reference)
+            ),
         )
     return decisions
 
@@ -712,10 +751,13 @@ def _agent_triggers_for_reference(
     reference: NewsProjectReference,
     match: NewsMatchResult,
     pass1_pass2_conflicts: list[dict[str, Any]] | None = None,
+    material_contradictions: list[dict[str, Any]] | None = None,
 ) -> tuple[AgentTrigger, ...]:
     triggers: list[AgentTrigger] = []
     if pass1_pass2_conflicts:
         triggers.append(AgentTrigger.PASS1_PASS2_CONFLICT)
+    if material_contradictions:
+        triggers.append(AgentTrigger.MATERIAL_CONTRADICTION)
     if match.status == NewsMatchStatus.NEW_CANDIDATE:
         triggers.append(AgentTrigger.NEW_CANDIDATE)
     if match.status == NewsMatchStatus.POSSIBLE and len(match.candidate_project_ids) > 0:
@@ -752,6 +794,152 @@ def _pass1_pass2_conflicts_by_reference(
     return dict(conflicts_by_reference)
 
 
+def _material_contradictions_by_reference(
+    session_factory: sessionmaker[Session],
+    *,
+    first_pass: _FirstPassMatchSet,
+) -> dict[int, list[dict[str, Any]]]:
+    contradictions_by_reference: dict[int, list[dict[str, Any]]] = {}
+    with session_factory() as session:
+        for reference, match in zip(first_pass.references, first_pass.matches, strict=True):
+            if match.status != NewsMatchStatus.CONFIRMED or match.project_id is None:
+                continue
+            current_reference = session.get(NewsProjectReference, reference.id)
+            project = session.get(Project, match.project_id)
+            if current_reference is None or project is None:
+                continue
+            contradictions = _material_contradictions_for_reference(
+                session,
+                reference=current_reference,
+                match=match,
+                project=project,
+            )
+            if contradictions:
+                contradictions_by_reference[current_reference.reference_index] = contradictions
+    return contradictions_by_reference
+
+
+def _material_contradictions_for_reference(
+    session: Session,
+    *,
+    reference: NewsProjectReference,
+    match: NewsMatchResult,
+    project: Project,
+) -> list[dict[str, Any]]:
+    contradictions: list[dict[str, Any]] = []
+    unit_contradiction = _material_unit_delta(
+        field_name="total_units",
+        current_value=project.total_units,
+        candidate_value=reference.candidate_unit_total,
+    )
+    if unit_contradiction is not None:
+        contradictions.append(unit_contradiction)
+
+    status_contradiction = _material_status_regression(
+        current_value=project.pipeline_status,
+        candidate_value=reference.candidate_status_signal,
+    )
+    if status_contradiction is not None:
+        contradictions.append(status_contradiction)
+
+    developer_contradiction = _material_developer_mismatch(
+        session,
+        current_value=project.developer,
+        candidate_value=reference.candidate_developer,
+    )
+    if developer_contradiction is not None:
+        contradictions.append(developer_contradiction)
+
+    if not contradictions:
+        return []
+    project_context = {
+        "project_id": str(project.id),
+        "project_name": project.project_name,
+        "match_type": match.match_type,
+        "match_confidence": match.confidence,
+    }
+    return [
+        {
+            **contradiction,
+            "reference_index": reference.reference_index,
+            "candidate_name": reference.candidate_name,
+            "candidate_address": reference.candidate_address,
+            "project": project_context,
+        }
+        for contradiction in contradictions
+    ]
+
+
+def _material_unit_delta(
+    *,
+    field_name: str,
+    current_value: Any,
+    candidate_value: Any,
+) -> dict[str, Any] | None:
+    current_int = _int_or_none(current_value)
+    candidate_int = _int_or_none(candidate_value)
+    if current_int is None or candidate_int is None:
+        return None
+    delta = abs(candidate_int - current_int)
+    denominator = max(abs(current_int), 1)
+    delta_ratio = delta / denominator
+    if delta_ratio <= MATERIAL_UNIT_DELTA_RATIO:
+        return None
+    return {
+        "field": field_name,
+        "current_value": current_int,
+        "candidate_value": candidate_int,
+        "delta": delta,
+        "delta_ratio": round(delta_ratio, 4),
+        "reason": "candidate_unit_total differs from current project state by more than 10%",
+    }
+
+
+def _material_status_regression(
+    *,
+    current_value: PipelineStatus,
+    candidate_value: Any,
+) -> dict[str, Any] | None:
+    candidate_status = _coerce_semantic_pipeline_status(candidate_value)
+    if candidate_status is None:
+        return None
+    current_rank = STATUS_PROGRESS_ORDER.get(current_value)
+    candidate_rank = STATUS_PROGRESS_ORDER.get(candidate_status)
+    if current_rank is None or candidate_rank is None or candidate_rank >= current_rank:
+        return None
+    return {
+        "field": "pipeline_status",
+        "current_value": current_value.value,
+        "candidate_value": candidate_status.value,
+        "reason": "candidate_status_signal regresses current project status",
+    }
+
+
+def _material_developer_mismatch(
+    session: Session,
+    *,
+    current_value: Any,
+    candidate_value: Any,
+) -> dict[str, Any] | None:
+    current_text = _clean_text(current_value)
+    candidate_text = _clean_text(candidate_value)
+    if current_text is None or candidate_text is None:
+        return None
+    if not values_contradict(
+        "developer",
+        current_text,
+        candidate_text,
+        session=session,
+    ):
+        return None
+    return {
+        "field": "developer",
+        "current_value": current_text,
+        "candidate_value": candidate_text,
+        "reason": "candidate_developer differs from current project developer",
+    }
+
+
 def _low_confidence_populated_fields(reference: NewsProjectReference) -> list[str]:
     if reference.candidate_confidence != "low":
         return []
@@ -770,6 +958,7 @@ def _agent_intake_payload(
     match: NewsMatchResult,
     force_project_id: uuid.UUID | None,
     pass1_pass2_conflicts: list[dict[str, Any]] | None = None,
+    material_contradictions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     source = article.source
     return {
@@ -789,6 +978,7 @@ def _agent_intake_payload(
         "reference": _agent_reference_payload(article=article, reference=reference),
         "matcher": _agent_matcher_payload(reference=reference, match=match),
         "pass1_pass2_conflicts": serialize_json(pass1_pass2_conflicts or []),
+        "material_contradictions": serialize_json(material_contradictions or []),
         "low_confidence_fields": _low_confidence_populated_fields(reference),
         "force_project_id": str(force_project_id) if force_project_id is not None else None,
         "body_access": "Use get_article_body(article_id) if full article text is needed.",
@@ -1195,6 +1385,12 @@ def _agent_revised_match(
     match: NewsMatchResult,
     agent_decision: _NewsAgentDecision | None,
 ) -> NewsMatchResult | None:
+    downgraded_match = _agent_downgraded_confirmed_match(
+        match=match,
+        agent_decision=agent_decision,
+    )
+    if downgraded_match is not None:
+        return downgraded_match
     promoted_match = _agent_promoted_match(
         session,
         match=match,
@@ -1206,6 +1402,55 @@ def _agent_revised_match(
         session,
         match=match,
         agent_decision=agent_decision,
+    )
+
+
+def _agent_downgraded_confirmed_match(
+    *,
+    match: NewsMatchResult,
+    agent_decision: _NewsAgentDecision | None,
+) -> NewsMatchResult | None:
+    if (
+        match.status != NewsMatchStatus.CONFIRMED
+        or match.project_id is None
+        or agent_decision is None
+        or not agent_decision.material_contradictions
+    ):
+        return None
+    result = agent_decision.result
+    if result.outcome not in {AgentRunOutcome.COMPLETED.value, AgentRunOutcome.ESCALATED.value}:
+        return None
+    verdict = result.agent_revised_verdict
+    if not isinstance(verdict, dict):
+        return None
+    if verdict.get("decision") != AGENT_DOWNGRADE_TO_POSSIBLE_DECISION:
+        return None
+    verdict_project_id = _uuid_from_agent_verdict(verdict.get("project_id"))
+    if verdict_project_id is not None and verdict_project_id != match.project_id:
+        return None
+    confidence = _agent_confidence(verdict.get("confidence"))
+    if confidence is None:
+        confidence = min(match.confidence, 0.75)
+    diagnostics = dict(match.diagnostics)
+    diagnostics.update(
+        {
+            "agent_run_id": str(result.agent_run_id),
+            "agent_revised_verdict": serialize_json(verdict),
+            "agent_material_contradictions": list(agent_decision.material_contradictions),
+        }
+    )
+    return NewsMatchResult(
+        status=NewsMatchStatus.POSSIBLE,
+        match_type=AGENT_DOWNGRADED_CONFIRMED_MATCH,
+        confidence=confidence,
+        project_id=None,
+        candidate_project_ids=list(match.candidate_project_ids or [match.project_id]),
+        candidates=list(match.candidates),
+        reason=(
+            "Agent downgraded a deterministic confirmed match after material "
+            f"contradiction review; agent_run_id={result.agent_run_id}."
+        ),
+        diagnostics=diagnostics,
     )
 
 
@@ -2841,6 +3086,18 @@ def _has_value(value: Any) -> bool:
     if isinstance(value, (list, tuple, dict)):
         return len(value) > 0
     return True
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if text.isdigit():
+            return int(text)
+    return None
 
 
 def _dedupe(values) -> list[str]:

@@ -57,6 +57,7 @@ def default_news_integration_tests_to_legacy_semantic(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("NEWS_USE_LEGACY_SEMANTIC", "true")
+    monkeypatch.setenv("AGENT_ENABLED_FOR_NEWS", "false")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -1293,6 +1294,144 @@ def test_news_integration_escalated_pass1_pass2_conflict_creates_review_item(
     assert link is not None
 
 
+def test_news_integration_routes_material_contradiction_to_agent(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2130 Conflict Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Material Conflict Tower",
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, _reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Material Conflict Tower",
+                candidate_address="2130 Conflict Boulevard, Los Angeles, CA 90012",
+                candidate_unit_total=130,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient({"decision": "no_change"})
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests[0].trigger_reasons == ("material_contradiction",)
+    contradiction = client.requests[0].intake.payload["material_contradictions"][0]
+    assert contradiction["field"] == "total_units"
+    assert contradiction["current_value"] == 100
+    assert contradiction["candidate_value"] == 130
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["material_contradiction"]
+
+
+def test_news_integration_material_contradiction_agent_can_downgrade_to_possible(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2140 Conflict Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Downgrade Conflict Tower",
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Downgrade Conflict Tower",
+                candidate_address="2140 Conflict Boulevard, Los Angeles, CA 90012",
+                candidate_unit_total=140,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    client = FakeNewsAgentClient(
+        {
+            "decision": "downgrade_to_possible",
+            "project_id": str(project.id),
+            "confidence": 0.62,
+            "reason": "Unit delta makes the deterministic attribution suspect.",
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        agent_client=client,
+        settings=Settings(agent_enabled_for_news=True, news_use_legacy_pass3=False),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 0
+    assert result.possible == 1
+    assert result.status_change_review_items == 0
+    assert client.requests[0].trigger_reasons == ("material_contradiction",)
+    postgres_session.expire_all()
+    refreshed_reference = postgres_session.get(NewsProjectReference, reference.id)
+    assert refreshed_reference is not None
+    assert refreshed_reference.match_status == NewsMatchStatus.POSSIBLE.value
+    assert refreshed_reference.matched_project_id is None
+    assert refreshed_reference.review_item_id is not None
+    evidence = postgres_session.get(Evidence, refreshed_reference.matched_evidence_id)
+    assert evidence is not None
+    assert evidence.project_id is None
+    review_item = postgres_session.get(ReviewItem, refreshed_reference.review_item_id)
+    assert review_item is not None
+    assert review_item.item_type == ReviewItemType.POSSIBLE_MATCH
+    assert review_item.payload["match"]["diagnostics"]["agent_material_contradictions"][0][
+        "field"
+    ] == "total_units"
+    assert review_item.payload["candidate_project_ids"] == [str(project.id)]
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["material_contradiction"]
+    link = postgres_session.get(
+        AgentRunReviewItem,
+        (agent_run.id, review_item.id),
+    )
+    assert link is not None
+
+
 def test_news_integration_creates_possible_match_review_item(
     postgres_session: Session,
 ) -> None:
@@ -1577,13 +1716,13 @@ def test_news_low_confidence_confirmed_agent_links_status_review_item(
                 candidate_name="Low Confidence Tower",
                 candidate_address="2700 Low Confidence Boulevard, Los Angeles, CA 90012",
                 candidate_developer="Atlas Development",
-                candidate_unit_total=120,
+                candidate_unit_total=88,
                 candidate_confidence="low",
                 passage_excerpts=[
                     {
                         "field": "candidate_unit_total",
-                        "value": 120,
-                        "passage": "Low Confidence Tower would include 120 apartments.",
+                        "value": 88,
+                        "passage": "Low Confidence Tower would include 88 apartments.",
                     }
                 ],
             )
