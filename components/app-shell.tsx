@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, ClipboardList, Database, MapPinned, Newspaper } from "lucide-react";
+import { Activity, BarChart3, ClipboardList, Database, MapPinned, Newspaper } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -10,6 +10,7 @@ const navItems = [
   { href: "/research", label: "Research", icon: Newspaper },
   { href: "/review", label: "Review", icon: ClipboardList },
   { href: "/pipeline", label: "Pipeline", icon: Database },
+  { href: "/activity", label: "Activity", icon: Activity },
   { href: "/dashboard", label: "Dashboard", icon: BarChart3 }
 ];
 

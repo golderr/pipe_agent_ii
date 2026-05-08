@@ -225,6 +225,59 @@ class ReviewCommitResponse(BaseModel):
     dry_run: bool
 
 
+class ActivityProjectSummary(BaseModel):
+    id: uuid.UUID
+    project_name: str | None
+    canonical_address: str
+    city: str | None
+    state: str | None
+    zip: str | None
+    pipeline_status: str
+
+
+class ActivityArticleSummary(BaseModel):
+    id: uuid.UUID
+    title: str | None
+    url: str
+    source_slug: str | None
+    source_name: str | None
+    fetched_at: str | None
+    published_at: str | None
+
+
+class ActivityEventResponse(BaseModel):
+    id: str
+    event_type: str
+    occurred_at: str
+    project: ActivityProjectSummary | None
+    source: str
+    source_label: str
+    field: str | None = None
+    field_label: str | None = None
+    actor_label: str | None = None
+    title: str
+    summary: str
+    old_value: Any | None = None
+    new_value: Any | None = None
+    change_type: str | None = None
+    priority: str | None = None
+    review_item_id: uuid.UUID | None = None
+    review_item_ids: list[uuid.UUID] = Field(default_factory=list)
+    article: ActivityArticleSummary | None = None
+    article_fetched_at: str | None = None
+    agent_created_at: str | None = None
+    agent_outcome: str | None = None
+    agent_triggers: list[str] = Field(default_factory=list)
+    agent_reasoning_trace: str | None = None
+    cost_usd: float | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class ActivityFeedResponse(BaseModel):
+    generated_at: str
+    events: list[ActivityEventResponse]
+
+
 class CoverageScrapeRequest(BaseModel):
     source_name: str = Field(min_length=1, max_length=120)
 

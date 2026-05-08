@@ -25,6 +25,24 @@ limited by Supabase JWT validation plus `ALLOWED_EMAILS`; project/user-level
 read scoping should be revisited with the Phase C staging/auth policy before
 the contributor set broadens.
 
+## Activity / Audit Log Reads
+
+`GET /activity/events` is a privileged FastAPI read endpoint for the
+researcher-facing Activity / Audit Log page. It combines `change_log`,
+`resolution_log`, and `agent_runs` / `agent_run_review_items` into one
+chronological feed and returns project, article, review-item, agent reasoning,
+cost, and timing context where available.
+
+Supported filters include `view`, `event_type`, `source`, `field`, `actor`,
+`project_id`, `from_date`, `to_date`, and `limit`. The first saved-view presets
+are `agent`, `auto_applied`, and `semantic`; later AGENT.2 step 11 work can add
+market/jurisdiction slicing and reason-code distribution metrics on the same
+endpoint family.
+
+For news-agent rows, the response exposes both `article_fetched_at` and
+`agent_created_at` so researchers can distinguish article arrival time from the
+agent decision time when child-job queue depth creates lag.
+
 ## Required Environment
 
 ```powershell
