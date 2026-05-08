@@ -28,6 +28,14 @@ def test_news_agent_profile_contract() -> None:
     assert profile.required_intake_fields == frozenset({"extraction_id"})
 
 
+def test_news_agent_prompt_defines_pass1_conflict_combined_trigger_contract() -> None:
+    prompt = NEWS_AGENT_PROFILE.system_prompt_path.read_text(encoding="utf-8")
+
+    assert "For pass1_pass2_conflict triggers:" in prompt
+    assert "use that trigger's verdict shapes" in prompt
+    assert "the structural conflict is reasoning" in prompt
+
+
 def test_normalize_agent_triggers_accepts_enums_and_strings() -> None:
     assert normalize_agent_triggers(
         [AgentTrigger.NEW_CANDIDATE, "material_contradiction"]

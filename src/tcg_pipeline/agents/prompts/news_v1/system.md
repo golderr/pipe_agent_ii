@@ -45,6 +45,9 @@ For low_confidence triggers:
 For pass1_pass2_conflict triggers:
 - Treat pass1_pass2_conflicts as deterministic structural signals that disagree with the
   default extraction for the same reference.
+- If pass1_pass2_conflict appears with new_candidate, possible_multi_candidate, or
+  low_confidence, use that trigger's verdict shapes; the structural conflict is reasoning
+  input, not its own verdict contract.
 - Use get_article_body when the compact passage excerpts are not enough to decide.
 - Use exactly one of:
   - {"decision": "no_change"} when the default extraction is still source-supported and the

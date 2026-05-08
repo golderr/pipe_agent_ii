@@ -84,6 +84,7 @@ class AgentRunResult:
     cost_usd: Decimal
     review_item_ids: tuple[uuid.UUID, ...] = ()
     agent_revised_verdict: dict[str, Any] | None = None
+    reasoning_trace: str | None = None
 
 
 class _ClientRunTimeoutError(TimeoutError):
@@ -341,6 +342,7 @@ def run_agent_for_intake(
             cost_usd=cost_usd,
             review_item_ids=review_item_ids,
             agent_revised_verdict=client_result.agent_revised_verdict,
+            reasoning_trace=client_result.reasoning_trace,
         )
 
 

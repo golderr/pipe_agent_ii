@@ -92,6 +92,7 @@ AGENT_PROMOTED_EXISTING_PROJECT_MATCH = "agent_promoted_existing_project"
 AGENT_CONFIRMED_POSSIBLE_MATCH = "agent_confirmed_possible_match"
 AGENT_PROMOTE_EXISTING_PROJECT_DECISION = "promote_existing_project"
 AGENT_CONFIRM_EXISTING_PROJECT_DECISION = "confirm_existing_project"
+AGENT_ESCALATED_DECISION = "escalated"
 ACTIVE_REVIEW_STATES = {"open", "staged"}
 REFERENCE_FIELD_TO_PROJECT_FIELD = {
     "candidate_name": "project_name",
@@ -259,6 +260,10 @@ class _ConfirmedReference:
     match: NewsMatchResult
     evidence: Evidence
     agent_run_id: uuid.UUID | None = None
+    agent_outcome: str | None = None
+    agent_revised_verdict: dict[str, Any] | None = None
+    agent_reasoning_trace: str | None = None
+    pass1_pass2_conflicts: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(slots=True)
@@ -409,6 +414,7 @@ class _FirstPassMatchSet:
 @dataclass(frozen=True, slots=True)
 class _NewsAgentDecision:
     result: AgentRunResult
+    pass1_pass2_conflicts: tuple[dict[str, Any], ...] = ()
 
 
 def _load_current_references_and_matches(
@@ -692,7 +698,12 @@ def _run_news_agents_for_first_pass(
             session_factory=session_factory,
             now=now,
         )
-        decisions[reference.id] = _NewsAgentDecision(result=result)
+        decisions[reference.id] = _NewsAgentDecision(
+            result=result,
+            pass1_pass2_conflicts=tuple(
+                serialize_json(pass1_pass2_conflicts_for_reference)
+            ),
+        )
     return decisions
 
 
@@ -982,6 +993,24 @@ def _integrate_current_extraction(
                     evidence=evidence,
                     agent_run_id=(
                         agent_decision.result.agent_run_id if agent_decision is not None else None
+                    ),
+                    agent_outcome=(
+                        agent_decision.result.outcome if agent_decision is not None else None
+                    ),
+                    agent_revised_verdict=(
+                        agent_decision.result.agent_revised_verdict
+                        if agent_decision is not None
+                        else None
+                    ),
+                    agent_reasoning_trace=(
+                        agent_decision.result.reasoning_trace
+                        if agent_decision is not None
+                        else None
+                    ),
+                    pass1_pass2_conflicts=(
+                        agent_decision.pass1_pass2_conflicts
+                        if agent_decision is not None
+                        else ()
                     ),
                 )
             )
@@ -1779,9 +1808,20 @@ def _integrate_confirmed_project(
         status_reason=_status_reason_from_resolution(resolution_result),
         review_flags=list(resolution_result.review_flags),
     )
+    reviewed_fields: set[str] = set()
+    review_count = 0
     if not diff_result.has_reviewable_changes:
-        return 0
-    return _upsert_status_change_review_items(
+        return _upsert_agent_structural_conflict_review_items(
+            session,
+            project=project,
+            source_run=source_run,
+            article=article,
+            extraction=extraction,
+            context=context,
+            excluded_fields=reviewed_fields,
+        )
+    reviewed_fields = set(_review_item_fields(diff_result))
+    review_count += _upsert_status_change_review_items(
         session,
         project=project,
         source_run=source_run,
@@ -1791,6 +1831,123 @@ def _integrate_confirmed_project(
         diff_result=diff_result,
         resolution_result=resolution_result,
     )
+    review_count += _upsert_agent_structural_conflict_review_items(
+        session,
+        project=project,
+        source_run=source_run,
+        article=article,
+        extraction=extraction,
+        context=context,
+        excluded_fields=reviewed_fields,
+    )
+    return review_count
+
+
+def _upsert_agent_structural_conflict_review_items(
+    session: Session,
+    *,
+    project: Project,
+    source_run: SourceRun,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    context: _ProjectIntegrationContext,
+    excluded_fields: set[str],
+) -> int:
+    created_count = 0
+    for confirmed in context.references:
+        if not _agent_escalated_structural_conflict(confirmed):
+            continue
+        for conflict in confirmed.pass1_pass2_conflicts:
+            field_name = _clean_text(conflict.get("field"))
+            if field_name is None or field_name in excluded_fields:
+                continue
+            payload = _agent_structural_conflict_payload(
+                project=project,
+                article=article,
+                extraction=extraction,
+                confirmed=confirmed,
+                conflict=conflict,
+                field_name=field_name,
+            )
+            item, created = upsert_decision_card_review_item(
+                session,
+                project_id=project.id,
+                source_run_id=source_run.id,
+                item_type=ReviewItemType.STATUS_CHANGE,
+                field_name=field_name,
+                priority=_agent_structural_conflict_priority(field_name),
+                match_confidence=confirmed.match.confidence,
+                payload=payload,
+                proposed_value=payload.get("proposed_value"),
+                winning_evidence_id=confirmed.evidence.id,
+            )
+            confirmed.reference.review_item_id = item.id
+            if confirmed.agent_run_id is not None:
+                _link_agent_run_review_item(
+                    session,
+                    agent_run_id=confirmed.agent_run_id,
+                    review_item_id=item.id,
+                )
+            if created:
+                created_count += 1
+            excluded_fields.add(field_name)
+    return created_count
+
+
+def _agent_escalated_structural_conflict(confirmed: _ConfirmedReference) -> bool:
+    if not confirmed.pass1_pass2_conflicts:
+        return False
+    verdict = confirmed.agent_revised_verdict or {}
+    return confirmed.agent_outcome == AgentRunOutcome.ESCALATED.value or (
+        isinstance(verdict, dict) and verdict.get("decision") == AGENT_ESCALATED_DECISION
+    )
+
+
+def _agent_structural_conflict_payload(
+    *,
+    project: Project,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    confirmed: _ConfirmedReference,
+    conflict: dict[str, Any],
+    field_name: str,
+) -> dict[str, Any]:
+    proposed_value = conflict.get("extracted_value")
+    evidence_id = str(confirmed.evidence.id)
+    return {
+        "origin": "agent_pass1_pass2_conflict",
+        "field_name": field_name,
+        "source_record_id": str(confirmed.reference.id),
+        "current_value": serialize_json(getattr(project, field_name, None)),
+        "proposed_value": serialize_json(proposed_value),
+        "structural_value": serialize_json(conflict.get("structural_value")),
+        "extracted_value": serialize_json(conflict.get("extracted_value")),
+        "pass1_pass2_conflicts": [serialize_json(conflict)],
+        "agent_run_id": str(confirmed.agent_run_id) if confirmed.agent_run_id is not None else None,
+        "agent_outcome": confirmed.agent_outcome,
+        "agent_revised_verdict": serialize_json(confirmed.agent_revised_verdict or {}),
+        "reasoning_trace": confirmed.agent_reasoning_trace,
+        "message": (
+            "The agent escalated a structural extraction conflict for researcher review."
+        ),
+        "evidence_ids": [evidence_id],
+        "winning_evidence_id": evidence_id,
+        "news_context": _news_context(
+            article=article,
+            extraction=extraction,
+            reference=confirmed.reference,
+            field_name=field_name,
+            evidence_id=confirmed.evidence.id,
+        ),
+        "match": confirmed.match.candidates_payload(),
+        "mapped_fields": _field_values(_news_extracted_fields(article, confirmed.reference)),
+    }
+
+
+def _agent_structural_conflict_priority(field_name: str) -> Priority:
+    if field_name == "pipeline_status":
+        return Priority.HIGH
+    return Priority.MEDIUM
 
 
 def _upsert_status_change_review_items(
