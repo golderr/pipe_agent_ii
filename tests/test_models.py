@@ -106,6 +106,7 @@ def test_scrape_job_news_extension_columns_are_declared() -> None:
     assert ScrapeJob.__table__.columns["jurisdiction_id"].nullable is True
     assert "ix_scrape_jobs_kind_status" in index_names
     assert "ix_scrape_jobs_article_id_kind_status_queued_at" in index_names
+    assert "uq_scrape_jobs_one_active_news_agent_integrate_article" in index_names
     assert "uq_scrape_jobs_one_active_collector" in index_names
     assert "uq_scrape_jobs_one_active_news_scrape" in index_names
     assert {member.value for member in ScrapeJobKind} == {

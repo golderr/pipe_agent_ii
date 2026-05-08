@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -618,30 +618,55 @@ def _enqueue_news_agent_integrate_job(
     settings: Settings,
 ) -> bool:
     with session_factory() as session:
-        job = ScrapeJob(
-            jurisdiction_id=jurisdiction_id,
-            kind=ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
-            source_name=source_name,
-            trigger_type=ScrapeTriggerType.SCHEDULED,
-            source_run_id=source_run_id,
-            status=ScrapeJobStatus.QUEUED,
-            target_payload={
+        job = _active_news_agent_integrate_job_for_article(session, article_id)
+        created_job = False
+        if job is None:
+            job = ScrapeJob(
+                jurisdiction_id=jurisdiction_id,
+                kind=ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+                source_name=source_name,
+                trigger_type=ScrapeTriggerType.SCHEDULED,
+                source_run_id=source_run_id,
+                status=ScrapeJobStatus.QUEUED,
+                target_payload={
+                    "article_id": str(article_id),
+                    "source_run_id": str(source_run_id),
+                    "parent_job_id": str(parent_job_id),
+                    "trigger_reasons": list(trigger_reasons),
+                },
+                progress={
+                    "message": "Queued article for news-agent integration.",
+                    "article_id": str(article_id),
+                    "source_run_id": str(source_run_id),
+                    "trigger_reasons": list(trigger_reasons),
+                },
+            )
+            try:
+                with session.begin_nested():
+                    session.add(job)
+                    session.flush()
+                    created_job = True
+            except IntegrityError:
+                job = _active_news_agent_integrate_job_for_article(session, article_id)
+                if job is None:
+                    raise
+        else:
+            job.progress = {
+                **(job.progress or {}),
+                "message": "Reused active news-agent integration job.",
                 "article_id": str(article_id),
                 "source_run_id": str(source_run_id),
-                "parent_job_id": str(parent_job_id),
                 "trigger_reasons": list(trigger_reasons),
-            },
-            progress={
-                "message": "Queued article for news-agent integration.",
-                "article_id": str(article_id),
-                "source_run_id": str(source_run_id),
-                "trigger_reasons": list(trigger_reasons),
-            },
-        )
-        session.add(job)
-        session.flush()
+                "deduplicated": True,
+            }
         job_id = job.id
+        should_enqueue = created_job or (
+            job.status == ScrapeJobStatus.QUEUED
+            and (job.progress or {}).get("queue_backend") == "unavailable"
+        )
         session.commit()
+    if not should_enqueue:
+        return True
     if enqueue_news_job_execution(
         job_id,
         kind=ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
@@ -658,6 +683,24 @@ def _enqueue_news_agent_integrate_job(
             }
             session.commit()
     return False
+
+
+def _active_news_agent_integrate_job_for_article(
+    session: Session,
+    article_id: uuid.UUID,
+) -> ScrapeJob | None:
+    return session.execute(
+        select(ScrapeJob)
+        .where(
+            ScrapeJob.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+            ScrapeJob.status.in_(
+                [ScrapeJobStatus.QUEUED.value, ScrapeJobStatus.RUNNING.value]
+            ),
+            ScrapeJob.target_payload["article_id"].astext == str(article_id),
+        )
+        .order_by(ScrapeJob.queued_at.asc(), ScrapeJob.id.asc())
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def run_news_agent_integrate_job(
@@ -727,11 +770,11 @@ def run_news_agent_integrate_job(
         }
         if result is not None:
             job.progress.update(result.progress_payload)
-            source_run = session.get(SourceRun, source_run_id)
-            if source_run is not None:
-                source_run.new_matches = (source_run.new_matches or 0) + (
-                    result.review_items_created + result.review_items_updated
-                )
+            _increment_source_run_new_matches(
+                session,
+                source_run_id=source_run_id,
+                delta=result.review_items_created + result.review_items_updated,
+            )
         session.commit()
 
 
@@ -1574,8 +1617,10 @@ def _finish_news_scrape_job(
         source_run.rows_inserted = stats.new_article_count
         source_run.rows_updated = stats.fetched_count
         source_run.rows_unchanged = stats.existing_article_count
-        source_run.new_matches = (source_run.new_matches or 0) + (
-            stats.integration_review_item_count
+        _increment_source_run_new_matches(
+            session,
+            source_run_id=source_run.id,
+            delta=stats.integration_review_item_count,
         )
         source_run.block_like_failure_count = stats.block_like_failure_count
         source_run.transient_failure_count = stats.transient_failure_count
@@ -1594,6 +1639,21 @@ def _finish_news_scrape_job(
         _apply_news_source_failure_policy(session, plan=plan, stats=stats)
         session.commit()
         return job
+
+
+def _increment_source_run_new_matches(
+    session: Session,
+    *,
+    source_run_id: uuid.UUID,
+    delta: int,
+) -> None:
+    if delta <= 0:
+        return
+    session.execute(
+        update(SourceRun)
+        .where(SourceRun.id == source_run_id)
+        .values(new_matches=func.coalesce(SourceRun.new_matches, 0) + int(delta))
+    )
 
 
 def _fail_news_scrape_job(

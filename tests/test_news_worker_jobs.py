@@ -26,7 +26,10 @@ from tcg_pipeline.db.models import (
 from tcg_pipeline.news.collectors import DiscoveredArticleUrl, PoliteFetchError
 from tcg_pipeline.news.extraction import NewsExtractionRunResult
 from tcg_pipeline.news.ingest import ArticleFetchResult
-from tcg_pipeline.news.integration import NewsIntegrationResult
+from tcg_pipeline.news.integration import (
+    NewsIntegrationResult,
+    news_article_agent_trigger_reasons,
+)
 from tcg_pipeline.news.triage import NewsTriageRunResult
 from tcg_pipeline.settings import Settings
 from tcg_pipeline.workers import news_jobs, scrape_jobs
@@ -102,6 +105,16 @@ def test_enqueue_news_agent_integrate_uses_agent_timeout(
             "failure_ttl": 30,
         }
     ]
+
+
+def test_news_agent_trigger_preflight_short_circuits_when_agent_disabled() -> None:
+    assert (
+        news_article_agent_trigger_reasons(
+            uuid.uuid4(),
+            settings=Settings(app_env="test", agent_enabled_for_news=False),
+        )
+        == ()
+    )
 
 
 def test_enqueue_news_job_execution_rejects_unknown_kind() -> None:
@@ -1331,6 +1344,125 @@ def test_scheduled_news_scrape_enqueues_agent_integration_job(
     assert source_run.new_matches == 0
 
 
+def test_scheduled_news_scrape_records_enqueue_failure_without_inline_fallback(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    source.config = {
+        **(source.config or {}),
+        "rate_limit_seconds": 0,
+        "transient_retry_attempts": 1,
+        "transient_retry_backoff_seconds": 0,
+    }
+    postgres_session.flush()
+    article_url = f"https://la.urbanize.city/post/agent-enqueue-fail-{uuid.uuid4().hex}"
+    job = ScrapeJob(
+        jurisdiction_id=source.jurisdiction_id,
+        kind=ScrapeJobKind.NEWS_SCRAPE.value,
+        source_name=source.slug,
+        trigger_type=ScrapeTriggerType.SCHEDULED,
+        status=ScrapeJobStatus.QUEUED,
+        target_payload={
+            "news_source_id": str(source.id),
+            "scheduled_for": "2026-05-01T14:30:00+00:00",
+        },
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    monkeypatch.setattr(news_jobs, "get_session_factory", lambda: task_session_factory)
+    monkeypatch.setattr(
+        news_jobs,
+        "enqueue_news_job_execution",
+        lambda *_args, **_kwargs: False,
+    )
+
+    class FakeCollector:
+        def __init__(self, _loaded_source: NewsSource) -> None:
+            return None
+
+        def discover_incremental_urls(self, *, since: datetime | None = None):
+            return [
+                DiscoveredArticleUrl(
+                    url=article_url,
+                    discovered_via="rss",
+                    published_at=datetime(2026, 5, 1, 13, 10, tzinfo=UTC),
+                )
+            ]
+
+        def fetch_article(self, url: str) -> ArticleFetchResult:
+            return ArticleFetchResult(
+                fetch_status=NewsFetchStatus.FETCHED.value,
+                final_url=url,
+                http_status=200,
+                raw_html="<html><body>Article</body></html>",
+                raw_html_hash="rawhash",
+                body_text="Developer announced a 140-unit project in Los Angeles.",
+                body_text_hash="bodyhash",
+                title="Scheduled Urbanize agent queue failure test",
+                published_at=datetime(2026, 5, 1, 13, 10, tzinfo=UTC),
+                paywall_state="open",
+            )
+
+        def close(self) -> None:
+            return None
+
+    def fake_triage_runner(article_id: uuid.UUID) -> NewsTriageRunResult:
+        return NewsTriageRunResult(
+            article_id=article_id,
+            extraction_id=uuid.uuid4(),
+            triage_status=NewsTriageStatus.RELEVANT.value,
+            relevant=True,
+            reason="Relevant scheduled article.",
+            parse_status="ok",
+        )
+
+    def fake_extraction_runner(article_id: uuid.UUID) -> NewsExtractionRunResult:
+        return NewsExtractionRunResult(
+            article_id=article_id,
+            extraction_id=uuid.uuid4(),
+            relevance="confirmed",
+            reference_count=1,
+            parse_status="ok",
+        )
+
+    def unexpected_integration_runner(article_id: uuid.UUID, **kwargs) -> NewsIntegrationResult:
+        raise AssertionError("Agent-triggered articles should not fall back inline.")
+
+    news_jobs.run_news_scrape_job(
+        job.id,
+        collector_factory=FakeCollector,
+        triage_runner=fake_triage_runner,
+        extraction_runner=fake_extraction_runner,
+        integration_runner=unexpected_integration_runner,
+        agent_trigger_detector=lambda *_args, **_kwargs: ("new_candidate",),
+        settings=Settings(app_env="test", agent_enabled_for_news=True),
+    )
+
+    postgres_session.expire_all()
+    refreshed_job = postgres_session.get(ScrapeJob, job.id)
+    assert refreshed_job is not None
+    assert refreshed_job.status == ScrapeJobStatus.COMPLETED
+    assert refreshed_job.progress["integration_queued_count"] == 0
+    child_job = postgres_session.execute(
+        select(ScrapeJob).where(ScrapeJob.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value)
+    ).scalar_one()
+    assert child_job.status == ScrapeJobStatus.QUEUED
+    assert child_job.progress["queue_backend"] == "unavailable"
+    source_run = postgres_session.get(SourceRun, refreshed_job.source_run_id)
+    assert source_run is not None
+    assert source_run.new_matches == 0
+    assert source_run.errors is not None
+    assert "news_agent_integrate enqueue failed" in source_run.errors
+
+
 def test_news_agent_integrate_job_runs_integration_and_updates_source_run(
     postgres_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -1413,6 +1545,167 @@ def test_news_agent_integrate_job_runs_integration_and_updates_source_run(
             "force_project_id": None,
             "session_factory": task_session_factory,
         }
+    ]
+
+    news_jobs.run_news_agent_integrate_job(
+        job.id,
+        integration_runner=fake_integration_runner,
+    )
+
+    postgres_session.expire_all()
+    rerun_source_run = postgres_session.get(SourceRun, source_run.id)
+    assert rerun_source_run is not None
+    assert rerun_source_run.new_matches == 5
+    assert len(seen) == 1
+
+
+def test_increment_source_run_new_matches_is_atomic_update(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    source_run = SourceRun(
+        market=source.market.slug if source.market else "unscoped",
+        jurisdiction_id=source.jurisdiction_id,
+        source_name=source.slug,
+        collection_mode="incremental",
+        trigger_type=ScrapeTriggerType.SCHEDULED.value,
+        new_matches=2,
+    )
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    with task_session_factory() as first_session:
+        news_jobs._increment_source_run_new_matches(
+            first_session,
+            source_run_id=source_run.id,
+            delta=3,
+        )
+        first_session.commit()
+    with task_session_factory() as second_session:
+        news_jobs._increment_source_run_new_matches(
+            second_session,
+            source_run_id=source_run.id,
+            delta=4,
+        )
+        second_session.commit()
+
+    postgres_session.expire_all()
+    refreshed_source_run = postgres_session.get(SourceRun, source_run.id)
+    assert refreshed_source_run is not None
+    assert refreshed_source_run.new_matches == 9
+
+
+def test_news_agent_integrate_enqueue_reuses_active_child_job(
+    postgres_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_news_scheduler_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical=f"https://la.urbanize.city/post/reuse-child-{uuid.uuid4().hex}",
+        url_original="https://la.urbanize.city/post/reuse-child",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        ingest_method=ScrapeJobKind.NEWS_SCRAPE.value,
+    )
+    source_run = SourceRun(
+        market=source.market.slug if source.market else "unscoped",
+        jurisdiction_id=source.jurisdiction_id,
+        source_name=source.slug,
+        collection_mode="incremental",
+        trigger_type=ScrapeTriggerType.SCHEDULED.value,
+    )
+    parent_job = ScrapeJob(
+        jurisdiction_id=source.jurisdiction_id,
+        kind=ScrapeJobKind.NEWS_SCRAPE.value,
+        source_name=source.slug,
+        trigger_type=ScrapeTriggerType.SCHEDULED,
+        status=ScrapeJobStatus.RUNNING,
+    )
+    postgres_session.add_all([article, source_run, parent_job])
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    enqueued: list[tuple[uuid.UUID, str]] = []
+
+    def fake_enqueue(job_id: uuid.UUID, *, kind: str, settings: Settings | None = None) -> bool:
+        enqueued.append((job_id, kind))
+        return True
+
+    monkeypatch.setattr(news_jobs, "enqueue_news_job_execution", fake_enqueue)
+
+    for _ in range(2):
+        assert news_jobs._enqueue_news_agent_integrate_job(
+            task_session_factory,
+            article_id=article.id,
+            source_run_id=source_run.id,
+            parent_job_id=parent_job.id,
+            source_name=source.slug,
+            jurisdiction_id=source.jurisdiction_id,
+            trigger_reasons=("new_candidate",),
+            settings=Settings(app_env="test"),
+        )
+
+    child_jobs = (
+        postgres_session.execute(
+            select(ScrapeJob).where(
+                ScrapeJob.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+                ScrapeJob.target_payload["article_id"].astext == str(article.id),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(child_jobs) == 1
+    assert enqueued == [
+        (child_jobs[0].id, ScrapeJobKind.NEWS_AGENT_INTEGRATE.value),
+    ]
+    assert child_jobs[0].progress["deduplicated"] is True
+
+    child_jobs[0].progress = {**child_jobs[0].progress, "queue_backend": "unavailable"}
+    postgres_session.flush()
+    assert news_jobs._enqueue_news_agent_integrate_job(
+        task_session_factory,
+        article_id=article.id,
+        source_run_id=source_run.id,
+        parent_job_id=parent_job.id,
+        source_name=source.slug,
+        jurisdiction_id=source.jurisdiction_id,
+        trigger_reasons=("new_candidate",),
+        settings=Settings(app_env="test"),
+    )
+    assert enqueued == [
+        (child_jobs[0].id, ScrapeJobKind.NEWS_AGENT_INTEGRATE.value),
+        (child_jobs[0].id, ScrapeJobKind.NEWS_AGENT_INTEGRATE.value),
+    ]
+
+    child_jobs[0].status = ScrapeJobStatus.RUNNING
+    postgres_session.flush()
+    assert news_jobs._enqueue_news_agent_integrate_job(
+        task_session_factory,
+        article_id=article.id,
+        source_run_id=source_run.id,
+        parent_job_id=parent_job.id,
+        source_name=source.slug,
+        jurisdiction_id=source.jurisdiction_id,
+        trigger_reasons=("new_candidate",),
+        settings=Settings(app_env="test"),
+    )
+    assert enqueued == [
+        (child_jobs[0].id, ScrapeJobKind.NEWS_AGENT_INTEGRATE.value),
+        (child_jobs[0].id, ScrapeJobKind.NEWS_AGENT_INTEGRATE.value),
     ]
 
 

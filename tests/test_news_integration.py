@@ -45,6 +45,7 @@ from tcg_pipeline.news.integration import (
     _ConfirmedReference,
     _field_reference_context,
     _ProjectIntegrationContext,
+    news_article_agent_trigger_reasons,
     run_news_integration_for_article,
 )
 from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
@@ -843,6 +844,58 @@ def test_news_integration_runs_pass3b_and_integrates_latest_extraction(
         )
     ).scalar_one()
     assert evidence.project_id == project.id
+
+
+def test_news_agent_trigger_preflight_preserves_legacy_pass3b_new_candidate(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    article = _article(source)
+    postgres_session.add(article)
+    postgres_session.flush()
+    extraction, _reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Legacy Pass 3b Tower",
+                candidate_address="500 Legacy Pass 3b Avenue, Los Angeles, CA 90012",
+                candidate_unit_total=120,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    postgres_session.flush()
+    task_session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    assert (
+        news_article_agent_trigger_reasons(
+            article.id,
+            session_factory=task_session_factory,
+            settings=Settings(
+                agent_enabled_for_news=True,
+                news_use_legacy_pass3=True,
+            ),
+            now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        )
+        == ()
+    )
+    assert news_article_agent_trigger_reasons(
+        article.id,
+        session_factory=task_session_factory,
+        settings=Settings(
+            agent_enabled_for_news=True,
+            news_use_legacy_pass3=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    ) == ("new_candidate",)
 
 
 def test_news_integration_supersedes_stale_article_evidence_after_reextraction(

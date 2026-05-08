@@ -1012,6 +1012,16 @@ class ScrapeJob(Base):
             postgresql_where=text("target_payload ? 'article_id'"),
         ),
         Index(
+            "uq_scrape_jobs_one_active_news_agent_integrate_article",
+            text("(target_payload ->> 'article_id')"),
+            unique=True,
+            postgresql_where=text(
+                "kind = 'news_agent_integrate' "
+                "AND status IN ('queued', 'running') "
+                "AND target_payload ? 'article_id'"
+            ),
+        ),
+        Index(
             "uq_scrape_jobs_one_active_collector",
             "jurisdiction_id",
             "source_name",

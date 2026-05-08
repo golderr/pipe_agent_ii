@@ -165,6 +165,13 @@ agent runs, and increments the parent `source_runs.new_matches` count. This
 keeps the discovery batch bounded while each agent article gets its own
 300-second agent wallclock cap.
 
+Only one queued/running `news_agent_integrate` child row is active per article.
+Parent scrape retries reuse that row instead of creating duplicate child jobs,
+and child completion increments `source_runs.new_matches` with an atomic SQL
+update. If the child worker fails before integration starts, the child scrape
+job is marked failed for ops retry; deterministic fallback review items are
+written only by the integration path after an agent-loop failure.
+
 If Pass 2b extraction raises after Pass 0/1/2a succeeded, the scrape job still
 completes because the article ingest and triage state are durable. The job
 progress records `extraction_skipped_reason = "error"` and

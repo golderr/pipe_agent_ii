@@ -552,14 +552,14 @@ return AgentRunFailure("budget_exhausted", trace, budget)
 **Tool-count cap.** The runner owns a final sanity check that `len(tool_calls_summary) <= profile.max_tool_calls`, even though individual tools also enforce §5.4.1 output budgets internally. If the client exceeds the profile cap, the runner records the incurred cost, writes `outcome='failed_error'`, and leaves deterministic output standing.
 
 **Worker model — one job per article (Q17 / R8 decision).** Stage 2 splits today's "one scrape job ingests N articles end-to-end" pattern into two job kinds:
-- `news_scrape_discovery` — runs the discovery + fetch + Pass 1 + triage + default extraction for all articles in a scheduled batch. This is fast and bounded; today's 900s timeout is fine.
+- `news_scrape` — the existing compatibility job kind. It runs discovery + fetch + Pass 1 + triage + default extraction for all articles in a scheduled batch, then preflights whether each article needs agent escalation. This was called `news_scrape_discovery` in the design sketch, but the implementation keeps `news_scrape` so existing scheduler/admin references do not churn.
 - `news_agent_integrate` — one job per article that needs agent escalation. Each job loads the prior extraction state, runs the agent loop with up to 300s wallclock, and writes integration outputs. With one article per job, the per-job timeout never has to accommodate a batched agent run.
 
 This split is the cleanest fit for the synchronous-dispatch commitment in §0.1: each agent job is a self-contained synchronous unit, easy to retry on failure, and trivially convertible to async batch dispatch later if §0.1 is revisited. It also matches Q7's safe-state — a single job's failure doesn't take down the discovery batch.
 
-The discovery job enqueues integration jobs after Pass 2 completes; integration jobs run concurrently up to RQ worker count. Cost cap and reservation logic stay unchanged because they're already keyed per-extraction-call, not per-job.
+The discovery job enqueues integration jobs after Pass 2 completes; integration jobs run concurrently up to RQ worker count. There is at most one active `news_agent_integrate` child row per article. If a parent scrape retries, it reuses the active child row instead of creating duplicate child jobs; if the child row exists only because Redis was unavailable during enqueue, a later parent retry may enqueue that same row. Child completion increments the parent `source_runs.new_matches` with an atomic SQL update so concurrent children cannot lose counts. Cost cap and reservation logic stay unchanged because they're already keyed per-extraction-call, not per-job.
 
-**Failure handling (Q7).** All failure modes return `AgentRunFailure`. Caller (integration path) treats as "agent didn't run successfully; fall back to deterministic verdict" and attaches the failure mode to the review item.
+**Failure handling (Q7).** Agent-loop failure modes return `AgentRunFailure`. Caller (integration path) treats as "agent didn't run successfully; fall back to deterministic verdict" and attaches the failure mode to the review item. Catastrophic worker-level failures that happen before integration starts are operational failures, not semantic decisions: the `news_agent_integrate` scrape job is marked failed and retryable/visible to ops, and no deterministic fallback review item is written outside the integration path.
 
 **Dispatch interface (per §0.1).** Uses an `ExtractionDispatcher` abstraction so a future Batch API path can land cleanly. The agent runner specifically stays synchronous in the foreseeable future even if the default extraction migrates to Batch.
 
@@ -1355,6 +1355,12 @@ Trading "weeks of staged observation" for "minutes-to-flip kill switch + bounded
 ---
 
 ## 13. Revision History
+
+- **2026-05-08 (revision 35) — News-agent child-job hardening.**
+  - Worker-model naming now matches implementation: the parent scheduled job kind remains `news_scrape` for compatibility; `news_scrape_discovery` was only the design sketch name.
+  - Added the active-child uniqueness contract for `news_agent_integrate`: one queued/running child row per article, parent retries reuse the row, and Redis-unavailable rows may be enqueued later.
+  - Documented atomic `source_runs.new_matches` increments across concurrent child jobs.
+  - Clarified Q7 failure semantics: agent-loop failures fall back inside integration; catastrophic worker-level child failures are retryable ops failures and do not write fallback review items outside integration.
 
 - **2026-05-04 — Initial draft.** Reconciles the original `agentic_pipeline_proposal.md` against actual codebase state (verified extraction.py, integration.py, news_matcher.py, db/models.py, settings.py, costs.py, structural.py, prompts.py, evidence.py, collect.py, resolution/engine.py, source_adapters/ladbs.py). Incorporates researcher answers to the 17 clarifying questions. Adds two top-of-file callouts: Batch API deferred, model-choice deferred.
 
