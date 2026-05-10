@@ -12,7 +12,8 @@ import { getActivityData, getActivitySemanticMetrics } from "@/lib/activity/data
 import type {
   ActivityEvent,
   ActivityQuery,
-  ActivitySemanticMetric
+  ActivitySemanticMetric,
+  ActivitySemanticParseHealth
 } from "@/lib/activity/types";
 import { cn } from "@/lib/utils";
 
@@ -195,6 +196,7 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
           <SemanticMetricsPanel
             error={semanticMetricsResult.error}
             metrics={semanticMetricsResult.data?.metrics ?? []}
+            parseHealth={semanticMetricsResult.data?.parse_health ?? null}
             thresholds={semanticMetricsResult.data?.thresholds ?? {}}
           />
         </aside>
@@ -401,15 +403,18 @@ function eventTypeLabel(eventType: ActivityEvent["event_type"]) {
 function SemanticMetricsPanel({
   error,
   metrics,
+  parseHealth,
   thresholds
 }: {
   error: string | null;
   metrics: ActivitySemanticMetric[];
+  parseHealth: ActivitySemanticParseHealth | null;
   thresholds: Record<string, number>;
 }) {
   const visible = metrics.slice(0, 6);
   const gapThreshold = thresholds.glossary_gap_rate ?? 0.15;
   const unmappableThreshold = thresholds.unmappable_rate ?? 0.05;
+  const healthStatuses = parseHealth?.statuses ?? [];
   return (
     <div className="mt-5 border-t border-slate-200 pt-4">
       <div className="flex items-center gap-2">
@@ -417,6 +422,35 @@ function SemanticMetricsPanel({
         <h2 className="text-sm font-semibold text-slate-950">Semantic Metrics</h2>
       </div>
       {error ? <p className="mt-2 text-xs text-red-700">{error}</p> : null}
+      {!error && parseHealth ? (
+        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-xs">
+          <div className="flex items-start justify-between gap-2">
+            <span className="font-medium text-slate-900">
+              Pass 2c parse health, all fields
+            </span>
+            <span className={parseHealth.failure_count ? "text-amber-700" : "text-slate-500"}>
+              {parseHealth.failure_count} failed
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+            <span>{parseHealth.total_count} calls</span>
+            <span>{(parseHealth.ok_rate * 100).toFixed(0)}% ok</span>
+            <span>{(parseHealth.failure_rate * 100).toFixed(0)}% failed</span>
+          </div>
+          {healthStatuses.length ? (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {healthStatuses.map((status) => (
+                <span
+                  className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-slate-600"
+                  key={status.parse_status}
+                >
+                  {parseStatusLabel(status.parse_status)} {status.total_count}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {!error && visible.length ? (
         <div className="mt-3 space-y-2">
           {visible.map((metric) => {
@@ -462,6 +496,10 @@ function SemanticMetricsPanel({
       ) : null}
     </div>
   );
+}
+
+function parseStatusLabel(value: string) {
+  return value.replaceAll("_", " ");
 }
 
 function formatDateTime(value: string | null | undefined) {

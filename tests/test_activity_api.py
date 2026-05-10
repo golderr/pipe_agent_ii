@@ -1324,6 +1324,66 @@ def test_activity_semantic_metrics_aggregate_gap_and_unmappable_rates(
     assert response.thresholds["unmappable_rate"] == 0.05
 
 
+def test_activity_semantic_metrics_include_parse_failure_health(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "755 Activity Way")
+    other_project = _project(postgres_session, "756 Activity Way")
+    source_slug = f"semantic-health-source-{uuid.uuid4().hex}"
+    other_source_slug = f"semantic-health-other-source-{uuid.uuid4().hex}"
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=source_slug,
+        reason_code="news_status_unmappable",
+        signal_flags={"glossary_gap_observed": True},
+    )
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=source_slug,
+        parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
+        created_at=datetime(2026, 5, 8, 10, 1, tzinfo=UTC),
+    )
+    _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=source_slug,
+        parse_status=NewsExtractionParseStatus.SCHEMA_INVALID.value,
+        created_at=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
+    )
+    _semantic_interpretation(
+        postgres_session,
+        other_project,
+        source_slug=other_source_slug,
+        parse_status=NewsExtractionParseStatus.REFUSED.value,
+        created_at=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+    )
+
+    response = list_activity_semantic_metrics(
+        user=_auth_user(),
+        session=postgres_session,
+        source=source_slug,
+    )
+
+    assert len(response.metrics) == 1
+    assert response.metrics[0].total_count == 1
+    assert response.parse_health.total_count == 3
+    assert response.parse_health.ok_count == 1
+    assert response.parse_health.failure_count == 2
+    assert round(response.parse_health.ok_rate, 2) == 0.33
+    assert round(response.parse_health.failure_rate, 2) == 0.67
+    status_counts = {
+        status.parse_status: status.total_count
+        for status in response.parse_health.statuses
+    }
+    assert status_counts == {
+        NewsExtractionParseStatus.OK.value: 1,
+        NewsExtractionParseStatus.PARSE_ERROR.value: 1,
+        NewsExtractionParseStatus.SCHEMA_INVALID.value: 1,
+    }
+
+
 def test_activity_semantic_metrics_count_reviewer_rejection_rate(
     postgres_session: Session,
 ) -> None:

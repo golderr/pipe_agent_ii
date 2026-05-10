@@ -315,9 +315,25 @@ class ActivitySemanticMetricResponse(BaseModel):
     reviewer_rejection_rate: float | None = None
 
 
+class ActivitySemanticParseStatusResponse(BaseModel):
+    parse_status: str
+    total_count: int
+    rate: float
+
+
+class ActivitySemanticParseHealthResponse(BaseModel):
+    total_count: int
+    ok_count: int
+    failure_count: int
+    ok_rate: float
+    failure_rate: float
+    statuses: list[ActivitySemanticParseStatusResponse]
+
+
 class ActivitySemanticMetricsResponse(BaseModel):
     generated_at: str
     thresholds: dict[str, float]
+    parse_health: ActivitySemanticParseHealthResponse
     metrics: list[ActivitySemanticMetricResponse]
 
 

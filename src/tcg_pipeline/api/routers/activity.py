@@ -19,6 +19,8 @@ from tcg_pipeline.api.schemas import (
     ActivityProjectSummary,
     ActivitySemanticMetricResponse,
     ActivitySemanticMetricsResponse,
+    ActivitySemanticParseHealthResponse,
+    ActivitySemanticParseStatusResponse,
 )
 from tcg_pipeline.db.models import (
     AgentRun,
@@ -119,6 +121,13 @@ def list_activity_semantic_metrics(
         from_date=from_date,
         to_date=to_date,
     )
+    parse_health = _semantic_parse_health(
+        session,
+        source=source,
+        market=market,
+        from_date=from_date,
+        to_date=to_date,
+    )
     return ActivitySemanticMetricsResponse(
         generated_at=datetime.now(UTC).isoformat(),
         thresholds={
@@ -126,6 +135,7 @@ def list_activity_semantic_metrics(
             "unmappable_rate": SEMANTIC_UNMAPPABLE_RATE_THRESHOLD,
             "reviewer_rejection_sigma": SEMANTIC_REJECTION_SIGMA_THRESHOLD,
         },
+        parse_health=parse_health,
         metrics=metrics,
     )
 
@@ -649,6 +659,92 @@ ORDER BY si.market NULLS LAST, si.source_slug NULLS LAST, si.field_name, si.reas
             )
         )
     return metrics
+
+
+def _semantic_parse_health(
+    session: Session,
+    *,
+    source: str | None,
+    market: str | None,
+    from_date: date | None,
+    to_date: date | None,
+) -> ActivitySemanticParseHealthResponse:
+    from_at, to_at = _date_params(from_date=from_date, to_date=to_date)
+    rows = session.execute(
+        text(
+            """
+WITH filtered_semantic_rows AS (
+    SELECT DISTINCT
+        nsi.id,
+        nsi.parse_status
+    FROM news_semantic_interpretations nsi
+    JOIN news_articles na ON na.id = nsi.article_id
+    LEFT JOIN news_sources ns ON ns.id = na.news_source_id
+    LEFT JOIN news_project_references npr ON npr.extraction_id = nsi.extraction_id
+    LEFT JOIN projects p ON p.id = npr.matched_project_id
+    LEFT JOIN markets m ON m.id = p.market_id
+    WHERE (
+        CAST(:source AS text) IS NULL
+        OR CAST(:source AS text) IN ('semantic', 'semantic.news_v1')
+        OR ns.slug = CAST(:source AS text)
+    )
+    AND (
+        CAST(:market AS text) IS NULL
+        OR p.market = CAST(:market AS text)
+        OR m.slug = CAST(:market AS text)
+    )
+    AND (
+        CAST(:from_at AS timestamp with time zone) IS NULL
+        OR nsi.created_at >= CAST(:from_at AS timestamp with time zone)
+    )
+    AND (
+        CAST(:to_at AS timestamp with time zone) IS NULL
+        OR nsi.created_at <= CAST(:to_at AS timestamp with time zone)
+    )
+)
+SELECT
+    parse_status,
+    count(*)::integer AS total_count
+FROM filtered_semantic_rows
+GROUP BY parse_status
+ORDER BY
+    CASE WHEN parse_status = CAST(:parse_ok AS text) THEN 0 ELSE 1 END,
+    total_count DESC,
+    parse_status ASC
+"""
+        ),
+        {
+            "source": source,
+            "market": market,
+            "from_at": from_at,
+            "to_at": to_at,
+            "parse_ok": NewsExtractionParseStatus.OK.value,
+        },
+    ).mappings()
+    status_counts = [
+        (str(row["parse_status"]), int(row["total_count"] or 0))
+        for row in rows
+    ]
+    total_count = sum(count for _, count in status_counts)
+    ok_count = sum(
+        count for status, count in status_counts if status == NewsExtractionParseStatus.OK.value
+    )
+    failure_count = max(total_count - ok_count, 0)
+    return ActivitySemanticParseHealthResponse(
+        total_count=total_count,
+        ok_count=ok_count,
+        failure_count=failure_count,
+        ok_rate=ok_count / total_count if total_count else 0.0,
+        failure_rate=failure_count / total_count if total_count else 0.0,
+        statuses=[
+            ActivitySemanticParseStatusResponse(
+                parse_status=status,
+                total_count=count,
+                rate=count / total_count if total_count else 0.0,
+            )
+            for status, count in status_counts
+        ],
+    )
 
 
 def _change_events_by_ids(

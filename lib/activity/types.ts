@@ -83,9 +83,25 @@ export type ActivitySemanticMetric = {
   reviewer_rejection_rate: number | null;
 };
 
+export type ActivitySemanticParseStatus = {
+  parse_status: string;
+  total_count: number;
+  rate: number;
+};
+
+export type ActivitySemanticParseHealth = {
+  total_count: number;
+  ok_count: number;
+  failure_count: number;
+  ok_rate: number;
+  failure_rate: number;
+  statuses: ActivitySemanticParseStatus[];
+};
+
 export type ActivitySemanticMetricsData = {
   generated_at: string;
   thresholds: Record<string, number>;
+  parse_health: ActivitySemanticParseHealth;
   metrics: ActivitySemanticMetric[];
 };
 
