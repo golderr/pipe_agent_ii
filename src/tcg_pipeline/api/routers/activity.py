@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
 import uuid
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, and_, cast, or_, select, text
 from sqlalchemy.orm import Session
 
@@ -60,6 +64,7 @@ SEMANTIC_GAP_RATE_THRESHOLD = 0.15
 SEMANTIC_UNMAPPABLE_RATE_THRESHOLD = 0.05
 SEMANTIC_REJECTION_SIGMA_THRESHOLD = 2.0
 MAX_INTERNAL_LIMIT = 500
+ACTIVITY_CURSOR_VERSION = 1
 
 
 @router.get("/events")
@@ -77,11 +82,28 @@ def list_activity_events(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_INTERNAL_LIMIT)] = 200,
+    cursor: Annotated[str | None, Query(max_length=1200)] = None,
 ) -> ActivityFeedResponse:
     del user
     normalized_type = event_type if event_type in EVENT_TYPES else None
     normalized_view = view if view in VIEW_PRESETS else "all"
-    candidates = _activity_candidates(
+    cursor_scope_hash = _activity_cursor_scope_hash(
+        event_type=normalized_type,
+        view=normalized_view,
+        source=source,
+        field=field,
+        actor=actor,
+        project_id=project_id,
+        market=market,
+        jurisdiction=jurisdiction,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    cursor_state = _decode_activity_cursor(
+        cursor,
+        expected_scope_hash=cursor_scope_hash,
+    )
+    candidates, next_cursor = _activity_candidates(
         session,
         event_type=normalized_type,
         view=normalized_view,
@@ -94,11 +116,14 @@ def list_activity_events(
         from_date=from_date,
         to_date=to_date,
         limit=limit,
+        cursor_state=cursor_state,
+        cursor_scope_hash=cursor_scope_hash,
     )
     events = _events_for_candidates(session, candidates)
     return ActivityFeedResponse(
         generated_at=datetime.now(UTC).isoformat(),
         events=events,
+        next_cursor=next_cursor,
     )
 
 
@@ -154,10 +179,12 @@ def _activity_candidates(
     from_date: date | None,
     to_date: date | None,
     limit: int,
-) -> list[dict[str, Any]]:
+    cursor_state: dict[str, Any] | None,
+    cursor_scope_hash: str,
+) -> tuple[list[dict[str, Any]], str | None]:
     event_types = _candidate_event_types(event_type=event_type, view=view)
     if not event_types:
-        return []
+        return [], None
     parts: list[str] = []
     if "change" in event_types:
         parts.append(_CHANGE_CANDIDATE_SQL)
@@ -168,18 +195,44 @@ def _activity_candidates(
     if "semantic" in event_types:
         parts.append(_SEMANTIC_CANDIDATE_SQL)
     if not parts:
-        return []
+        return [], None
     from_at, to_at = _date_params(from_date=from_date, to_date=to_date)
     actor_uuid = _uuid_or_none(actor)
+    fetch_limit = limit + 1
     statement = text(
         "WITH candidates AS ("
         + "\nUNION ALL\n".join(parts)
         + """
 )
-SELECT event_type, event_id, interpretation_index
+SELECT event_type, event_id, interpretation_index, occurred_at
 FROM candidates
-ORDER BY occurred_at DESC, event_type ASC, event_id ASC, interpretation_index ASC NULLS FIRST
-LIMIT :limit
+WHERE (
+    CAST(:cursor_occurred_at AS timestamp with time zone) IS NULL
+    OR occurred_at < CAST(:cursor_occurred_at AS timestamp with time zone)
+    OR (
+        occurred_at = CAST(:cursor_occurred_at AS timestamp with time zone)
+        AND (
+            event_type > CAST(:cursor_event_type AS text)
+            OR (
+                event_type = CAST(:cursor_event_type AS text)
+                AND (
+                    event_id > CAST(:cursor_event_id AS text)
+                    OR (
+                        event_id = CAST(:cursor_event_id AS text)
+                        AND COALESCE(interpretation_index, -1)
+                            > CAST(:cursor_interpretation_index AS integer)
+                    )
+                )
+            )
+        )
+    )
+)
+ORDER BY
+    occurred_at DESC,
+    event_type ASC,
+    event_id ASC,
+    COALESCE(interpretation_index, -1) ASC
+LIMIT :fetch_limit
 """
     )
     rows = session.execute(
@@ -194,13 +247,125 @@ LIMIT :limit
             "jurisdiction": jurisdiction,
             "from_at": from_at,
             "to_at": to_at,
-            "limit": limit,
+            "fetch_limit": fetch_limit,
+            "cursor_occurred_at": (
+                cursor_state["occurred_at"] if cursor_state is not None else None
+            ),
+            "cursor_event_type": (
+                cursor_state["event_type"] if cursor_state is not None else ""
+            ),
+            "cursor_event_id": (
+                cursor_state["event_id"] if cursor_state is not None else ""
+            ),
+            "cursor_interpretation_index": (
+                cursor_state["interpretation_index"] if cursor_state is not None else -1
+            ),
             "change_auto_applied": view == "auto_applied",
             "agent_auto_applied": view == "auto_applied",
             "parse_ok": NewsExtractionParseStatus.OK.value,
         },
     ).mappings()
-    return [dict(row) for row in rows]
+    candidate_rows = [dict(row) for row in rows]
+    page_rows = candidate_rows[:limit]
+    next_cursor = (
+        _encode_activity_cursor(page_rows[-1], scope_hash=cursor_scope_hash)
+        if len(candidate_rows) > limit and page_rows
+        else None
+    )
+    return page_rows, next_cursor
+
+
+def _decode_activity_cursor(
+    cursor: str | None,
+    *,
+    expected_scope_hash: str,
+) -> dict[str, Any] | None:
+    if not cursor:
+        return None
+    try:
+        padded_cursor = cursor + ("=" * (-len(cursor) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded_cursor.encode()).decode())
+        if payload.get("v") != ACTIVITY_CURSOR_VERSION:
+            raise ValueError("Unsupported Activity cursor version.")
+        if payload.get("scope") != expected_scope_hash:
+            raise ValueError("Activity cursor filter scope mismatch.")
+        occurred_at = datetime.fromisoformat(
+            str(payload["occurred_at"]).replace("Z", "+00:00")
+        )
+        if occurred_at.tzinfo is None:
+            occurred_at = occurred_at.replace(tzinfo=UTC)
+        event_type = str(payload["event_type"])
+        if event_type not in EVENT_TYPES:
+            raise ValueError("Unknown event_type in Activity cursor.")
+        event_id = str(uuid.UUID(str(payload["event_id"])))
+        interpretation_index = payload.get("interpretation_index")
+        if interpretation_index is None:
+            resolved_interpretation_index = -1
+        else:
+            resolved_interpretation_index = int(interpretation_index)
+    except (
+        binascii.Error,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise HTTPException(status_code=400, detail="Invalid Activity cursor.") from exc
+    return {
+        "occurred_at": occurred_at,
+        "event_type": event_type,
+        "event_id": event_id,
+        "interpretation_index": resolved_interpretation_index,
+    }
+
+
+def _encode_activity_cursor(candidate: dict[str, Any], *, scope_hash: str) -> str:
+    occurred_at = candidate.get("occurred_at")
+    if not isinstance(occurred_at, datetime):
+        raise ValueError("Activity cursor occurred_at must be a datetime.")
+    if occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=UTC)
+    payload = {
+        "v": ACTIVITY_CURSOR_VERSION,
+        "scope": scope_hash,
+        "occurred_at": occurred_at.isoformat(),
+        "event_type": candidate["event_type"],
+        "event_id": candidate["event_id"],
+        "interpretation_index": candidate.get("interpretation_index"),
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _activity_cursor_scope_hash(
+    *,
+    event_type: str | None,
+    view: str,
+    source: str | None,
+    field: str | None,
+    actor: str | None,
+    project_id: uuid.UUID | None,
+    market: str | None,
+    jurisdiction: str | None,
+    from_date: date | None,
+    to_date: date | None,
+) -> str:
+    payload = {
+        "v": ACTIVITY_CURSOR_VERSION,
+        "event_type": event_type,
+        "view": view,
+        "source": source,
+        "field": field,
+        "actor": actor,
+        "project_id": str(project_id) if project_id is not None else None,
+        "market": market,
+        "jurisdiction": jurisdiction,
+        "from_date": from_date.isoformat() if from_date is not None else None,
+        "to_date": to_date.isoformat() if to_date is not None else None,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _candidate_event_types(*, event_type: str | None, view: str) -> set[str]:

@@ -69,19 +69,32 @@ function firstQueryValue(value: string | string[] | undefined) {
 }
 
 function activityHrefForView(query: ActivityQuery, view: string) {
+  return activityHref(query, { cursor: null, eventType: view === "all" ? query.eventType : null, view });
+}
+
+function activityHrefForCursor(query: ActivityQuery, cursor: string | null) {
+  return activityHref(query, { cursor });
+}
+
+function activityHref(
+  query: ActivityQuery,
+  overrides: Partial<ActivityQuery> = {}
+) {
+  const resolvedQuery = { ...query, ...overrides };
   const params = new URLSearchParams();
-  params.set("view", view);
-  if (view === "all") {
-    setQueryParam(params, "type", query.eventType);
+  params.set("view", resolvedQuery.view ?? "all");
+  if ((resolvedQuery.view ?? "all") === "all") {
+    setQueryParam(params, "type", resolvedQuery.eventType);
   }
-  setQueryParam(params, "source", query.source);
-  setQueryParam(params, "field", query.field);
-  setQueryParam(params, "actor", query.actor);
-  setQueryParam(params, "project_id", query.projectId);
-  setQueryParam(params, "market", query.market);
-  setQueryParam(params, "jurisdiction", query.jurisdiction);
-  setQueryParam(params, "from", query.from);
-  setQueryParam(params, "to", query.to);
+  setQueryParam(params, "source", resolvedQuery.source);
+  setQueryParam(params, "field", resolvedQuery.field);
+  setQueryParam(params, "actor", resolvedQuery.actor);
+  setQueryParam(params, "project_id", resolvedQuery.projectId);
+  setQueryParam(params, "market", resolvedQuery.market);
+  setQueryParam(params, "jurisdiction", resolvedQuery.jurisdiction);
+  setQueryParam(params, "from", resolvedQuery.from);
+  setQueryParam(params, "to", resolvedQuery.to);
+  setQueryParam(params, "cursor", resolvedQuery.cursor);
   return `/activity?${params.toString()}`;
 }
 
@@ -103,7 +116,8 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
     market: firstQueryValue(params.market) ?? null,
     jurisdiction: firstQueryValue(params.jurisdiction) ?? null,
     from: firstQueryValue(params.from) ?? null,
-    to: firstQueryValue(params.to) ?? null
+    to: firstQueryValue(params.to) ?? null,
+    cursor: firstQueryValue(params.cursor) ?? null
   };
   const [result, semanticMetricsResult] = await Promise.all([
     getActivityData(query),
@@ -168,6 +182,7 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
               <p className="mt-1 text-sm text-slate-500">No audit rows match the current filters.</p>
             </div>
           )}
+          <ActivityPagination nextCursor={result.data.next_cursor} query={query} />
         </section>
 
         <aside className="h-fit rounded-md border border-slate-200 bg-white p-4">
@@ -202,6 +217,36 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
         </aside>
       </div>
     </main>
+  );
+}
+
+function ActivityPagination({
+  nextCursor,
+  query
+}: {
+  nextCursor: string | null;
+  query: ActivityQuery;
+}) {
+  if (!nextCursor && !query.cursor) {
+    return null;
+  }
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 text-sm">
+      {query.cursor ? (
+        <Link className="font-medium text-slate-600 hover:text-slate-950" href={activityHrefForCursor(query, null)}>
+          First page
+        </Link>
+      ) : (
+        <span className="text-slate-400">First page</span>
+      )}
+      {nextCursor ? (
+        <Link className="font-medium text-teal-700 hover:text-teal-900" href={activityHrefForCursor(query, nextCursor)}>
+          Next page
+        </Link>
+      ) : (
+        <span className="text-slate-400">No more rows</span>
+      )}
+    </div>
   );
 }
 

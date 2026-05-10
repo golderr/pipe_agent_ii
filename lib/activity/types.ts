@@ -64,6 +64,7 @@ export type ActivityEvent = {
 export type ActivityFeedData = {
   generated_at: string;
   events: ActivityEvent[];
+  next_cursor: string | null;
 };
 
 export type ActivitySemanticMetric = {
@@ -116,6 +117,7 @@ export type ActivityQuery = {
   jurisdiction: string | null;
   from: string | null;
   to: string | null;
+  cursor: string | null;
 };
 
 export type ActivityDataResult =

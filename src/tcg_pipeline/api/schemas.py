@@ -296,6 +296,7 @@ class ActivityEventResponse(BaseModel):
 class ActivityFeedResponse(BaseModel):
     generated_at: str
     events: list[ActivityEventResponse]
+    next_cursor: str | None = None
 
 
 class ActivitySemanticMetricResponse(BaseModel):

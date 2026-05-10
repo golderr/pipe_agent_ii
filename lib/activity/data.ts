@@ -23,6 +23,7 @@ export async function getActivityData(query: ActivityQuery): Promise<ActivityDat
     appendParam(params, "jurisdiction", query.jurisdiction);
     appendParam(params, "from_date", query.from);
     appendParam(params, "to_date", query.to);
+    appendParam(params, "cursor", query.cursor);
     params.set("limit", "300");
 
     const response = await fetch(`${apiBaseUrl}/activity/events?${params.toString()}`, {

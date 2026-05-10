@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import json
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -48,6 +52,14 @@ def _auth_user() -> AuthenticatedUser:
         role="authenticated",
         claims={},
     )
+
+
+def _tamper_activity_cursor(cursor: str, **updates: object) -> str:
+    padded_cursor = cursor + ("=" * (-len(cursor) % 4))
+    payload = json.loads(base64.urlsafe_b64decode(padded_cursor.encode()).decode())
+    payload.update(updates)
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 def _project(
@@ -715,6 +727,145 @@ def test_activity_feed_global_order_uses_stable_tiebreak(
     ]
 
 
+def test_activity_feed_cursor_paginates_global_order(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "360 Activity Way")
+    agent_run = _agent_run(
+        postgres_session,
+        project,
+        created_at=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
+    )
+    change = ChangeLog(
+        project_id=project.id,
+        timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+        source="urbanize_la",
+        field="pipeline_status",
+        old_value="Approved",
+        new_value="Under Construction",
+        change_type=ChangeType.RESEARCHER_CONFIRMED,
+        priority=Priority.HIGH,
+    )
+    resolution = ResolutionLog(
+        project_id=project.id,
+        field="total_units",
+        current_value=90,
+        resolved_value=100,
+        evidence_ids=[],
+        rule_applied="most_recent_wins",
+        confidence=StatusConfidence.HIGH,
+        created_at=datetime(2026, 5, 8, 10, 4, tzinfo=UTC),
+    )
+    postgres_session.add_all([change, resolution])
+    postgres_session.flush()
+
+    first_page = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=2,
+    )
+    assert [event.id for event in first_page.events] == [
+        f"resolution:{resolution.id}",
+        f"change:{change.id}",
+    ]
+    assert first_page.next_cursor is not None
+
+    second_page = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        cursor=first_page.next_cursor,
+        limit=2,
+    )
+    assert [event.id for event in second_page.events] == [f"agent:{agent_run.id}"]
+    assert second_page.next_cursor is None
+
+
+def test_activity_feed_cursor_rejects_unknown_event_type(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "365 Activity Way")
+    _agent_run(
+        postgres_session,
+        project,
+        created_at=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
+    )
+    change = ChangeLog(
+        project_id=project.id,
+        timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+        source="urbanize_la",
+        field="pipeline_status",
+        old_value="Approved",
+        new_value="Under Construction",
+        change_type=ChangeType.RESEARCHER_CONFIRMED,
+        priority=Priority.HIGH,
+    )
+    postgres_session.add(change)
+    postgres_session.flush()
+    first_page = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=1,
+    )
+    assert first_page.next_cursor is not None
+    cursor = _tamper_activity_cursor(first_page.next_cursor, event_type="zzz")
+
+    with pytest.raises(HTTPException) as exc_info:
+        list_activity_events(
+            user=_auth_user(),
+            session=postgres_session,
+            project_id=project.id,
+            cursor=cursor,
+            limit=1,
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+def test_activity_feed_cursor_rejects_filter_scope_mismatch(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "370 Activity Way")
+    _agent_run(
+        postgres_session,
+        project,
+        created_at=datetime(2026, 5, 8, 10, 2, tzinfo=UTC),
+    )
+    change = ChangeLog(
+        project_id=project.id,
+        timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+        source="urbanize_la",
+        field="pipeline_status",
+        old_value="Approved",
+        new_value="Under Construction",
+        change_type=ChangeType.RESEARCHER_CONFIRMED,
+        priority=Priority.HIGH,
+    )
+    postgres_session.add(change)
+    postgres_session.flush()
+    first_page = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=1,
+    )
+    assert first_page.next_cursor is not None
+
+    with pytest.raises(HTTPException) as exc_info:
+        list_activity_events(
+            user=_auth_user(),
+            session=postgres_session,
+            project_id=project.id,
+            field="pipeline_status",
+            cursor=first_page.next_cursor,
+            limit=1,
+        )
+
+    assert exc_info.value.status_code == 400
+
+
 def test_activity_feed_semantic_view_uses_pass2c_interpretation_rows(
     postgres_session: Session,
 ) -> None:
@@ -757,6 +908,47 @@ def test_activity_feed_semantic_view_uses_pass2c_interpretation_rows(
     assert response.events[0].intake_summary.kind == "news_article"
     assert response.events[0].intake_summary.article == response.events[0].article
     assert response.events[0].detail["reason_code"] == "news_topped_out"
+
+
+def test_activity_feed_cursor_handles_semantic_interpretation_index(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "425 Activity Way")
+    semantic = _semantic_interpretation(
+        postgres_session,
+        project,
+        source_slug=f"semantic-cursor-source-{uuid.uuid4().hex}",
+    )
+    output_json = dict(semantic.output_json or {})
+    interpretations = list(output_json["interpretations"])
+    second_interpretation = dict(interpretations[0])
+    second_interpretation["field_name"] = "total_units"
+    second_interpretation["canonical_value"] = 100
+    second_interpretation["reason_code"] = "news_units_confirmed"
+    output_json["interpretations"] = [*interpretations, second_interpretation]
+    semantic.output_json = output_json
+    postgres_session.flush()
+
+    first_page = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="semantic",
+        project_id=project.id,
+        limit=1,
+    )
+    assert [event.id for event in first_page.events] == [f"semantic:{semantic.id}:0"]
+    assert first_page.next_cursor is not None
+
+    second_page = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="semantic",
+        project_id=project.id,
+        cursor=first_page.next_cursor,
+        limit=1,
+    )
+    assert [event.id for event in second_page.events] == [f"semantic:{semantic.id}:1"]
+    assert second_page.next_cursor is None
 
 
 def test_activity_feed_semantic_source_filter_matches_article_source(

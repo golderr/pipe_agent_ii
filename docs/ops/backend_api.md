@@ -35,13 +35,20 @@ project, article, review-item, semantic reason-code, agent reasoning, cost, and
 timing context where available.
 
 Supported filters include `view`, `event_type`, `source`, `field`, `actor`,
-`project_id`, `market`, `jurisdiction`, `from_date`, `to_date`, and `limit`.
+`project_id`, `market`, `jurisdiction`, `from_date`, `to_date`, `limit`, and
+`cursor`.
 The first saved-view presets are `agent`, `auto_applied`, and `semantic`;
 richer evidence drill-through remains a later AGENT.2 step 11 follow-up.
 Candidate rows are selected with one ordered SQL union across change,
 resolution, agent, and semantic sources before hydration, so `limit` applies to
 the newest rows across the whole feed rather than independently per source
-type.
+type. Responses include `next_cursor` when more rows are available. The cursor
+is an opaque token over the feed's deterministic order
+(`occurred_at DESC`, then `event_type`, `event_id`, and semantic
+`interpretation_index`) and should be passed back unchanged as `cursor`.
+Cursors are bound to the same normalized filter set that created them; changing
+filters, view, project, market, actor, or date window requires starting again
+without `cursor`. A cursor used with a different filter set returns `400`.
 
 The `auto_applied` preset shows canonical applied-change rows from `change_log`,
 `resolution_log`, and non-review-linked agent runs. It does not duplicate the
