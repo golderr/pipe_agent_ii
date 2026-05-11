@@ -4,7 +4,9 @@ import asyncio
 import json
 import uuid
 from collections import Counter
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
 
@@ -36,6 +38,8 @@ from tcg_pipeline.db.seed import (
 )
 from tcg_pipeline.developer import canonicalize_project_developers
 from tcg_pipeline.evaluation.permit_agent_smoke import (
+    PermitAgentSmokeReport,
+    PermitAgentSmokeRun,
     build_permit_agent_smoke_report,
     permit_agent_smoke_report_to_dict,
     validate_permit_agent_smoke_report,
@@ -803,9 +807,20 @@ def permit_agent_smoke_report_command(
         str | None,
         typer.Option(help="Comma-separated triggers that must appear at least once."),
     ] = None,
-    expect_outcomes: Annotated[
+    require_outcomes: Annotated[
         str | None,
-        typer.Option(help="Comma-separated allowed outcomes for every permit agent run."),
+        typer.Option(help="Comma-separated outcomes that must appear at least once."),
+    ] = None,
+    allow_outcomes: Annotated[
+        str | None,
+        typer.Option(
+            "--allow-outcomes",
+            "--expect-outcomes",
+            help=(
+                "Comma-separated allowed outcomes for present permit agent runs. "
+                "Use with --min-agent-runs and/or --require-outcomes to require non-empty results."
+            ),
+        ),
     ] = None,
     min_agent_runs: Annotated[
         int,
@@ -814,6 +829,21 @@ def permit_agent_smoke_report_command(
             help="Minimum number of permit agent runs expected in the report.",
         ),
     ] = 1,
+    max_agent_runs: Annotated[
+        int | None,
+        typer.Option(
+            min=0,
+            help="Optional maximum number of permit agent runs expected in the report.",
+        ),
+    ] = None,
+    min_total_cost_usd: Annotated[
+        str | None,
+        typer.Option(help="Optional minimum total permit-agent cost required for this smoke."),
+    ] = None,
+    max_total_cost_usd: Annotated[
+        str | None,
+        typer.Option(help="Optional maximum total permit-agent cost allowed for this smoke."),
+    ] = None,
     allow_unlinked_review_items: Annotated[
         bool,
         typer.Option(
@@ -844,28 +874,63 @@ def permit_agent_smoke_report_command(
         )
 
     report_dict = permit_agent_smoke_report_to_dict(report)
-    if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(report_dict, indent=2, sort_keys=True), encoding="utf-8")
-
+    parsed_min_total_cost_usd = _decimal_option_value(
+        min_total_cost_usd,
+        option_name="--min-total-cost-usd",
+    )
+    parsed_max_total_cost_usd = _decimal_option_value(
+        max_total_cost_usd,
+        option_name="--max-total-cost-usd",
+    )
     typer.echo(f"Source run id: {report_dict['source_run_id']}")
     typer.echo(f"Source: {report.market}/{report.source_name}")
     typer.echo(f"Records pulled: {report.records_pulled}")
     typer.echo(f"Agent runs: {report.agent_run_count}")
-    typer.echo(f"Outcomes: {report.outcome_counts}")
-    typer.echo(f"Triggers: {report.trigger_counts}")
+    typer.echo(f"Outcomes: {_format_counts(report.outcome_counts)}")
+    typer.echo(f"Triggers: {_format_counts(report.trigger_counts)}")
     typer.echo(f"Missing review links: {report.missing_review_link_count}")
     typer.echo(f"Total cost: ${report.total_cost_usd}")
-    if output is not None:
-        typer.echo(f"Report: {output}")
+    failure_runs = _permit_smoke_failure_runs(report)
+    if failure_runs:
+        typer.echo("Failure runs:")
+        for run in failure_runs:
+            typer.echo(
+                f"  {run.outcome} ({run.intake_record_id}): "
+                f"{run.error_text or 'no error_text recorded'}"
+            )
+
+    validation = {
+        "min_agent_runs": min_agent_runs,
+        "max_agent_runs": max_agent_runs,
+        "required_triggers": list(_comma_option_values(require_triggers)),
+        "required_outcomes": list(_comma_option_values(require_outcomes)),
+        "allowed_outcomes": list(_comma_option_values(allow_outcomes)),
+        "min_total_cost_usd": (
+            str(parsed_min_total_cost_usd) if parsed_min_total_cost_usd is not None else None
+        ),
+        "max_total_cost_usd": (
+            str(parsed_max_total_cost_usd) if parsed_max_total_cost_usd is not None else None
+        ),
+        "require_review_links": not allow_unlinked_review_items,
+    }
 
     failures = validate_permit_agent_smoke_report(
         report,
         min_agent_runs=min_agent_runs,
+        max_agent_runs=max_agent_runs,
         required_triggers=_comma_option_values(require_triggers),
-        expected_outcomes=_comma_option_values(expect_outcomes),
+        required_outcomes=_comma_option_values(require_outcomes),
+        allowed_outcomes=_comma_option_values(allow_outcomes),
+        min_total_cost_usd=parsed_min_total_cost_usd,
+        max_total_cost_usd=parsed_max_total_cost_usd,
         require_review_links=not allow_unlinked_review_items,
     )
+    report_dict["validation"] = validation
+    report_dict["failures"] = failures
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report_dict, indent=2, sort_keys=True), encoding="utf-8")
+        typer.echo(f"Report: {output}")
     if failures:
         for failure in failures:
             typer.echo(f"Smoke validation failed: {failure}", err=True)
@@ -1477,6 +1542,30 @@ def _comma_option_values(value: str | None) -> tuple[str, ...]:
     if value is None:
         return ()
     return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _decimal_option_value(value: str | None, *, option_name: str) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise typer.BadParameter(f"{option_name} must be a decimal dollar amount.") from exc
+    if parsed < 0:
+        raise typer.BadParameter(f"{option_name} must be nonnegative.")
+    return parsed
+
+
+def _format_counts(counts: Mapping[str, int]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in counts.items())
+
+
+def _permit_smoke_failure_runs(
+    report: PermitAgentSmokeReport,
+) -> tuple[PermitAgentSmokeRun, ...]:
+    return tuple(run for run in report.runs if run.outcome.startswith("failed_"))
 
 
 def _parse_json_mapping_option(

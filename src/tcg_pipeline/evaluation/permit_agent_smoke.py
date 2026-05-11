@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from tcg_pipeline.agents.profiles import PERMIT_AGENT_PROFILE
 from tcg_pipeline.db.models import AgentRun, AgentRunReviewItem, SourceRun
+from tcg_pipeline.source_tiers import get_logical_source_type
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,13 @@ def build_permit_agent_smoke_report(
     if source_run is None:
         raise ValueError(
             f"No source run found for market={market!r}, source_name={source_name!r}."
+        )
+    source_type = get_logical_source_type(source_run.source_name)
+    if source_type != PERMIT_AGENT_PROFILE.intake_source_type:
+        raise ValueError(
+            "Permit agent smoke reports require a LADBS permit source_run; "
+            f"{source_run.id} is source_name={source_run.source_name!r} "
+            f"(logical source_type={source_type!r})."
         )
     agent_runs = (
         session.execute(
@@ -105,8 +113,12 @@ def validate_permit_agent_smoke_report(
     report: PermitAgentSmokeReport,
     *,
     min_agent_runs: int = 1,
+    max_agent_runs: int | None = None,
     required_triggers: tuple[str, ...] = (),
-    expected_outcomes: tuple[str, ...] = (),
+    required_outcomes: tuple[str, ...] = (),
+    allowed_outcomes: tuple[str, ...] = (),
+    min_total_cost_usd: Decimal | None = None,
+    max_total_cost_usd: Decimal | None = None,
     require_review_links: bool = True,
 ) -> list[str]:
     failures: list[str] = []
@@ -115,13 +127,29 @@ def validate_permit_agent_smoke_report(
             f"Expected at least {min_agent_runs} permit agent runs; found "
             f"{report.agent_run_count}."
         )
+    if max_agent_runs is not None and report.agent_run_count > max_agent_runs:
+        failures.append(
+            f"Expected at most {max_agent_runs} permit agent runs; found "
+            f"{report.agent_run_count}."
+        )
     missing_triggers = sorted(set(required_triggers) - set(report.trigger_counts))
     if missing_triggers:
         failures.append(f"Missing required trigger(s): {', '.join(missing_triggers)}.")
-    if expected_outcomes:
-        unexpected = sorted(set(report.outcome_counts) - set(expected_outcomes))
+    missing_outcomes = sorted(set(required_outcomes) - set(report.outcome_counts))
+    if missing_outcomes:
+        failures.append(f"Missing required outcome(s): {', '.join(missing_outcomes)}.")
+    if allowed_outcomes:
+        unexpected = sorted(set(report.outcome_counts) - set(allowed_outcomes))
         if unexpected:
             failures.append(f"Unexpected outcome(s): {', '.join(unexpected)}.")
+    if min_total_cost_usd is not None and report.total_cost_usd < min_total_cost_usd:
+        failures.append(
+            f"Expected total cost >= ${min_total_cost_usd}; found ${report.total_cost_usd}."
+        )
+    if max_total_cost_usd is not None and report.total_cost_usd > max_total_cost_usd:
+        failures.append(
+            f"Expected total cost <= ${max_total_cost_usd}; found ${report.total_cost_usd}."
+        )
     if require_review_links and report.missing_review_link_count:
         failures.append(
             f"{report.missing_review_link_count} permit agent run(s) have no linked review item."
