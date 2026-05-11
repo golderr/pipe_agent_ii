@@ -1878,7 +1878,7 @@ def _semantic_event(
             {
                 "evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
                 "evidence_count": len(evidence_ids),
-                "evidence_summary_cap": MAX_ACTIVITY_EVIDENCE_SUMMARIES,
+                "evidence_summary_cap": 1,
                 "evidence_summaries_truncated": False,
             }
         )

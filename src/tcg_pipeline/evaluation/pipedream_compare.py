@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from tcg_pipeline.db.models import IdentifierType, Project, ProjectIdentifier
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamProjectRecord
 
+# V1 compares the fields that drive the first R.7 forecasting/coverage readout.
+# Broader Pipedream-only fields can join once the June baseline has been reviewed.
 COMPARE_FIELDS = ("pipeline_status", "developer", "total_units", "location")
 LOCATION_TOLERANCE_METERS = 100.0
 
@@ -246,8 +248,8 @@ def _compare_scalar(
     tcg_value: Any,
     pipedream_value: Any,
 ) -> PipedreamFieldComparison:
-    normalized_tcg = _normalize_compare_value(tcg_value)
-    normalized_pipedream = _normalize_compare_value(pipedream_value)
+    normalized_tcg = _normalize_compare_value(tcg_value, field_name=field_name)
+    normalized_pipedream = _normalize_compare_value(pipedream_value, field_name=field_name)
     if normalized_tcg == normalized_pipedream:
         status = "match"
     elif normalized_tcg is None:
@@ -326,13 +328,29 @@ def _in_evidence_window(value: date | None, *, start: date, end: date) -> bool:
     return value is not None and start <= value <= end
 
 
-def _normalize_compare_value(value: Any) -> Any:
+def _normalize_compare_value(value: Any, *, field_name: str | None = None) -> Any:
     value = _enum_value(value)
     if value is None:
         return None
+    if field_name == "total_units":
+        return _normalize_integer(value)
     if isinstance(value, str):
         normalized = " ".join(value.split()).casefold()
         return normalized or None
+    return value
+
+
+def _normalize_integer(value: Any) -> int | Any:
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if not value:
+            return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value
+    if numeric.is_integer():
+        return int(numeric)
     return value
 
 

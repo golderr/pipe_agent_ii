@@ -491,6 +491,13 @@ def compare_pipedream_coverage_command(
         min=0,
         help="Include TCG projects whose last_evidence_date is within +/- this many days.",
     ),
+    location_tolerance_meters: Annotated[
+        float,
+        typer.Option(
+            min=0,
+            help="Maximum distance in meters for lat/lng values to count as a location match.",
+        ),
+    ] = 100.0,
     zip_code: Annotated[
         list[str] | None,
         typer.Option(help="Optional coverage ZIP filter; may be provided multiple times."),
@@ -526,6 +533,7 @@ def compare_pipedream_coverage_command(
             publication_date=parsed_publication_date,
             compare_window_days=compare_window_days,
             zip_codes=zip_code or None,
+            location_tolerance_meters=location_tolerance_meters,
         )
 
     typer.echo(f"Market: {result.market}")

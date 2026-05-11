@@ -1553,7 +1553,7 @@ def test_activity_semantic_event_includes_reference_evidence_summary(
     assert event.detail["matched_evidence_id"] == str(evidence.id)
     assert event.detail["evidence_ids"] == [str(evidence.id)]
     assert event.detail["evidence_count"] == 1
-    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summary_cap"] == 1
     assert event.detail["evidence_summaries_truncated"] is False
     assert len(event.evidence_summaries) == 1
     summary = event.evidence_summaries[0]
