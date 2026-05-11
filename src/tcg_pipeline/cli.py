@@ -35,6 +35,11 @@ from tcg_pipeline.db.seed import (
     persist_pipedream_import_results,
 )
 from tcg_pipeline.developer import canonicalize_project_developers
+from tcg_pipeline.evaluation.permit_agent_smoke import (
+    build_permit_agent_smoke_report,
+    permit_agent_smoke_report_to_dict,
+    validate_permit_agent_smoke_report,
+)
 from tcg_pipeline.evaluation.pipedream_compare import compare_pipedream_coverage
 from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
@@ -778,6 +783,95 @@ def collect_source(
     typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
 
 
+@app.command("permit-agent-smoke-report")
+def permit_agent_smoke_report_command(
+    source_run_id: Annotated[
+        uuid.UUID | None,
+        typer.Option(
+            help="Specific source_runs.id to validate. Defaults to latest run for market/source.",
+        ),
+    ] = None,
+    market: Annotated[
+        str,
+        typer.Option(help="Market used to find the latest source run."),
+    ] = "los_angeles",
+    source_name: Annotated[
+        str,
+        typer.Option(help="Source name used to find the latest source run."),
+    ] = "ladbs_permits",
+    require_triggers: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated triggers that must appear at least once."),
+    ] = None,
+    expect_outcomes: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated allowed outcomes for every permit agent run."),
+    ] = None,
+    min_agent_runs: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            help="Minimum number of permit agent runs expected in the report.",
+        ),
+    ] = 1,
+    allow_unlinked_review_items: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unlinked-review-items",
+            help="Do not fail when a permit agent run lacks an agent_run_review_items link.",
+        ),
+    ] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Optional JSON report path."),
+    ] = None,
+) -> None:
+    """Summarize and validate the AGENT.3 permit live-smoke audit rows."""
+    settings = get_settings()
+    database_label = (
+        redact_database_url(settings.database_url)
+        if settings.database_url
+        else "missing DATABASE_URL"
+    )
+    typer.echo(f"Reading permit agent smoke report from {database_label}")
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        report = build_permit_agent_smoke_report(
+            session,
+            source_run_id=source_run_id,
+            market=market,
+            source_name=source_name,
+        )
+
+    report_dict = permit_agent_smoke_report_to_dict(report)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report_dict, indent=2, sort_keys=True), encoding="utf-8")
+
+    typer.echo(f"Source run id: {report_dict['source_run_id']}")
+    typer.echo(f"Source: {report.market}/{report.source_name}")
+    typer.echo(f"Records pulled: {report.records_pulled}")
+    typer.echo(f"Agent runs: {report.agent_run_count}")
+    typer.echo(f"Outcomes: {report.outcome_counts}")
+    typer.echo(f"Triggers: {report.trigger_counts}")
+    typer.echo(f"Missing review links: {report.missing_review_link_count}")
+    typer.echo(f"Total cost: ${report.total_cost_usd}")
+    if output is not None:
+        typer.echo(f"Report: {output}")
+
+    failures = validate_permit_agent_smoke_report(
+        report,
+        min_agent_runs=min_agent_runs,
+        required_triggers=_comma_option_values(require_triggers),
+        expected_outcomes=_comma_option_values(expect_outcomes),
+        require_review_links=not allow_unlinked_review_items,
+    )
+    if failures:
+        for failure in failures:
+            typer.echo(f"Smoke validation failed: {failure}", err=True)
+        raise typer.Exit(1)
+
+
 @app.command("review-accept")
 def review_accept_command(
     review_item_id: Annotated[uuid.UUID, typer.Option(help="Review item UUID.")],
@@ -1377,6 +1471,12 @@ def _parse_cli_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _comma_option_values(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 def _parse_json_mapping_option(
