@@ -1454,18 +1454,31 @@ def _semantic_events_by_keys(
         session,
         [row.extraction_id for row in rows],
     )
-    event_specs: list[tuple[NewsSemanticInterpretation, int, dict[str, Any], uuid.UUID | None]] = []
+    event_specs: list[
+        tuple[NewsSemanticInterpretation, int, dict[str, Any], NewsProjectReference | None]
+    ] = []
     for row in rows:
         references = references_by_extraction.get(row.extraction_id, [])
         wanted_indexes = wanted_indexes_by_row.get(row.id, set())
         for index, interpretation in enumerate(_semantic_payloads(row)):
             if index not in wanted_indexes:
                 continue
-            project_id = _semantic_project_id_for_interpretation(interpretation, references)
-            event_specs.append((row, index, interpretation, project_id))
-    projects = _projects_by_id(session, [project_id for _, _, _, project_id in event_specs])
+            reference = _semantic_reference_for_interpretation(interpretation, references)
+            event_specs.append((row, index, interpretation, reference))
+    projects = _projects_by_id(
+        session,
+        [
+            reference.matched_project_id
+            for _, _, _, reference in event_specs
+            if reference is not None
+        ],
+    )
+    semantic_evidence_context = _semantic_evidence_context(
+        session,
+        [reference for _, _, _, reference in event_specs if reference is not None],
+    )
     events: dict[tuple[uuid.UUID, int], ActivityEventResponse] = {}
-    for row, index, interpretation, project_id in event_specs:
+    for row, index, interpretation, reference in event_specs:
         article = articles.get(row.article_id)
         news_source = (
             source_names.get(article.news_source_id)
@@ -1476,9 +1489,13 @@ def _semantic_events_by_keys(
             row,
             index=index,
             interpretation=interpretation,
-            project=projects.get(project_id) if project_id is not None else None,
+            project=projects.get(reference.matched_project_id)
+            if reference is not None and reference.matched_project_id is not None
+            else None,
             article=article,
             news_source=news_source,
+            reference=reference,
+            semantic_evidence_context=semantic_evidence_context,
         )
     return events
 
@@ -1736,7 +1753,9 @@ def _semantic_events(
         session,
         [row.extraction_id for row in rows],
     )
-    event_specs: list[tuple[NewsSemanticInterpretation, int, dict[str, Any], uuid.UUID | None]] = []
+    event_specs: list[
+        tuple[NewsSemanticInterpretation, int, dict[str, Any], NewsProjectReference | None]
+    ] = []
     for row in rows:
         references = references_by_extraction.get(row.extraction_id, [])
         for index, interpretation in enumerate(_semantic_payloads(row)):
@@ -1745,16 +1764,25 @@ def _semantic_events(
                 continue
             if field and field_name != field:
                 continue
-            resolved_project_id = _semantic_project_id_for_interpretation(
-                interpretation,
-                references,
-            )
+            reference = _semantic_reference_for_interpretation(interpretation, references)
+            resolved_project_id = reference.matched_project_id if reference is not None else None
             if project_id is not None and resolved_project_id != project_id:
                 continue
-            event_specs.append((row, index, interpretation, resolved_project_id))
-    projects = _projects_by_id(session, [project_id for _, _, _, project_id in event_specs])
+            event_specs.append((row, index, interpretation, reference))
+    projects = _projects_by_id(
+        session,
+        [
+            reference.matched_project_id
+            for _, _, _, reference in event_specs
+            if reference is not None
+        ],
+    )
+    semantic_evidence_context = _semantic_evidence_context(
+        session,
+        [reference for _, _, _, reference in event_specs if reference is not None],
+    )
     events: list[ActivityEventResponse] = []
-    for row, index, interpretation, resolved_project_id in event_specs:
+    for row, index, interpretation, reference in event_specs:
         article = articles.get(row.article_id)
         news_source = (
             source_names.get(article.news_source_id)
@@ -1766,11 +1794,13 @@ def _semantic_events(
                 row,
                 index=index,
                 interpretation=interpretation,
-                project=projects.get(resolved_project_id)
-                if resolved_project_id is not None
+                project=projects.get(reference.matched_project_id)
+                if reference is not None and reference.matched_project_id is not None
                 else None,
                 article=article,
                 news_source=news_source,
+                reference=reference,
+                semantic_evidence_context=semantic_evidence_context,
             )
         )
     return events[:limit]
@@ -1784,6 +1814,8 @@ def _semantic_event(
     project: Project | None,
     article: NewsArticle | None,
     news_source: NewsSource | None,
+    reference: NewsProjectReference | None,
+    semantic_evidence_context: tuple[dict[uuid.UUID, Evidence], dict[tuple[str, str], Evidence]],
 ) -> ActivityEventResponse:
     field_name = _clean_text(interpretation.get("field_name")) or "semantic"
     reason_code = _clean_text(interpretation.get("reason_code")) or "unknown"
@@ -1797,6 +1829,59 @@ def _semantic_event(
         summary_parts.append(confidence)
     if canonical_value is not None:
         summary_parts.append(_format_value(canonical_value))
+    evidence_by_id, evidence_by_source_record = semantic_evidence_context
+    evidence = _evidence_for_semantic_reference(
+        reference,
+        evidence_by_id=evidence_by_id,
+        evidence_by_source_record=evidence_by_source_record,
+    )
+    evidence_summaries = (
+        [_activity_evidence_summary(evidence, field_name=field_name)]
+        if evidence is not None
+        else []
+    )
+    detail: dict[str, Any] = {
+        "semantic_interpretation_id": str(row.id),
+        "prompt_id": row.prompt_id,
+        "prompt_version": row.prompt_version,
+        "prompt_hash": row.prompt_hash,
+        "model": row.model,
+        "model_provider": row.model_provider,
+        "parse_status": row.parse_status,
+        "latency_ms": row.latency_ms,
+        "reason_code": reason_code,
+        "confidence": confidence,
+        "requires_corroboration": interpretation.get("requires_corroboration"),
+        "signal_flags": signal_flags,
+        "source_anchors": interpretation.get("source_anchors") or [],
+        "metadata": metadata,
+        "news_source_slug": news_source.slug if news_source else None,
+    }
+    if reference is not None:
+        detail.update(
+            {
+                "reference_id": str(reference.id),
+                "reference_index": reference.reference_index,
+                "match_status": reference.match_status,
+                "matched_evidence_id": str(reference.matched_evidence_id)
+                if reference.matched_evidence_id is not None
+                else None,
+            }
+        )
+    evidence_ids: list[uuid.UUID] = []
+    if evidence is not None:
+        evidence_ids.append(evidence.id)
+    elif reference is not None and reference.matched_evidence_id is not None:
+        evidence_ids.append(reference.matched_evidence_id)
+    if evidence_ids:
+        detail.update(
+            {
+                "evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
+                "evidence_count": len(evidence_ids),
+                "evidence_summary_cap": MAX_ACTIVITY_EVIDENCE_SUMMARIES,
+                "evidence_summaries_truncated": False,
+            }
+        )
     return ActivityEventResponse(
         id=f"semantic:{row.id}:{index}",
         event_type="semantic",
@@ -1815,23 +1900,8 @@ def _semantic_event(
         intake_summary=_news_article_intake_summary(article_summary),
         article_fetched_at=article_summary.fetched_at if article_summary else None,
         cost_usd=_decimal_to_float(row.cost_usd),
-        detail={
-            "semantic_interpretation_id": str(row.id),
-            "prompt_id": row.prompt_id,
-            "prompt_version": row.prompt_version,
-            "prompt_hash": row.prompt_hash,
-            "model": row.model,
-            "model_provider": row.model_provider,
-            "parse_status": row.parse_status,
-            "latency_ms": row.latency_ms,
-            "reason_code": reason_code,
-            "confidence": confidence,
-            "requires_corroboration": interpretation.get("requires_corroboration"),
-            "signal_flags": signal_flags,
-            "source_anchors": interpretation.get("source_anchors") or [],
-            "metadata": metadata,
-            "news_source_slug": news_source.slug if news_source else None,
-        },
+        evidence_summaries=evidence_summaries,
+        detail=detail,
     )
 
 
@@ -1935,10 +2005,41 @@ def _semantic_references_by_extraction(
     return by_extraction
 
 
-def _semantic_project_id_for_interpretation(
+def _semantic_evidence_context(
+    session: Session,
+    references: list[NewsProjectReference],
+) -> tuple[dict[uuid.UUID, Evidence], dict[tuple[str, str], Evidence]]:
+    evidence_ids = {
+        reference.matched_evidence_id
+        for reference in references
+        if reference.matched_evidence_id is not None
+    }
+    source_record_keys = {("news_article", str(reference.id)) for reference in references}
+    return (
+        _evidence_by_ids(session, evidence_ids),
+        _evidence_by_source_record(session, source_record_keys),
+    )
+
+
+def _evidence_for_semantic_reference(
+    reference: NewsProjectReference | None,
+    *,
+    evidence_by_id: dict[uuid.UUID, Evidence],
+    evidence_by_source_record: dict[tuple[str, str], Evidence],
+) -> Evidence | None:
+    if reference is None:
+        return None
+    if reference.matched_evidence_id is not None:
+        evidence = evidence_by_id.get(reference.matched_evidence_id)
+        if evidence is not None:
+            return evidence
+    return evidence_by_source_record.get(("news_article", str(reference.id)))
+
+
+def _semantic_reference_for_interpretation(
     interpretation: dict[str, Any],
     references: list[NewsProjectReference],
-) -> uuid.UUID | None:
+) -> NewsProjectReference | None:
     if not references:
         return None
     metadata = _mapping_or_empty(interpretation.get("metadata"))
@@ -1960,13 +2061,13 @@ def _semantic_project_id_for_interpretation(
         if parsed_id is not None:
             for reference in references:
                 if reference.id == parsed_id:
-                    return reference.matched_project_id
+                    return reference
     if reference_index is not None:
         for reference in references:
             if reference.reference_index == reference_index:
-                return reference.matched_project_id
+                return reference
     if len(references) == 1:
-        return references[0].matched_project_id
+        return references[0]
     return None
 
 

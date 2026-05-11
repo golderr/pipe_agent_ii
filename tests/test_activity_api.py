@@ -1492,6 +1492,78 @@ def test_activity_feed_semantic_source_filter_matches_article_source(
     assert response.events[0].article.source_slug == source_slug
 
 
+def test_activity_semantic_event_includes_reference_evidence_summary(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "426 Semantic Evidence Activity Way")
+    semantic = _semantic_interpretation(
+        postgres_session,
+        project,
+        field_name="pipeline_status",
+        canonical_value="Under Construction",
+    )
+    reference = postgres_session.execute(
+        select(NewsProjectReference).where(
+            NewsProjectReference.extraction_id == semantic.extraction_id,
+            NewsProjectReference.reference_index == 0,
+        )
+    ).scalar_one()
+    evidence = _evidence(
+        postgres_session,
+        project,
+        source_type="news_article",
+        source_tier=2,
+        source_record_id=str(reference.id),
+        field_name="pipeline_status",
+        value="Under Construction",
+        raw_data={
+            "publication": "Urbanize LA",
+            "published_at": "2026-05-07",
+            "article_url": "https://example.com/semantic-evidence",
+        },
+        extracted_fields={
+            "pipeline_status": {
+                "value": "Under Construction",
+                "confidence": "high",
+                "highlights": [
+                    {
+                        "field": "pipeline_status",
+                        "value": "Under Construction",
+                        "passage": "The project has started vertical construction.",
+                    }
+                ],
+            }
+        },
+    )
+    reference.matched_evidence_id = evidence.id
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        view="semantic",
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"semantic:{semantic.id}:0"
+    assert event.detail["reference_id"] == str(reference.id)
+    assert event.detail["reference_index"] == 0
+    assert event.detail["matched_evidence_id"] == str(evidence.id)
+    assert event.detail["evidence_ids"] == [str(evidence.id)]
+    assert event.detail["evidence_count"] == 1
+    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summaries_truncated"] is False
+    assert len(event.evidence_summaries) == 1
+    summary = event.evidence_summaries[0]
+    assert summary.evidence_id == evidence.id
+    assert summary.source_type == "news_article"
+    assert summary.role is None
+    assert summary.summary == "pipeline_status: Under Construction"
+    assert summary.highlights[0]["passage"] == "The project has started vertical construction."
+
+
 def test_activity_feed_semantic_row_fans_out_multiple_interpretations(
     postgres_session: Session,
 ) -> None:
