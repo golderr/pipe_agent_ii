@@ -84,9 +84,11 @@ services:
         value: "5000"
       # --- Agent routing guardrails ---
       - key: AGENT_ENABLED_FOR_NEWS
+        value: "true"
+      - key: AGENT_ENABLED_FOR_PERMITS
         value: "false"
       - key: AGENT_ALLOW_LIVE_LLM
-        value: "false"
+        value: "true"
       - key: NEWS_USE_LEGACY_PASS3
         value: "false"
       - key: NEWS_USE_LEGACY_SEMANTIC
@@ -160,9 +162,11 @@ services:
         value: "5000"
       # --- Agent routing guardrails ---
       - key: AGENT_ENABLED_FOR_NEWS
+        value: "true"
+      - key: AGENT_ENABLED_FOR_PERMITS
         value: "false"
       - key: AGENT_ALLOW_LIVE_LLM
-        value: "false"
+        value: "true"
       - key: NEWS_USE_LEGACY_PASS3
         value: "false"
       - key: NEWS_USE_LEGACY_SEMANTIC
