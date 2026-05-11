@@ -2040,7 +2040,6 @@ def _permit_address(evidence: Evidence | None) -> str | None:
         return None
     return _permit_field_value(
         evidence,
-        "canonical_address",
         "primary_address",
         "address",
         "site_address",
@@ -2266,15 +2265,17 @@ def _permit_evidence_by_intake_record(
     session: Session,
     rows: list[AgentRun],
 ) -> dict[str, Evidence]:
-    intake_record_ids = sorted(
-        {
-            row.intake_record_id
-            for row in rows
-            if row.intake_source_type == "ladbs_permit" and row.intake_record_id
-        }
-    )
+    intake_source_types_by_record: dict[str, set[str]] = {}
+    for row in rows:
+        if row.intake_source_type == "ladbs_permit" and row.intake_record_id:
+            intake_source_types_by_record.setdefault(row.intake_record_id, set()).add(
+                row.intake_source_type
+            )
+    intake_record_ids = sorted(intake_source_types_by_record)
     if not intake_record_ids:
         return {}
+    # Implicit string contract: permit agent intake_record_id is the normalized
+    # LADBS permit number, matching Evidence.source_record_id for LADBS rows.
     evidence_rows = (
         session.execute(
             select(Evidence)
@@ -2292,11 +2293,22 @@ def _permit_evidence_by_intake_record(
         .scalars()
         .all()
     )
-    evidence_by_record: dict[str, Evidence] = {}
+    exact_evidence_by_record: dict[str, Evidence] = {}
+    fallback_evidence_by_record: dict[str, Evidence] = {}
     for evidence in evidence_rows:
-        if evidence.source_record_id is not None:
-            evidence_by_record.setdefault(evidence.source_record_id, evidence)
-    return evidence_by_record
+        if evidence.source_record_id is None:
+            continue
+        fallback_evidence_by_record.setdefault(evidence.source_record_id, evidence)
+        if evidence.source_type in intake_source_types_by_record.get(
+            evidence.source_record_id,
+            set(),
+        ):
+            exact_evidence_by_record.setdefault(evidence.source_record_id, evidence)
+    return {
+        record_id: exact_evidence_by_record.get(record_id)
+        or fallback_evidence_by_record[record_id]
+        for record_id in fallback_evidence_by_record
+    }
 
 
 def _news_article_id(row: AgentRun) -> uuid.UUID | None:

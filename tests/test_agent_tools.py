@@ -794,6 +794,8 @@ def test_get_articles_about_parcel_or_address_uses_apn_project_crosswalk(
         project_name="Permit Crosswalk Apartments",
         pipeline_status=PipelineStatus.APPROVED,
         total_units=120,
+        lat=34.0500,
+        lng=-118.2500,
     )
     postgres_session.add_all([source, article, project])
     postgres_session.flush()
@@ -856,20 +858,25 @@ def test_get_articles_about_parcel_or_address_uses_apn_project_crosswalk(
 
     result = registry.dispatch(
         tool_name="get_articles_about_parcel_or_address",
-        tool_input={"parcel_id": "5146-013-024"},
+        tool_input={
+            "parcel_id": "5146-013-024",
+            "address": "1500 Permit Crosswalk Avenue, Los Angeles, CA",
+        },
         profile=PERMIT_AGENT_PROFILE,
         request=request,
     )
 
     assert result.content.get("truncated") is not True
     assert result.content["normalized_parcel_id"] == "5146013024"
+    assert result.content["total_available"] == 1
     assert result.content["total_returned"] == 1
     match = result.content["matches"][0]
     assert match["match_basis"] == "parcel_project_news_evidence"
-    assert match["article_id"] == str(article.id)
-    assert match["evidence_id"] == str(news_evidence.id)
-    assert match["project_id"] == str(project.id)
-    assert match["candidate_unit_total"] == 120
+    assert match["reference_id"] == str(reference.id)
+    assert "evidence_id" not in match
+    assert "matched_evidence_id" not in match
+    assert "candidate_unit_total" not in match
+    assert "distance_feet" not in match
     assert match["excerpt"] == "Permit Crosswalk Apartments would bring 120 homes."
 
 
@@ -922,10 +929,118 @@ def test_get_articles_about_parcel_or_address_matches_normalized_reference_addre
     assert result.content["total_returned"] == 1
     match = result.content["matches"][0]
     assert match["match_basis"] == "address_reference_exact"
-    assert match["article_id"] == str(article.id)
     assert match["reference_id"] == str(reference.id)
     assert "evidence_id" not in match
     assert match["excerpt"] == "The project at 777 Permit News Ave remains in review."
+
+
+def test_get_articles_about_parcel_or_address_clamps_limit_under_budget(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent1_tables(postgres_session)
+    source = _news_source()
+    project = Project(
+        canonical_address="1600 PERMIT BUDGET AVENUE LOS ANGELES CA 90012",
+        raw_addresses=["1600 Permit Budget Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Permit Budget Apartments",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=150,
+    )
+    postgres_session.add_all([source, project])
+    postgres_session.flush()
+    postgres_session.add(
+        Evidence(
+            project_id=project.id,
+            source_type="ladbs_permit",
+            source_tier=1,
+            ingest_method="test",
+            source_record_id="24010-10000-02000",
+            collected_at=datetime(2026, 5, 10, 12, 0, tzinfo=UTC),
+            evidence_date=date(2026, 5, 10),
+            raw_data={"permit_nbr": "24010-10000-02000", "apn": "5146013024"},
+            raw_data_hash=uuid.uuid4().hex,
+            extracted_fields={"apn": {"value": "5146013024", "confidence": None}},
+        )
+    )
+    for index in range(15):
+        article = _news_article(
+            source,
+            title=f"Budget context article {index:02d}",
+            body_text="Body context " * 60,
+            published_at=datetime(2026, 5, 1, 12, index, tzinfo=UTC),
+        )
+        postgres_session.add(article)
+        postgres_session.flush()
+        extraction = _news_extraction(article)
+        postgres_session.add(extraction)
+        postgres_session.flush()
+        reference = NewsProjectReference(
+            article_id=article.id,
+            extraction_id=extraction.id,
+            reference_index=0,
+            candidate_name=f"Permit Budget Apartments phase {index:02d}",
+            candidate_address="1600 Permit Budget Ave",
+            candidate_city="Los Angeles",
+            candidate_developer="Budget Sponsor",
+            candidate_unit_total=150 + index,
+            candidate_confidence="high",
+            match_status=NewsMatchStatus.CONFIRMED.value,
+            matched_project_id=project.id,
+            passage_excerpts=[
+                {
+                    "field": "candidate_name",
+                    "value": "Permit Budget Apartments",
+                    "passage": (
+                        "Permit Budget Apartments was described with enough contextual "
+                        "language to exceed the per-match excerpt cap. "
+                        + ("additional supporting phrase " * 12)
+                    ),
+                }
+            ],
+        )
+        postgres_session.add(reference)
+        postgres_session.flush()
+        news_evidence = Evidence(
+            project_id=project.id,
+            source_type="news_article",
+            source_tier=2,
+            ingest_method="test",
+            source_record_id=str(reference.id),
+            collected_at=datetime(2026, 5, 11, 12, index, tzinfo=UTC),
+            evidence_date=date(2026, 5, 11),
+            raw_data={"article_id": str(article.id)},
+            raw_data_hash=uuid.uuid4().hex,
+            extracted_fields={"total_units": {"value": 150 + index, "confidence": "high"}},
+            notes="Accepted news coverage for budget testing.",
+        )
+        postgres_session.add(news_evidence)
+        postgres_session.flush()
+        reference.matched_evidence_id = news_evidence.id
+    postgres_session.flush()
+    request = _permit_agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_articles_about_parcel_or_address",
+        tool_input={"parcel_id": "5146013024", "limit": 15},
+        profile=PERMIT_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content.get("truncated") is not True
+    assert result.content["limit"] == 10
+    assert result.content["total_available"] == 15
+    assert result.content["total_returned"] == 10
+    assert len(result.content["matches"]) == 10
+    first_match = result.content["matches"][0]
+    assert "evidence_id" not in first_match
+    assert "matched_evidence_id" not in first_match
+    assert "candidate_unit_total" not in first_match
+    assert len(first_match["excerpt"]) <= 140
 
 
 def test_get_permits_for_parcel_requires_session_factory() -> None:

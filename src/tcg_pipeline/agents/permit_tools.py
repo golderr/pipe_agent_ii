@@ -22,10 +22,11 @@ GET_PERMITS_DEFAULT_LIMIT = 10
 GET_PERMITS_MAX_LIMIT = 10
 GET_ARTICLES_ABOUT_PARCEL_OR_ADDRESS_OUTPUT_TOKEN_BUDGET = 1500
 GET_ARTICLES_DEFAULT_LIMIT = 10
-GET_ARTICLES_MAX_LIMIT = 15
+GET_ARTICLES_MAX_LIMIT = 10
 GET_ARTICLES_DEFAULT_RADIUS_FEET = 300
 GET_ARTICLES_MAX_RADIUS_FEET = 1000
 GET_ARTICLES_REFERENCE_SCAN_LIMIT = 250
+GET_ARTICLES_EXCERPT_CHARS = 140
 LADBS_APN_DIGIT_LENGTH = 10
 FEET_PER_METER = 3.280839895
 EARTH_RADIUS_METERS = 6_371_000.0
@@ -187,7 +188,7 @@ def handle_get_articles_about_parcel_or_address(
         articles_by_id = _news_articles_by_id(session, tuple(article_ids))
 
     matches: list[dict[str, Any]] = []
-    seen_keys: set[tuple[str | None, int | None, str | None]] = set()
+    seen_keys: set[tuple[str | None, str | None, str | None]] = set()
     for evidence in project_evidence_rows:
         reference = _reference_for_evidence(evidence, references_by_id)
         article = _article_for_evidence_or_reference(
@@ -307,7 +308,8 @@ GET_ARTICLES_ABOUT_PARCEL_OR_ADDRESS_TOOL = AgentTool(
         "Use this as supporting context when a permit may refer to an already covered project "
         "or nearby phase. Input requires parcel_id or address. Optional radius_feet defaults to "
         "300 and is capped at 1000; radius expansion applies when the APN/address resolves to "
-        "a project with coordinates. Optional limit defaults to 10 and is capped at 15."
+        "a project with coordinates. Optional limit defaults to 10 and is capped at 10; output "
+        "is a lean supporting-context summary, not full evidence detail."
     ),
     input_schema={
         "type": "object",
@@ -401,6 +403,10 @@ def _nearby_project_distances(
 ) -> dict[uuid.UUID, int]:
     if not anchor_project_ids:
         return {}
+    anchor_project_id_set = set(anchor_project_ids)
+    # LA scale is small enough for an in-memory haversine pass. At 25-market
+    # scale, switch this to ST_DWithin against the existing Project.location
+    # GIST index so radius expansion stays indexed.
     projects = (
         session.execute(
             select(Project.id, Project.lat, Project.lng).where(
@@ -413,20 +419,20 @@ def _nearby_project_distances(
     anchors = [
         (project_id, lat, lng)
         for project_id, lat, lng in projects
-        if project_id in set(anchor_project_ids) and lat is not None and lng is not None
+        if project_id in anchor_project_id_set and lat is not None and lng is not None
     ]
     if not anchors:
         return {}
 
     distances: dict[uuid.UUID, int] = {}
     for project_id, lat, lng in projects:
-        if lat is None or lng is None:
+        if project_id in anchor_project_id_set or lat is None or lng is None:
             continue
         min_distance = min(
             _distance_feet(anchor_lat, anchor_lng, lat, lng)
             for _anchor_id, anchor_lat, anchor_lng in anchors
         )
-        if min_distance <= radius_feet:
+        if 0 < min_distance <= radius_feet:
             distances[project_id] = int(round(min_distance))
     return distances
 
@@ -464,6 +470,9 @@ def _references_for_normalized_address(
 ) -> tuple[NewsProjectReference, ...]:
     if normalized_address is None:
         return ()
+    # First slice keeps this schema-free by normalizing recent references at
+    # query time. At multi-market scale, persist normalized_candidate_address on
+    # news_project_references and index it instead of scanning this capped set.
     candidates = (
         session.execute(
             select(NewsProjectReference)
@@ -616,31 +625,13 @@ def _article_payload(
 ) -> dict[str, Any]:
     source_slug = article.source.slug if article is not None and article.source else None
     payload = {
-        "article_id": _serialize(article.id if article is not None else None),
         "reference_id": _serialize(reference.id if reference is not None else None),
-        "reference_index": reference.reference_index if reference is not None else None,
         "title": article.title if article is not None else None,
-        "url": article.url_canonical if article is not None else None,
         "source_slug": source_slug,
         "published_at": _serialize(article.published_at if article is not None else None),
-        "evidence_id": _serialize(evidence.id if evidence is not None else None),
-        "project_id": _serialize(evidence.project_id if evidence is not None else None),
-        "matched_project_id": _serialize(
-            reference.matched_project_id if reference is not None else None
-        ),
-        "matched_evidence_id": _serialize(
-            reference.matched_evidence_id
-            if reference is not None and reference.matched_evidence_id is not None
-            else evidence.id
-            if evidence is not None
-            else None
-        ),
         "match_status": reference.match_status if reference is not None else None,
         "candidate_name": reference.candidate_name if reference is not None else None,
         "candidate_address": reference.candidate_address if reference is not None else None,
-        "candidate_city": reference.candidate_city if reference is not None else None,
-        "candidate_developer": reference.candidate_developer if reference is not None else None,
-        "candidate_unit_total": reference.candidate_unit_total if reference is not None else None,
         "match_basis": match_basis,
         "distance_feet": distance_feet,
         "excerpt": _article_excerpt(reference=reference, evidence=evidence, article=article),
@@ -651,12 +642,12 @@ def _article_payload(
 def _append_unique_article_payload(
     matches: list[dict[str, Any]],
     payload: dict[str, Any],
-    seen_keys: set[tuple[str | None, int | None, str | None]],
+    seen_keys: set[tuple[str | None, str | None, str | None]],
 ) -> None:
     key = (
-        payload.get("article_id"),
-        payload.get("reference_index"),
-        payload.get("evidence_id") or payload.get("reference_id"),
+        payload.get("reference_id"),
+        payload.get("title"),
+        payload.get("source_slug"),
     )
     if key in seen_keys:
         return
@@ -672,15 +663,15 @@ def _article_excerpt(
 ) -> str | None:
     if reference is not None:
         for item in _passage_excerpt_items(reference.passage_excerpts):
-            passage = _compact_text(item.get("passage"), max_chars=220)
+            passage = _compact_text(item.get("passage"), max_chars=GET_ARTICLES_EXCERPT_CHARS)
             if passage:
                 return passage
     if evidence is not None:
-        notes = _compact_text(evidence.notes, max_chars=220)
+        notes = _compact_text(evidence.notes, max_chars=GET_ARTICLES_EXCERPT_CHARS)
         if notes:
             return notes
     if article is not None:
-        return _compact_text(article.body_text, max_chars=220)
+        return _compact_text(article.body_text, max_chars=GET_ARTICLES_EXCERPT_CHARS)
     return None
 
 
@@ -703,6 +694,9 @@ def _normalized_address(
     text_value = _optional_text(address)
     if text_value is None:
         return None
+    # AGENT.3 currently routes LADBS-only permit intake. Future non-LA permit
+    # profiles should pass jurisdiction/market into this helper instead of
+    # relying on Los Angeles defaults.
     normalized = normalize_address(
         text_value,
         city=city or "Los Angeles",

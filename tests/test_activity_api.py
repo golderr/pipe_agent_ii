@@ -97,6 +97,7 @@ def _evidence(
     value: object = 100,
     raw_data: dict | None = None,
     extracted_fields: dict | None = None,
+    collected_at: datetime = datetime(2026, 5, 8, 9, 30, tzinfo=UTC),
 ) -> Evidence:
     evidence = Evidence(
         project_id=project.id,
@@ -104,7 +105,7 @@ def _evidence(
         source_tier=source_tier,
         source_record_id=source_record_id,
         ingest_method="test",
-        collected_at=datetime(2026, 5, 8, 9, 30, tzinfo=UTC),
+        collected_at=collected_at,
         evidence_date=date(2026, 5, 7),
         raw_data=raw_data,
         raw_data_hash=str(uuid.uuid4()),
@@ -860,6 +861,29 @@ def test_activity_feed_agent_event_exposes_permit_intake_summary(
             "permit_issue_date": {"value": "2026-05-10", "confidence": "high"},
             "apn": {"value": "5146013024", "confidence": "high"},
         },
+        collected_at=datetime(2026, 5, 8, 9, 30, tzinfo=UTC),
+    )
+    _evidence(
+        postgres_session,
+        project,
+        source_type="ladbs_inspection",
+        source_tier=1,
+        source_record_id="2026LA12345",
+        field_name="pipeline_status",
+        value="Under Construction",
+        raw_data={
+            "permit_nbr": "2026LA12345",
+            "primary_address": "175 Permit Activity Way",
+            "status_desc": "Inspection Approved",
+        },
+        extracted_fields={
+            "inspection_date": {"value": "2026-05-11", "confidence": "high"},
+            "status_evidence_type": {
+                "value": "substantive_inspection",
+                "confidence": "high",
+            },
+        },
+        collected_at=datetime(2026, 5, 9, 9, 30, tzinfo=UTC),
     )
 
     response = list_activity_events(

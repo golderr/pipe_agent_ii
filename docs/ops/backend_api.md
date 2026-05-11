@@ -106,8 +106,11 @@ record that produced the event. Today this is populated as
 `{kind: "news_article", article: ...}` for news agent and Pass 2c semantic
 events. Permit agent rows populate `{kind: "ladbs_permit", permit: ...}` from
 the active LADBS evidence row whose `source_record_id` matches
-`agent_runs.intake_record_id`, with source-record/project fallbacks when the
-evidence row is unavailable. The top-level Activity event shape is unchanged.
+`agent_runs.intake_record_id` (the normalized permit-number string contract).
+The lookup prefers exact `ladbs_permit` evidence before falling back to
+inspection/CofO rows with the same permit number, with source-record/project
+fallbacks when the evidence row is unavailable. The top-level Activity event
+shape is unchanged.
 
 ## Required Environment
 

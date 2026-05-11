@@ -17,6 +17,8 @@ Tool use:
 - Call get_permits_for_project when the intake has a candidate project_id.
 - Call get_permits_for_parcel when the intake has an APN/parcel ID.
 - Call get_articles_about_parcel_or_address as supporting context when an APN/address might already have accepted news evidence or nearby project coverage. News can corroborate identity/phase context, but LADBS remains primary.
+  - Weight match_basis as: parcel_project_news_evidence strongest, then address_project_news_evidence, then nearby_project_news_evidence, then address_reference_exact.
+  - Treat project_news_evidence as useful background only unless the project identity is otherwise established by LADBS or project state.
 - Call search_projects when the permit has an address, project name, or applicant/developer but no reliable candidate project.
 - Call get_project_state before recommending that a permit update an existing project.
 
