@@ -191,6 +191,12 @@ SEMANTIC_STATUS_REASON_VALUES = {
     "news_officially_opened": PipelineStatus.COMPLETE,
     "news_construction_complete": PipelineStatus.COMPLETE,
 }
+TERMINAL_STATUS_REVIEW_CURRENT_MIN_RANK = STATUS_PROGRESS_ORDER[
+    PipelineStatus.PRE_LEASING_PRE_SELLING
+]
+TERMINAL_STATUS_REVIEW_PROPOSED_MAX_RANK = STATUS_PROGRESS_ORDER[
+    PipelineStatus.UNDER_CONSTRUCTION
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1378,6 +1384,19 @@ def _integrate_current_extraction(
             stats.discarded += 1
             continue
 
+        semantic_interpretations = semantic_context.by_reference_id.get(reference.id, ())
+        terminal_status_review_suppression = None
+        if match.status == NewsMatchStatus.CONFIRMED and match.project_id is not None:
+            matched_project = session.get(Project, match.project_id)
+            if matched_project is not None:
+                # Same terminal-state rule as review creation below, but this
+                # call only stamps raw_data audit metadata before evidence hash.
+                terminal_status_review_suppression = _semantic_review_suppression_metadata(
+                    project=matched_project,
+                    interpretations=semantic_interpretations,
+                    reason_registry=semantic_context.reason_registry,
+                )
+
         evidence, inserted = _write_news_evidence(
             session,
             article=article,
@@ -1385,10 +1404,11 @@ def _integrate_current_extraction(
             reference=reference,
             match=match,
             project_id=match.project_id if match.status == NewsMatchStatus.CONFIRMED else None,
-            semantic_interpretations=semantic_context.by_reference_id.get(reference.id, ()),
+            semantic_interpretations=semantic_interpretations,
             semantic_interpretation_row=semantic_context.row,
             reason_registry=semantic_context.reason_registry,
             suppress_raw_status_evidence=semantic_context.suppress_raw_status_evidence,
+            terminal_status_review_suppression=terminal_status_review_suppression,
             now=now,
         )
         if inserted:
@@ -1408,7 +1428,7 @@ def _integrate_current_extraction(
                 extraction=extraction,
                 reference=reference,
                 evidence=evidence,
-                interpretations=semantic_context.by_reference_id.get(reference.id, ()),
+                interpretations=semantic_interpretations,
                 semantic_interpretation_row=semantic_context.row,
                 reason_registry=semantic_context.reason_registry,
                 now=now,
@@ -1902,6 +1922,66 @@ def _semantic_reference_id(
     return None
 
 
+def _semantic_review_suppression_metadata(
+    *,
+    project: Project,
+    interpretations: tuple[SemanticInterpretation, ...],
+    reason_registry: ReasonCodeRegistry | None,
+) -> dict[str, Any] | None:
+    if reason_registry is None:
+        return None
+    for interpretation in interpretations:
+        reason = reason_registry.by_code.get(interpretation.reason_code)
+        if reason is None or reason.review_item_template is None:
+            continue
+        item_type = SEMANTIC_REVIEW_ITEM_TYPES.get(reason.review_item_template)
+        if item_type is None:
+            continue
+        proposed_value = _semantic_review_proposed_value(reason, interpretation)
+        suppression = _terminal_status_review_suppression(
+            project=project,
+            item_type=item_type,
+            reason_code=interpretation.reason_code,
+            proposed_value=proposed_value,
+        )
+        if suppression is not None:
+            return suppression
+    return None
+
+
+def _terminal_status_review_suppression(
+    *,
+    project: Project,
+    item_type: ReviewItemType,
+    reason_code: str,
+    proposed_value: Any,
+) -> dict[str, Any] | None:
+    if item_type != ReviewItemType.NEWS_STATUS_UNCORROBORATED:
+        return None
+    current_status = _coerce_semantic_pipeline_status(project.pipeline_status)
+    proposed_status = _coerce_semantic_pipeline_status(proposed_value)
+    if current_status is None or proposed_status is None:
+        return None
+    current_rank = STATUS_PROGRESS_ORDER.get(current_status)
+    proposed_rank = STATUS_PROGRESS_ORDER.get(proposed_status)
+    if current_rank is None or proposed_rank is None:
+        return None
+    if (
+        current_rank < TERMINAL_STATUS_REVIEW_CURRENT_MIN_RANK
+        or proposed_rank > TERMINAL_STATUS_REVIEW_PROPOSED_MAX_RANK
+    ):
+        return None
+    # Proposed Pre-Leasing is not reachable from today's uncorroborated
+    # construction-status reason; revisit if AGENT.6 emits that shape.
+    return {
+        "news_status_review_skipped_terminal_state": True,
+        "news_status_review_skipped_current_status": current_status.value,
+        "news_status_review_skipped_proposed_status": proposed_status.value,
+        "news_status_review_skipped_reason_code": reason_code,
+        "news_status_review_skipped_review_item_type": item_type.value,
+    }
+
+
 def _write_news_evidence(
     session: Session,
     *,
@@ -1914,6 +1994,7 @@ def _write_news_evidence(
     semantic_interpretation_row: NewsSemanticInterpretation | None = None,
     reason_registry: ReasonCodeRegistry | None = None,
     suppress_raw_status_evidence: bool = False,
+    terminal_status_review_suppression: dict[str, Any] | None = None,
     now: datetime,
 ) -> tuple[Evidence, bool]:
     if reference.matched_evidence_id is not None:
@@ -1929,6 +2010,7 @@ def _write_news_evidence(
         reference=reference,
         semantic_interpretation_row=semantic_interpretation_row,
         suppress_raw_status_evidence=suppress_raw_status_evidence,
+        terminal_status_review_suppression=terminal_status_review_suppression,
     )
     extracted_fields = _news_extracted_fields(
         article,
@@ -1968,6 +2050,7 @@ def _news_raw_data(
     reference: NewsProjectReference,
     semantic_interpretation_row: NewsSemanticInterpretation | None = None,
     suppress_raw_status_evidence: bool = False,
+    terminal_status_review_suppression: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = article.source
     return {
@@ -2005,6 +2088,7 @@ def _news_raw_data(
         "raw_status_suppressed_due_to_semantic_unavailable": (
             suppress_raw_status_evidence or None
         ),
+        **(terminal_status_review_suppression or {}),
     }
 
 
@@ -2829,6 +2913,15 @@ def _upsert_semantic_review_items(
         if item_type is None:
             continue
         proposed_value = _semantic_review_proposed_value(reason, interpretation)
+        # This is the action half of the terminal-state rule; the evidence
+        # path above calls the same helper separately to keep an audit flag.
+        if _terminal_status_review_suppression(
+            project=project,
+            item_type=item_type,
+            reason_code=interpretation.reason_code,
+            proposed_value=proposed_value,
+        ):
+            continue
         payload = _semantic_review_payload(
             project=project,
             article=article,

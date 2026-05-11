@@ -528,6 +528,118 @@ def test_news_integration_semantic_uncorroborated_status_creates_review_item(
     )
 
 
+@pytest.mark.parametrize(
+    ("terminal_status", "address"),
+    [
+        (
+            PipelineStatus.PRE_LEASING_PRE_SELLING,
+            "111 Preleasing Terminal Way, Los Angeles, CA 90026",
+        ),
+        (PipelineStatus.COMPLETE, "112 Complete Terminal Way, Los Angeles, CA 90026"),
+    ],
+)
+def test_news_integration_terminal_status_suppresses_uncorroborated_review_item(
+    postgres_session: Session,
+    terminal_status: PipelineStatus,
+    address: str,
+) -> None:
+    result, project, reference = _run_semantic_review_fixture(
+        postgres_session,
+        project_status=terminal_status,
+        reason_code="news_status_uncorroborated_high_quality_permit_jurisdiction",
+        canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+        confidence="medium",
+        requires_corroboration=True,
+        address=address,
+    )
+
+    assert result.confirmed == 1
+    assert result.review_items_created == 0
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.project_id == project.id
+    assert evidence.extracted_fields["pipeline_status"]["value"] == (
+        PipelineStatus.UNDER_CONSTRUCTION.value
+    )
+    assert evidence.extracted_fields["pipeline_status"]["semantic"]["reason_code"] == (
+        "news_status_uncorroborated_high_quality_permit_jurisdiction"
+    )
+    assert evidence.raw_data["news_status_review_skipped_terminal_state"] is True
+    assert evidence.raw_data["news_status_review_skipped_current_status"] == terminal_status.value
+    assert evidence.raw_data["news_status_review_skipped_proposed_status"] == (
+        PipelineStatus.UNDER_CONSTRUCTION.value
+    )
+    assert evidence.raw_data["news_status_review_skipped_reason_code"] == (
+        "news_status_uncorroborated_high_quality_permit_jurisdiction"
+    )
+    item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+        )
+    ).scalar_one_or_none()
+    assert item is None
+
+
+def test_news_integration_approved_status_still_creates_uncorroborated_review_item(
+    postgres_session: Session,
+) -> None:
+    result, project, reference = _run_semantic_review_fixture(
+        postgres_session,
+        project_status=PipelineStatus.APPROVED,
+        reason_code="news_status_uncorroborated_high_quality_permit_jurisdiction",
+        canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+        confidence="medium",
+        requires_corroboration=True,
+        address="222 Approved Way, Los Angeles, CA 90026",
+    )
+
+    assert result.confirmed == 1
+    assert result.review_items_created == 1
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert "news_status_review_skipped_terminal_state" not in evidence.raw_data
+    item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+        )
+    ).scalar_one()
+    assert item.payload["proposed_value"] == PipelineStatus.UNDER_CONSTRUCTION.value
+
+
+def test_news_integration_complete_status_still_creates_cancellation_review_item(
+    postgres_session: Session,
+) -> None:
+    result, project, reference = _run_semantic_review_fixture(
+        postgres_session,
+        project_status=PipelineStatus.COMPLETE,
+        reason_code="news_status_cancellation_review_required",
+        canonical_value=PipelineStatus.INACTIVE.value,
+        confidence="high",
+        address="333 Complete Cancel Way, Los Angeles, CA 90026",
+    )
+
+    assert result.confirmed == 1
+    assert result.review_items_created == 1
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert "news_status_review_skipped_terminal_state" not in evidence.raw_data
+    assert "pipeline_status" not in evidence.extracted_fields
+    item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.PROJECT_CANCELLATION_REVIEW,
+        )
+    ).scalar_one()
+    assert item.priority == Priority.HIGH
+    assert item.payload["proposed_value"] == PipelineStatus.INACTIVE.value
+    assert item.payload["winning_evidence_id"] == str(evidence.id)
+
+
 def test_news_integration_suppresses_raw_status_when_pass2c_truncates(
     postgres_session: Session,
 ) -> None:
@@ -599,6 +711,11 @@ def test_news_integration_suppresses_raw_status_when_pass2c_truncates(
     alert = postgres_session.execute(
         select(SystemAlert).where(
             SystemAlert.alert_key == "news_semantic_parse_failed",
+            SystemAlert.scope
+            == {
+                "article_id": str(article.id),
+                "extraction_id": str(extraction.id),
+            },
             SystemAlert.cleared_at.is_(None),
         )
     ).scalar_one()
@@ -2833,6 +2950,72 @@ def _ensure_semantic_news_integration_tables(postgres_session: Session) -> None:
         pytest.skip(f"Apply semantic Pass 2c migrations before running tests: {missing}")
 
 
+def _run_semantic_review_fixture(
+    postgres_session: Session,
+    *,
+    project_status: PipelineStatus,
+    reason_code: str,
+    canonical_value: str | None,
+    confidence: str,
+    address: str,
+    requires_corroboration: bool = False,
+) -> tuple:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical(address)
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name=f"Semantic Review {uuid.uuid4().hex[:8]}",
+        total_units=100,
+        pipeline_status=project_status,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name=project.project_name,
+                candidate_address=address,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code=reason_code,
+            canonical_value=canonical_value,
+            confidence=confidence,
+            requires_corroboration=requires_corroboration,
+        )
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+    postgres_session.expire_all()
+    return result, project, reference
+
+
 def _news_source(postgres_session: Session, slug: str) -> NewsSource:
     source = postgres_session.execute(
         select(NewsSource).where(NewsSource.slug == slug)
@@ -2884,6 +3067,7 @@ def _project(
     project_name: str,
     developer: str | None = None,
     total_units: int | None = None,
+    pipeline_status: PipelineStatus = PipelineStatus.PROPOSED,
 ) -> Project:
     market_slug = source.market.slug if source.market is not None else "los_angeles"
     market_id = source.market_id
@@ -2898,7 +3082,7 @@ def _project(
         project_name=project_name,
         developer=developer,
         total_units=total_units,
-        pipeline_status=PipelineStatus.PROPOSED,
+        pipeline_status=pipeline_status,
     )
 
 
