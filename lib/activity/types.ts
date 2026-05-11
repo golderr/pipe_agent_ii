@@ -37,6 +37,7 @@ export type ActivityEvidenceSummary = {
   source_type: string;
   source_tier: number;
   source_record_id: string | null;
+  role: string | null;
   evidence_date: string | null;
   collected_at: string;
   summary: string;

@@ -283,6 +283,7 @@ function DetailRows({ event }: { event: ActivityEvent }) {
   const evidenceSummaries = event.evidence_summaries ?? [];
   const evidenceCount = detailNumber(event, "evidence_count") ?? evidenceSummaries.length;
   const evidenceSummaryCap = detailNumber(event, "evidence_summary_cap") ?? evidenceSummaries.length;
+  const evidenceLabel = event.event_type === "agent" ? "Evidence consulted" : "Evidence";
 
   return (
     <dl className="grid gap-2 text-sm md:grid-cols-[9rem_minmax(0,1fr)]">
@@ -315,9 +316,9 @@ function DetailRows({ event }: { event: ActivityEvent }) {
       {event.cost_usd !== null ? <DetailRow label="Cost" value={`$${event.cost_usd.toFixed(6)}`} /> : null}
       {detailString(event, "reason_code") ? <DetailRow label="Reason code" value={detailString(event, "reason_code")} /> : null}
       {detailString(event, "confidence") ? <DetailRow label="Confidence" value={detailString(event, "confidence")} /> : null}
-      {evidenceSummaries.length ? (
+      {evidenceSummaries.length || evidenceCount > 0 ? (
         <DetailRow
-          label="Evidence"
+          label={evidenceLabel}
           value={
             <EvidenceSummaryList
               projectId={event.project?.id ?? null}
@@ -400,7 +401,7 @@ function EvidenceSummaryList({
       ) : null}
       {missingCount > 0 ? (
         <p className="text-xs text-amber-700">
-          {missingCount} of {attemptedCount} evidence IDs could not be loaded.
+          {missingCount} of {attemptedCount} evidence references could not be loaded.
         </p>
       ) : null}
     </div>
@@ -417,7 +418,14 @@ function EvidenceSummaryRow({ row }: { row: ActivityEvidenceSummary }) {
       <div className="flex items-start gap-2">
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-slate-300" />
         <div className="min-w-0">
-          <p className="break-words font-medium text-slate-900">{row.summary}</p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <p className="min-w-0 break-words font-medium text-slate-900">{row.summary}</p>
+            {row.role ? (
+              <span className="shrink-0 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
+                {humanize(row.role)}
+              </span>
+            ) : null}
+          </div>
           {row.detail ? <p className="mt-1 break-words text-slate-500">{row.detail}</p> : null}
           {highlightedPassages.length ? (
             <div className="mt-2 space-y-1">

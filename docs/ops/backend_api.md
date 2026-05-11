@@ -40,9 +40,15 @@ Supported filters include `view`, `event_type`, `source`, `field`, `actor`,
 The first saved-view presets are `agent`, `auto_applied`, and `semantic`;
 resolution rows include top-level `evidence_summaries[]` hydrated from
 `resolution_log.evidence_ids` with the same source-specific snippet renderer
-used by Review Queue. The raw `detail.evidence_ids` list is preserved, and
-summary hydration is capped at five evidence rows per Activity row to keep
-feed payloads bounded.
+used by Review Queue. Change rows linked to a review item hydrate summaries
+from `review_items.payload.evidence_ids`. Agent rows also populate
+`evidence_summaries[]` from `agent_runs.evidence_consulted` when a consulted
+entry resolves to an evidence UUID, source record, or news article ID. Raw
+resolution evidence IDs, review-item evidence IDs, and agent consulted entries
+are preserved in `detail`. Summary hydration is capped at five evidence rows
+per Activity row to keep feed payloads bounded. Agent consulted-evidence
+summaries include a `role` value when the agent supplied one (`primary`,
+`comparison`, etc.).
 Candidate rows are selected with one ordered SQL union across change,
 resolution, agent, and semantic sources before hydration, so `limit` applies to
 the newest rows across the whole feed rather than independently per source

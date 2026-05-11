@@ -131,6 +131,7 @@ def _agent_run(
     profile_name: str = "news_v1",
     created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
     outcome: str = AgentRunOutcome.COMPLETED.value,
+    evidence_consulted: list[dict] | None = None,
 ) -> AgentRun:
     agent_run = _agent_run_model(
         project,
@@ -140,6 +141,7 @@ def _agent_run(
         profile_name=profile_name,
         created_at=created_at,
         outcome=outcome,
+        evidence_consulted=evidence_consulted,
     )
     postgres_session.add(agent_run)
     postgres_session.flush()
@@ -155,6 +157,7 @@ def _agent_run_model(
     profile_name: str = "news_v1",
     created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
     outcome: str = AgentRunOutcome.COMPLETED.value,
+    evidence_consulted: list[dict] | None = None,
 ) -> AgentRun:
     return AgentRun(
         intake_source_type=intake_source_type,
@@ -173,7 +176,7 @@ def _agent_run_model(
         cost_usd=Decimal("0.010000"),
         latency_ms=1000,
         reasoning_trace="Agent checked attribution.",
-        evidence_consulted=[],
+        evidence_consulted=evidence_consulted or [],
         tool_calls_summary=[],
         outcome=outcome,
         error_text="timed out" if outcome.startswith("failed_") else None,
@@ -486,6 +489,131 @@ def test_activity_feed_combines_change_resolution_and_agent_rows(
     assert agent_event.cost_usd == 0.012345
 
 
+def test_activity_change_event_includes_review_item_evidence_summaries(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "125 Change Evidence Activity Way")
+    missing_evidence_id = uuid.uuid4()
+    evidence = _evidence(
+        postgres_session,
+        project,
+        source_type="news_article",
+        source_tier=2,
+        source_record_id="reference-change-activity-1",
+        field_name="total_units",
+        value=155,
+        raw_data={
+            "publication": "Urbanize LA",
+            "published_at": "2026-05-07",
+            "article_url": "https://example.com/change-evidence",
+        },
+    )
+    review_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        status=ReviewItemStatus.OPEN,
+        priority=Priority.MEDIUM,
+        field_name="total_units",
+        payload={"evidence_ids": [str(evidence.id), str(missing_evidence_id)]},
+    )
+    postgres_session.add(review_item)
+    postgres_session.flush()
+    change = ChangeLog(
+        project_id=project.id,
+        review_item_id=review_item.id,
+        timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+        source="urbanize_la",
+        field="total_units",
+        old_value=120,
+        new_value=155,
+        change_type=ChangeType.RESEARCHER_CONFIRMED,
+        priority=Priority.HIGH,
+        reviewed_by="researcher",
+        reviewed_by_user_id=uuid.uuid4(),
+        reviewed_by_email="researcher@example.com",
+    )
+    postgres_session.add(change)
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"change:{change.id}"
+    assert event.review_item_id == review_item.id
+    assert event.detail["evidence_ids"] == [str(evidence.id), str(missing_evidence_id)]
+    assert event.detail["evidence_count"] == 2
+    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summaries_truncated"] is False
+    assert len(event.evidence_summaries) == 1
+    summary = event.evidence_summaries[0]
+    assert summary.evidence_id == evidence.id
+    assert summary.role is None
+    assert summary.summary == "total_units: 155"
+    assert "Urbanize LA" in summary.detail
+
+
+def test_activity_change_event_caps_review_item_evidence_summaries(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "126 Change Evidence Cap Activity Way")
+    evidence_rows = [
+        _evidence(
+            postgres_session,
+            project,
+            source_type="costar",
+            source_tier=3,
+            source_record_id=f"CST-CHANGE-CAP-{index}",
+            value=300 + index,
+        )
+        for index in range(7)
+    ]
+    review_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        status=ReviewItemStatus.OPEN,
+        priority=Priority.MEDIUM,
+        field_name="total_units",
+        payload={"evidence_ids": [str(evidence.id) for evidence in evidence_rows]},
+    )
+    postgres_session.add(review_item)
+    postgres_session.flush()
+    change = ChangeLog(
+        project_id=project.id,
+        review_item_id=review_item.id,
+        timestamp=datetime(2026, 5, 8, 10, 3, tzinfo=UTC),
+        source="costar",
+        field="total_units",
+        old_value=300,
+        new_value=306,
+        change_type=ChangeType.RESEARCHER_CONFIRMED,
+        priority=Priority.HIGH,
+        reviewed_by="researcher",
+    )
+    postgres_session.add(change)
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"change:{change.id}"
+    assert event.detail["evidence_count"] == 7
+    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summaries_truncated"] is True
+    assert [summary.evidence_id for summary in event.evidence_summaries] == [
+        evidence.id for evidence in evidence_rows[:5]
+    ]
+
+
 def test_activity_resolution_event_includes_evidence_summaries(
     postgres_session: Session,
 ) -> None:
@@ -775,6 +903,139 @@ def test_activity_feed_news_agent_missing_article_keeps_intake_discriminator(
     assert event.intake_summary is not None
     assert event.intake_summary.kind == "news_article"
     assert event.intake_summary.label == "News article"
+
+
+def test_activity_agent_event_includes_consulted_evidence_summaries(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "177 Agent Evidence Activity Way")
+    _, article = _news_article(
+        postgres_session,
+        source_slug="activity-agent-evidence",
+        title="Agent evidence story",
+    )
+    news_evidence = _evidence(
+        postgres_session,
+        project,
+        source_type="news_article",
+        source_tier=2,
+        source_record_id="reference-agent-activity-1",
+        field_name="pipeline_status",
+        value="Under Construction",
+        raw_data={
+            "article_id": str(article.id),
+            "publication": "Urbanize LA",
+            "published_at": "2026-05-07",
+            "article_url": "https://example.com/agent-evidence",
+        },
+    )
+    costar_evidence = _evidence(
+        postgres_session,
+        project,
+        source_type="costar",
+        source_tier=3,
+        source_record_id="CST-AGENT-ACTIVITY-1",
+        field_name="total_units",
+        value=122,
+    )
+    missing_record_id = str(uuid.uuid4())
+    agent_run = _agent_run(
+        postgres_session,
+        project,
+        article_id=article.id,
+        intake_record_id=str(article.id),
+        evidence_consulted=[
+            {
+                "source_type": "news_article",
+                "record_id": str(article.id),
+                "role": "primary",
+            },
+            {
+                "source_type": "costar",
+                "record_id": "CST-AGENT-ACTIVITY-1",
+                "role": "comparison",
+            },
+            {
+                "source_type": "news_article",
+                "record_id": missing_record_id,
+                "role": "missing",
+            },
+        ],
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"agent:{agent_run.id}"
+    assert event.detail["evidence_count"] == 3
+    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summaries_truncated"] is False
+    assert event.detail["evidence_consulted"][0]["role"] == "primary"
+    assert [summary.evidence_id for summary in event.evidence_summaries] == [
+        news_evidence.id,
+        costar_evidence.id,
+    ]
+    assert [summary.role for summary in event.evidence_summaries] == [
+        "primary",
+        "comparison",
+    ]
+    assert [summary.source_type for summary in event.evidence_summaries] == [
+        "news_article",
+        "costar",
+    ]
+    assert event.evidence_summaries[0].summary == "News article evidence"
+    assert "Urbanize LA" in event.evidence_summaries[0].detail
+    assert event.evidence_summaries[1].summary == "CoStar evidence"
+
+
+def test_activity_agent_event_caps_consulted_evidence_summaries(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "178 Agent Evidence Cap Activity Way")
+    evidence_rows = [
+        _evidence(
+            postgres_session,
+            project,
+            source_type="costar",
+            source_tier=3,
+            source_record_id=f"CST-AGENT-CAP-{index}",
+            value=200 + index,
+        )
+        for index in range(7)
+    ]
+    agent_run = _agent_run(
+        postgres_session,
+        project,
+        evidence_consulted=[
+            {
+                "source_type": "costar",
+                "record_id": evidence.source_record_id,
+                "role": "comparison",
+            }
+            for evidence in evidence_rows
+        ],
+    )
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"agent:{agent_run.id}"
+    assert event.detail["evidence_count"] == 7
+    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summaries_truncated"] is True
+    assert [summary.evidence_id for summary in event.evidence_summaries] == [
+        evidence.id for evidence in evidence_rows[:5]
+    ]
 
 
 def test_activity_feed_agent_view_filters_to_agent_rows(postgres_session: Session) -> None:

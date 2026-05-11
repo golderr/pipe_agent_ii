@@ -266,6 +266,7 @@ class ActivityEvidenceSummary(BaseModel):
     source_type: str
     source_tier: int
     source_record_id: str | None
+    role: str | None = None
     evidence_date: str | None
     collected_at: str
     summary: str

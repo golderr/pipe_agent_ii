@@ -7,10 +7,10 @@ import json
 import uuid
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, and_, cast, or_, select, text
+from sqlalchemy import String, and_, cast, or_, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -39,7 +39,9 @@ from tcg_pipeline.db.models import (
     NewsSource,
     Project,
     ResolutionLog,
+    ReviewItem,
 )
+from tcg_pipeline.review.decision_cards import evidence_ids_for_payload
 from tcg_pipeline.review.snippets import render_snippet
 
 router = APIRouter(prefix="/activity", tags=["activity"])
@@ -69,6 +71,27 @@ SEMANTIC_REJECTION_SIGMA_THRESHOLD = 2.0
 MAX_INTERNAL_LIMIT = 500
 ACTIVITY_CURSOR_VERSION = 1
 MAX_ACTIVITY_EVIDENCE_SUMMARIES = 5
+AGENT_EVIDENCE_ID_KEYS = ("evidence_id", "matched_evidence_id")
+AGENT_SOURCE_TYPE_KEYS = ("source_type", "sourceType")
+AGENT_RECORD_ID_KEYS = ("source_record_id", "sourceRecordId", "record_id", "recordId")
+AGENT_ROLE_KEYS = ("role", "reason")
+# Keep in sync with news.integration._news_raw_data; agent Activity hydration uses
+# this key to resolve consulted news-article IDs back to accepted evidence rows.
+NEWS_EVIDENCE_ARTICLE_ID_RAW_KEY = "article_id"
+
+
+class _AgentEvidenceRef(NamedTuple):
+    evidence_id: uuid.UUID | None
+    source_type: str | None
+    record_id: str | None
+    role: str | None
+
+
+class _AgentEvidenceContext(NamedTuple):
+    refs_by_agent: dict[uuid.UUID, list[_AgentEvidenceRef]]
+    evidence_by_id: dict[uuid.UUID, Evidence]
+    evidence_by_source_record: dict[tuple[str, str], Evidence]
+    evidence_by_news_article_id: dict[str, Evidence]
 
 
 @router.get("/events")
@@ -925,14 +948,49 @@ def _change_events_by_ids(
         return {}
     rows = session.execute(select(ChangeLog).where(ChangeLog.id.in_(unique_ids))).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows])
-    return {row.id: _change_event(row, project=projects.get(row.project_id)) for row in rows}
+    evidence_ids_by_change, evidence_by_id = _change_evidence_context(session, rows)
+    return {
+        row.id: _change_event(
+            row,
+            project=projects.get(row.project_id),
+            evidence_ids=evidence_ids_by_change.get(row.id, []),
+            evidence_by_id=evidence_by_id,
+        )
+        for row in rows
+    }
 
 
 def _change_event(
     row: ChangeLog,
     *,
     project: Project | None,
+    evidence_ids: list[uuid.UUID] | None = None,
+    evidence_by_id: dict[uuid.UUID, Evidence] | None = None,
 ) -> ActivityEventResponse:
+    resolved_evidence_ids = list(evidence_ids or [])
+    evidence_summaries = _activity_evidence_summaries_for_ids(
+        resolved_evidence_ids,
+        evidence_by_id=evidence_by_id or {},
+        field_name=row.field,
+    )
+    detail: dict[str, Any] = {
+        "reviewed_by": row.reviewed_by,
+        "reviewed_by_user_id": str(row.reviewed_by_user_id)
+        if row.reviewed_by_user_id
+        else None,
+        "reviewed_by_email": row.reviewed_by_email,
+    }
+    if resolved_evidence_ids:
+        detail.update(
+            {
+                "evidence_ids": [str(evidence_id) for evidence_id in resolved_evidence_ids],
+                "evidence_count": len(resolved_evidence_ids),
+                "evidence_summary_cap": MAX_ACTIVITY_EVIDENCE_SUMMARIES,
+                "evidence_summaries_truncated": (
+                    len(resolved_evidence_ids) > MAX_ACTIVITY_EVIDENCE_SUMMARIES
+                ),
+            }
+        )
     return ActivityEventResponse(
         id=f"change:{row.id}",
         event_type="change",
@@ -954,14 +1012,61 @@ def _change_event(
         change_type=row.change_type.value,
         priority=row.priority.value,
         review_item_id=row.review_item_id,
-        detail={
-            "reviewed_by": row.reviewed_by,
-            "reviewed_by_user_id": str(row.reviewed_by_user_id)
-            if row.reviewed_by_user_id
-            else None,
-            "reviewed_by_email": row.reviewed_by_email,
-        },
+        evidence_summaries=evidence_summaries,
+        detail=detail,
     )
+
+
+def _change_evidence_context(
+    session: Session,
+    rows: list[ChangeLog],
+) -> tuple[dict[uuid.UUID, list[uuid.UUID]], dict[uuid.UUID, Evidence]]:
+    review_items_by_id = _review_items_by_id(
+        session,
+        [row.review_item_id for row in rows if row.review_item_id is not None],
+    )
+    evidence_ids_by_change: dict[uuid.UUID, list[uuid.UUID]] = {}
+    evidence_ids_to_fetch: set[uuid.UUID] = set()
+    for row in rows:
+        evidence_ids = _evidence_ids_for_change(row, review_items_by_id=review_items_by_id)
+        evidence_ids_by_change[row.id] = evidence_ids
+        for evidence_id in evidence_ids[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
+            evidence_ids_to_fetch.add(evidence_id)
+    return evidence_ids_by_change, _evidence_by_ids(session, evidence_ids_to_fetch)
+
+
+def _review_items_by_id(
+    session: Session,
+    ids: list[uuid.UUID],
+) -> dict[uuid.UUID, ReviewItem]:
+    unique_ids = sorted(set(ids))
+    if not unique_ids:
+        return {}
+    rows = (
+        session.execute(select(ReviewItem).where(ReviewItem.id.in_(unique_ids)))
+        .scalars()
+        .all()
+    )
+    return {row.id: row for row in rows}
+
+
+def _evidence_ids_for_change(
+    row: ChangeLog,
+    *,
+    review_items_by_id: dict[uuid.UUID, ReviewItem],
+) -> list[uuid.UUID]:
+    if row.review_item_id is None:
+        return []
+    review_item = review_items_by_id.get(row.review_item_id)
+    if review_item is None:
+        return []
+    payload = review_item.payload if isinstance(review_item.payload, dict) else {}
+    evidence_ids: list[uuid.UUID] = []
+    for raw_evidence_id in evidence_ids_for_payload(payload):
+        evidence_id = _uuid_or_none(raw_evidence_id)
+        if evidence_id is not None:
+            evidence_ids.append(evidence_id)
+    return evidence_ids
 
 
 def _resolution_events_by_ids(
@@ -1052,30 +1157,240 @@ def _activity_evidence_summaries(
     *,
     evidence_by_id: dict[uuid.UUID, Evidence],
 ) -> list[ActivityEvidenceSummary]:
+    return _activity_evidence_summaries_for_ids(
+        list(row.evidence_ids or []),
+        evidence_by_id=evidence_by_id,
+        field_name=row.field,
+    )
+
+
+def _activity_evidence_summaries_for_ids(
+    evidence_ids: list[uuid.UUID],
+    *,
+    evidence_by_id: dict[uuid.UUID, Evidence],
+    field_name: str | None,
+) -> list[ActivityEvidenceSummary]:
     summaries: list[ActivityEvidenceSummary] = []
-    for evidence_id in list(row.evidence_ids or [])[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
+    for evidence_id in evidence_ids[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
         evidence = evidence_by_id.get(evidence_id)
         if evidence is None:
             continue
-        snippet = render_snippet(evidence, field_name=row.field)
-        summaries.append(
-            ActivityEvidenceSummary(
-                evidence_id=evidence.id,
-                source_type=evidence.source_type,
-                source_tier=evidence.source_tier,
-                source_record_id=evidence.source_record_id,
-                evidence_date=evidence.evidence_date.isoformat()
-                if evidence.evidence_date
-                else None,
-                collected_at=evidence.collected_at.isoformat(),
-                summary=snippet.summary,
-                detail=snippet.detail,
-                external_link=snippet.external_link,
-                highlights=snippet.highlights,
-                extracted_value=snippet.fields.extracted_value,
+        summaries.append(_activity_evidence_summary(evidence, field_name=field_name))
+    return summaries
+
+
+def _activity_evidence_summary(
+    evidence: Evidence,
+    *,
+    field_name: str | None,
+    role: str | None = None,
+) -> ActivityEvidenceSummary:
+    snippet = render_snippet(evidence, field_name=field_name)
+    return ActivityEvidenceSummary(
+        evidence_id=evidence.id,
+        source_type=evidence.source_type,
+        source_tier=evidence.source_tier,
+        source_record_id=evidence.source_record_id,
+        role=role,
+        evidence_date=evidence.evidence_date.isoformat() if evidence.evidence_date else None,
+        collected_at=evidence.collected_at.isoformat(),
+        summary=snippet.summary,
+        detail=snippet.detail,
+        external_link=snippet.external_link,
+        highlights=snippet.highlights,
+        extracted_value=snippet.fields.extracted_value,
+    )
+
+
+def _agent_evidence_context(
+    session: Session,
+    rows: list[AgentRun],
+) -> _AgentEvidenceContext:
+    refs_by_agent = {row.id: _agent_consulted_evidence_refs(row) for row in rows}
+    evidence_ids: set[uuid.UUID] = set()
+    source_record_keys: set[tuple[str, str]] = set()
+    news_article_ids: set[str] = set()
+    for refs in refs_by_agent.values():
+        for ref in refs[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
+            if ref.evidence_id is not None:
+                evidence_ids.add(ref.evidence_id)
+            record_uuid = _uuid_or_none(ref.record_id)
+            if record_uuid is not None:
+                evidence_ids.add(record_uuid)
+                if ref.source_type == "news_article":
+                    news_article_ids.add(str(record_uuid))
+            if ref.source_type and ref.record_id:
+                source_record_keys.add((ref.source_type, ref.record_id))
+
+    return _AgentEvidenceContext(
+        refs_by_agent=refs_by_agent,
+        evidence_by_id=_evidence_by_ids(session, evidence_ids),
+        evidence_by_source_record=_evidence_by_source_record(session, source_record_keys),
+        evidence_by_news_article_id=_evidence_by_news_article_id(session, news_article_ids),
+    )
+
+
+def _agent_consulted_evidence_refs(row: AgentRun) -> list[_AgentEvidenceRef]:
+    refs: list[_AgentEvidenceRef] = []
+    for item in row.evidence_consulted or []:
+        if isinstance(item, str):
+            record_id = _clean_optional_text(item)
+            if record_id is None:
+                continue
+            refs.append(
+                _AgentEvidenceRef(
+                    evidence_id=_uuid_or_none(record_id),
+                    source_type=None,
+                    record_id=record_id,
+                    role=None,
+                )
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        evidence_id = _uuid_or_none(_first_text(item, AGENT_EVIDENCE_ID_KEYS))
+        source_type = _first_text(item, AGENT_SOURCE_TYPE_KEYS)
+        record_id = _first_text(item, AGENT_RECORD_ID_KEYS)
+        role = _first_text(item, AGENT_ROLE_KEYS)
+        if not (evidence_id or source_type or record_id):
+            continue
+        refs.append(
+            _AgentEvidenceRef(
+                evidence_id=evidence_id,
+                source_type=source_type,
+                record_id=record_id,
+                role=role,
             )
         )
+    return refs
+
+
+def _evidence_by_ids(
+    session: Session,
+    evidence_ids: set[uuid.UUID],
+) -> dict[uuid.UUID, Evidence]:
+    if not evidence_ids:
+        return {}
+    rows = (
+        session.execute(select(Evidence).where(Evidence.id.in_(sorted(evidence_ids))))
+        .scalars()
+        .all()
+    )
+    return {evidence.id: evidence for evidence in rows}
+
+
+def _evidence_by_source_record(
+    session: Session,
+    source_record_keys: set[tuple[str, str]],
+) -> dict[tuple[str, str], Evidence]:
+    if not source_record_keys:
+        return {}
+    rows = (
+        session.execute(
+            select(Evidence)
+            .where(
+                tuple_(Evidence.source_type, Evidence.source_record_id).in_(
+                    sorted(source_record_keys)
+                )
+            )
+            .order_by(Evidence.collected_at.desc(), Evidence.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    evidence_by_key: dict[tuple[str, str], Evidence] = {}
+    for evidence in rows:
+        if evidence.source_record_id is None:
+            continue
+        key = (evidence.source_type, evidence.source_record_id)
+        evidence_by_key.setdefault(key, evidence)
+    return evidence_by_key
+
+
+def _evidence_by_news_article_id(
+    session: Session,
+    article_ids: set[str],
+) -> dict[str, Evidence]:
+    if not article_ids:
+        return {}
+    rows = (
+        session.execute(
+            select(Evidence)
+            .where(
+                Evidence.source_type == "news_article",
+                Evidence.raw_data[NEWS_EVIDENCE_ARTICLE_ID_RAW_KEY].astext.in_(
+                    sorted(article_ids)
+                ),
+            )
+            .order_by(Evidence.collected_at.desc(), Evidence.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    evidence_by_article_id: dict[str, Evidence] = {}
+    for evidence in rows:
+        raw_data = evidence.raw_data if isinstance(evidence.raw_data, dict) else {}
+        article_id = _clean_optional_text(raw_data.get(NEWS_EVIDENCE_ARTICLE_ID_RAW_KEY))
+        if article_id is None:
+            continue
+        evidence_by_article_id.setdefault(article_id, evidence)
+    return evidence_by_article_id
+
+
+def _agent_evidence_summaries(
+    refs: list[_AgentEvidenceRef],
+    *,
+    evidence_context: _AgentEvidenceContext,
+) -> list[ActivityEvidenceSummary]:
+    summaries: list[ActivityEvidenceSummary] = []
+    seen_evidence_ids: set[uuid.UUID] = set()
+    for ref in refs[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
+        evidence = _evidence_for_agent_ref(ref, evidence_context=evidence_context)
+        if evidence is None or evidence.id in seen_evidence_ids:
+            continue
+        summaries.append(_activity_evidence_summary(evidence, field_name=None, role=ref.role))
+        seen_evidence_ids.add(evidence.id)
     return summaries
+
+
+def _evidence_for_agent_ref(
+    ref: _AgentEvidenceRef,
+    *,
+    evidence_context: _AgentEvidenceContext,
+) -> Evidence | None:
+    if ref.evidence_id is not None:
+        evidence = evidence_context.evidence_by_id.get(ref.evidence_id)
+        if evidence is not None:
+            return evidence
+    record_uuid = _uuid_or_none(ref.record_id)
+    if record_uuid is not None:
+        evidence = evidence_context.evidence_by_id.get(record_uuid)
+        if evidence is not None:
+            return evidence
+    if ref.source_type and ref.record_id:
+        evidence = evidence_context.evidence_by_source_record.get(
+            (ref.source_type, ref.record_id)
+        )
+        if evidence is not None:
+            return evidence
+        if ref.source_type == "news_article":
+            return evidence_context.evidence_by_news_article_id.get(ref.record_id)
+    return None
+
+
+def _first_text(mapping: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = _clean_optional_text(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _clean_optional_text(value: Any) -> str | None:
+    if not value:
+        return None
+    text_value = str(value).strip()
+    return text_value or None
 
 
 def _agent_events_by_ids(
@@ -1093,6 +1408,7 @@ def _agent_events_by_ids(
         session,
         [article.news_source_id for article in articles.values()],
     )
+    evidence_context = _agent_evidence_context(session, rows)
     events: dict[uuid.UUID, ActivityEventResponse] = {}
     for row in rows:
         article_id = _news_article_id(row)
@@ -1104,6 +1420,8 @@ def _agent_events_by_ids(
             review_item_ids=review_item_ids_by_agent.get(row.id, []),
             article=article,
             news_source=news_source,
+            evidence_refs=evidence_context.refs_by_agent.get(row.id, []),
+            evidence_context=evidence_context,
         )
     return events
 
@@ -1195,35 +1513,13 @@ def _change_events(
     statement = _date_window(statement, ChangeLog.timestamp, from_date=from_date, to_date=to_date)
     rows = session.execute(statement.limit(limit)).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows])
+    evidence_ids_by_change, evidence_by_id = _change_evidence_context(session, rows)
     return [
-        ActivityEventResponse(
-            id=f"change:{row.id}",
-            event_type="change",
-            occurred_at=row.timestamp.isoformat(),
-            project=_project_summary(projects.get(row.project_id)),
-            source=row.source,
-            source_label=_source_label(row.source),
-            field=row.field,
-            field_label=_field_label(row.field),
-            actor_label=_actor_label(
-                row.reviewed_by_email,
-                row.reviewed_by,
-                row.reviewed_by_user_id,
-            ),
-            title=f"{_field_label(row.field)} changed",
-            summary=f"{_format_value(row.old_value)} to {_format_value(row.new_value)}",
-            old_value=row.old_value,
-            new_value=row.new_value,
-            change_type=row.change_type.value,
-            priority=row.priority.value,
-            review_item_id=row.review_item_id,
-            detail={
-                "reviewed_by": row.reviewed_by,
-                "reviewed_by_user_id": str(row.reviewed_by_user_id)
-                if row.reviewed_by_user_id
-                else None,
-                "reviewed_by_email": row.reviewed_by_email,
-            },
+        _change_event(
+            row,
+            project=projects.get(row.project_id),
+            evidence_ids=evidence_ids_by_change.get(row.id, []),
+            evidence_by_id=evidence_by_id,
         )
         for row in rows
     ]
@@ -1325,6 +1621,7 @@ def _agent_events(
         session,
         [article.news_source_id for article in articles.values()],
     )
+    evidence_context = _agent_evidence_context(session, rows)
     events: list[ActivityEventResponse] = []
     for row in rows:
         article_id = _news_article_id(row)
@@ -1337,6 +1634,8 @@ def _agent_events(
                 review_item_ids=review_item_ids_by_agent.get(row.id, []),
                 article=article,
                 news_source=news_source,
+                evidence_refs=evidence_context.refs_by_agent.get(row.id, []),
+                evidence_context=evidence_context,
             )
         )
     return events[:limit]
@@ -1349,6 +1648,8 @@ def _agent_event(
     review_item_ids: list[uuid.UUID],
     article: NewsArticle | None,
     news_source: NewsSource | None,
+    evidence_refs: list[_AgentEvidenceRef],
+    evidence_context: _AgentEvidenceContext,
 ) -> ActivityEventResponse:
     trigger_text = ", ".join(row.triggered_by)
     if row.outcome in AGENT_FAILURE_OUTCOMES:
@@ -1361,6 +1662,10 @@ def _agent_event(
     else:
         title = "Agent decision"
     article_summary = _article_summary(article, news_source)
+    evidence_summaries = _agent_evidence_summaries(
+        evidence_refs,
+        evidence_context=evidence_context,
+    )
     return ActivityEventResponse(
         id=f"agent:{row.id}",
         event_type="agent",
@@ -1380,6 +1685,7 @@ def _agent_event(
         agent_triggers=list(row.triggered_by),
         agent_reasoning_trace=row.reasoning_trace,
         cost_usd=_decimal_to_float(row.cost_usd),
+        evidence_summaries=evidence_summaries,
         detail={
             "profile_name": row.profile_name,
             "profile_version": row.profile_version,
@@ -1390,6 +1696,12 @@ def _agent_event(
             "wallclock_seconds": row.wallclock_seconds,
             "error_text": row.error_text,
             "agent_revised_verdict": row.agent_revised_verdict,
+            "evidence_consulted": row.evidence_consulted or [],
+            "evidence_count": len(evidence_refs),
+            "evidence_summary_cap": MAX_ACTIVITY_EVIDENCE_SUMMARIES,
+            "evidence_summaries_truncated": (
+                len(evidence_refs) > MAX_ACTIVITY_EVIDENCE_SUMMARIES
+            ),
         },
     )
 
