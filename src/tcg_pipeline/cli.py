@@ -48,6 +48,13 @@ from tcg_pipeline.evaluation.pipedream_compare import compare_pipedream_coverage
 from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
 from tcg_pipeline.market_config import get_market_config
+from tcg_pipeline.ops.reset_user_actions import (
+    ResetUserActionCounts,
+    assert_reset_user_actions_allowed,
+    build_reset_user_actions_plan,
+    create_pg_dump_backup,
+    reset_user_actions,
+)
 from tcg_pipeline.resolution import resolve_project
 from tcg_pipeline.resolution.engine import LOGGED_FIELDS
 from tcg_pipeline.review.contradictions import (
@@ -1257,6 +1264,75 @@ def resolve_all(
             "Shadow mode note: resolution_log stores computed canonical developer values "
             "even though developer registry rows and aliases are not persisted."
         )
+
+
+@app.command("reset-user-actions")
+def reset_user_actions_command(
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Actually run the reset after the guarded preview and mandatory pg_dump backup.",
+    ),
+    actor: str = typer.Option(
+        "reset-user-actions",
+        help="Operator label recorded in the system_alert audit row.",
+    ),
+    backup_dir: Annotated[
+        Path | None,
+        typer.Option(help="Directory for the mandatory pg_dump snapshot."),
+    ] = None,
+) -> None:
+    """Clear review/user actions, preserve evidence/audit rows, then re-resolve projects."""
+    settings = get_settings()
+    try:
+        assert_reset_user_actions_allowed(settings)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    backup = None
+    if confirm:
+        try:
+            backup = create_pg_dump_backup(settings, backup_dir=backup_dir)
+        except RuntimeError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        plan = build_reset_user_actions_plan(session)
+        _echo_reset_user_action_counts(plan.counts)
+        if not confirm:
+            typer.echo("No changes made. Re-run with --confirm to back up and reset.")
+            return
+        if backup is None:
+            raise RuntimeError("reset-user-actions confirmed without a backup.")
+
+        try:
+            result = reset_user_actions(
+                session,
+                plan=plan,
+                backup=backup,
+                actor=actor,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+
+    typer.echo(f"Backup: {result.backup.path}")
+    typer.echo(f"Backup SHA256: {result.backup.sha256}")
+    typer.echo(f"Projects resolved: {result.projects_resolved}")
+    typer.echo(f"Projects with discrepancies: {result.projects_with_discrepancies}")
+    typer.echo(f"Changed fields detected: {result.changed_fields}")
+    typer.echo(f"Resolution log rows written: {result.resolution_log_rows}")
+    typer.echo(f"System alert: {result.system_alert_id}")
+
+
+def _echo_reset_user_action_counts(counts: ResetUserActionCounts) -> None:
+    typer.echo("Reset user-actions preview:")
+    for key, value in counts.as_dict().items():
+        typer.echo(f"  {key}: {value}")
 
 
 @app.command("detect-contradictions")

@@ -113,7 +113,7 @@ Affects only the relevant market's articles; can scope re-extraction by `news_ar
 
 ## 3. The "reset user actions" tool
 
-For testing the review workflow repeatedly without re-ingesting articles. Spec lives in `ROADMAP.md` row `STAB.reset-user`. Implementation pending.
+For testing the review workflow repeatedly without re-ingesting articles. Implemented as `tcg-pipeline reset-user-actions` (see `ROADMAP.md` row `STAB.reset-user`).
 
 ### 3.1 What it clears
 
@@ -125,6 +125,8 @@ For testing the review workflow repeatedly without re-ingesting articles. Spec l
 - `status_history` rows where source is human-driven; preserve collector/resolver-driven entries
 - `project_relationships` rows created by humans
 - **Optionally** (separate flag): manually-created `projects` rows (those without `project_source_records` ties to seed/collector data)
+
+Implementation note: `project_relationships` does not currently store actor columns, so v1 infers human-created relationships from human `change_log` rows with `source='project_relationship'` and a creation payload. If no creation audit row exists, the relationship is preserved.
 
 ### 3.2 What it preserves
 
@@ -144,6 +146,8 @@ For testing the review workflow repeatedly without re-ingesting articles. Spec l
 5. **One transaction** — all DELETEs and the state reset run in a single transaction. A failure mid-way rolls back.
 6. **Re-resolve** — run `resolve-all --apply` to recompute project field values without override interference. Some fields shift back to source-derived values; that's the desired post-reset state.
 7. **Audit** — log a `system_alerts` entry recording the reset action with timestamps, actor, and table counts.
+
+Implementation note: active review cards are unique by `(project_id, field_name, item_type)`. When multiple historical committed/staged cards would become active for the same key, v1 reopens at most one and marks the conflicting historical rows `invalidated` rather than violating the database constraint.
 
 ### 3.4 Subtleties
 

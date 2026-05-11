@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     agent_allow_live_llm: bool = False
     news_use_legacy_pass3: bool = False
     news_use_legacy_semantic: bool = False
+    reset_tools_enabled: bool = False
+    reset_backup_dir: Path = Field(default_factory=lambda: Path("data/output/db_snapshots"))
+    reset_protected_database_hosts: str = ""
+    reset_protected_project_refs: str = ""
 
     api_cors_origins: str = "http://localhost:3000"
     api_auth_audience: str = "authenticated"
