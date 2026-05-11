@@ -8,9 +8,9 @@ call an LLM.
 
 ## First Cron Check
 
-Urbanize LA is scheduled for 1pm Pacific. Run this after the first expected cron
-window has had time to finish, using a lookback that covers the cron plus queue
-lag.
+Urbanize LA is scheduled for 7:30 AM Pacific (`30 7 * * *` LA time per
+`news_sources.schedule_cron`). Run this after the first expected cron window has
+had time to finish, using a lookback that covers the cron plus queue lag.
 
 ```powershell
 tcg-pipeline news-agent-smoke-report `
