@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -35,6 +35,7 @@ from tcg_pipeline.db.seed import (
     persist_pipedream_import_results,
 )
 from tcg_pipeline.developer import canonicalize_project_developers
+from tcg_pipeline.evaluation.pipedream_compare import compare_pipedream_coverage
 from tcg_pipeline.ingesters.costar import CoStarImportResult, CoStarIngester
 from tcg_pipeline.ingesters.pipedream import PipedreamImportResult, PipedreamIngester
 from tcg_pipeline.market_config import get_market_config
@@ -475,6 +476,74 @@ def seed_pipedream(
     typer.echo(f"Created relationships: {persist_result.created_relationships}")
     typer.echo(f"Skipped existing relationships: {persist_result.skipped_existing_relationships}")
     typer.echo(f"Unresolved relationships: {persist_result.unresolved_relationship_count}")
+
+
+@app.command("compare-pipedream-coverage")
+def compare_pipedream_coverage_command(
+    workbook_paths: list[Path],
+    market: str = typer.Option(..., help="Market slug, e.g. los_angeles."),
+    publication_date: str = typer.Option(
+        ...,
+        help="Pipedream survey publication date in YYYY-MM-DD form.",
+    ),
+    compare_window_days: int = typer.Option(
+        28,
+        min=0,
+        help="Include TCG projects whose last_evidence_date is within +/- this many days.",
+    ),
+    zip_code: Annotated[
+        list[str] | None,
+        typer.Option(help="Optional coverage ZIP filter; may be provided multiple times."),
+    ] = None,
+    allowed_city: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Optional Pipedream workbook city filter; may be provided multiple times."
+        ),
+    ] = None,
+    output_json: Annotated[
+        Path | None,
+        typer.Option(help="Optional path for a machine-readable comparison report."),
+    ] = None,
+) -> None:
+    """Compare current TCG resolved project state against a Pipedream survey workbook."""
+    try:
+        parsed_publication_date = date.fromisoformat(publication_date)
+    except ValueError as exc:
+        raise typer.BadParameter("publication-date must be YYYY-MM-DD.") from exc
+
+    import_results = ingest_pipedream_workbooks(
+        workbook_paths,
+        market=market,
+        allowed_cities=allowed_city or None,
+    )
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        result = compare_pipedream_coverage(
+            session,
+            import_results,
+            market=market,
+            publication_date=parsed_publication_date,
+            compare_window_days=compare_window_days,
+            zip_codes=zip_code or None,
+        )
+
+    typer.echo(f"Market: {result.market}")
+    typer.echo(
+        "Comparison window: "
+        f"{result.compare_window_start.isoformat()} to {result.compare_window_end.isoformat()}"
+    )
+    typer.echo(f"Compared projects: {result.compared_count}")
+    typer.echo(f"Projects with disagreements: {result.projects_with_disagreements_count}")
+    typer.echo(f"Field disagreements: {result.field_disagreement_count}")
+    typer.echo(f"Unmatched Pipedream records: {len(result.unmatched_pipedream_ids)}")
+    typer.echo(f"Excluded outside evidence window: {result.excluded_evidence_window_count}")
+    if output_json is not None:
+        output_json.write_text(
+            json.dumps(result.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        typer.echo(f"Wrote comparison report: {output_json}")
 
 
 @app.command()
