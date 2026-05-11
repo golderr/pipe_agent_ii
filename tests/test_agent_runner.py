@@ -279,6 +279,32 @@ def test_run_agent_for_intake_writes_kill_switch_audit_row(
     assert agent_run.error_text == "agent_enabled_for_news=false"
 
 
+def test_run_agent_for_intake_writes_no_live_client_audit_row(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent_runner_tables(postgres_session)
+
+    result = run_agent_for_intake(
+        _intake(),
+        matcher_results=[],
+        trigger_reasons=[AgentTrigger.LOW_CONFIDENCE],
+        profile=_test_profile(),
+        client=None,
+        settings=Settings(agent_enabled_for_news=True, agent_allow_live_llm=False),
+        session_factory=_session_factory(postgres_session),
+        now=FIXED_NOW,
+    )
+
+    assert result.outcome == AgentRunOutcome.KILLED_BY_SWITCH.value
+    agent_run = postgres_session.get(AgentRun, result.agent_run_id)
+    assert agent_run is not None
+    assert agent_run.outcome == AgentRunOutcome.KILLED_BY_SWITCH.value
+    assert agent_run.cost_usd == Decimal("0.000000")
+    assert agent_run.error_text == (
+        "agent_allow_live_llm=false; no AgentClient was provided for profile news_v1"
+    )
+
+
 def test_run_agent_for_intake_writes_budget_rejection_audit_row(
     postgres_session: Session,
 ) -> None:

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tcg_pipeline.agents.profiles import PERMIT_AGENT_PROFILE
+from tcg_pipeline.agents.runner import AgentClientResult, AgentRunRequest
 from tcg_pipeline.cli import _resolve_incremental_cursor
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.collect import persist_collected_records
 from tcg_pipeline.db.models import (
+    AgentRun,
+    AgentRunOutcome,
+    AgentRunReviewItem,
     AgeRestriction,
     DeveloperAlias,
     DeveloperRegistry,
@@ -23,6 +29,49 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
     SourceRun,
 )
+from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
+from tcg_pipeline.settings import Settings
+
+
+class FakePermitAgentClient:
+    provider = LLM_PROVIDER_ANTHROPIC
+    model = DEFAULT_EXTRACTION_MODEL
+    prompt_version = PERMIT_AGENT_PROFILE.prompt_version
+
+    def __init__(self, verdict: dict[str, Any] | None = None) -> None:
+        self.requests: list[AgentRunRequest] = []
+        self.verdict = verdict or {"decision": "no_change"}
+
+    def run(self, request: AgentRunRequest) -> AgentClientResult:
+        self.requests.append(request)
+        return AgentClientResult(
+            outcome=AgentRunOutcome.COMPLETED.value,
+            usage=LLMUsage(
+                input_tokens_uncached=100,
+                input_tokens_cache_creation=0,
+                input_tokens_cached=0,
+                output_tokens=20,
+            ),
+            latency_ms=123,
+            reasoning_trace="Permit attribution reviewed against project and permit context.",
+            evidence_consulted=[
+                {
+                    "source_type": "ladbs_permit",
+                    "record_id": request.intake.intake_record_id,
+                    "role": "primary",
+                }
+            ],
+            tool_calls_summary=[
+                {
+                    "tool": "get_permits_for_project",
+                    "args_summary": "{}",
+                    "result_summary": "permit history checked",
+                    "latency_ms": 1,
+                    "output_token_count": 20,
+                }
+            ],
+            agent_revised_verdict=self.verdict,
+        )
 
 
 def _review_items_by_field(
@@ -378,6 +427,62 @@ def test_persist_collected_records_creates_new_candidate_review_item(
     }
 
 
+def test_persist_collected_records_routes_ladbs_new_candidate_to_agent(
+    postgres_session: Session,
+) -> None:
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-20000-09999",
+        raw_payload={"pcis_permit": "12010-20000-09999", "apn": "5146013024"},
+        canonical_address="133 LAUREL AVENUE LOS ANGELES CA 90048",
+        identifiers={"permit_number": ["12010-20000-09999"], "apn": ["5146013024"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-05-10",
+            "total_units": 80,
+            "apn": "5146013024",
+        },
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert result.new_candidate_review_items == 1
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.profile.name == "permit_v1"
+    assert request.intake.source_type == "ladbs_permit"
+    assert request.intake.intake_record_id == "12010-20000-09999"
+    assert request.trigger_reasons == ("new_candidate",)
+    assert request.intake.payload["mapped_fields"]["total_units"] == 80
+
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.profile_name == "permit_v1"
+    assert agent_run.triggered_by == ["new_candidate"]
+    assert agent_run.intake_record_id == "12010-20000-09999"
+    assert agent_run.project_id is None
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(ReviewItem.source_run_id == result.source_run_id)
+    ).scalar_one()
+    link = postgres_session.execute(
+        select(AgentRunReviewItem).where(
+            AgentRunReviewItem.agent_run_id == agent_run.id,
+            AgentRunReviewItem.review_item_id == review_item.id,
+        )
+    ).scalar_one()
+    assert link.review_item_id == review_item.id
+
+
 def test_persist_collected_records_can_suppress_new_candidate_review_items(
     postgres_session: Session,
 ) -> None:
@@ -685,6 +790,383 @@ def test_persist_collected_records_flags_unit_split_mismatch_when_total_changes(
         ),
         "priority": "medium",
     } in review_item.payload["review_flags"]
+
+
+def test_persist_collected_records_routes_ladbs_unit_delta_to_agent(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9501 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9501 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-09999",
+        raw_payload={"pcis_permit": "12010-30000-09999"},
+        canonical_address="9501 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-09999"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 112,
+        },
+        source_row_hash="unit-delta-agent-hash",
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert result.status_change_review_items >= 1
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.trigger_reasons == ("unit_delta",)
+    assert request.intake.project_id == project.id
+    assert request.intake.payload["mapped_fields"]["total_units"] == 112
+
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.profile_name == "permit_v1"
+    assert agent_run.project_id == project.id
+    assert agent_run.triggered_by == ["unit_delta"]
+    linked_review_item_ids = set(
+        postgres_session.execute(
+            select(AgentRunReviewItem.review_item_id).where(
+                AgentRunReviewItem.agent_run_id == agent_run.id
+            )
+        ).scalars()
+    )
+    total_units_review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.field_name == "total_units",
+        )
+    ).scalar_one()
+    assert total_units_review_item.id in linked_review_item_ids
+
+
+def test_persist_collected_records_routes_ladbs_product_type_change_to_agent(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9503 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9503 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+        product_type=ProductType.APARTMENT,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10001",
+        raw_payload={"pcis_permit": "12010-30000-10001"},
+        canonical_address="9503 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10001"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 100,
+            "product_type": "Condo",
+        },
+        source_row_hash="product-type-agent-hash",
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.trigger_reasons == ("product_type_change",)
+    assert request.intake.project_id == project.id
+    assert request.intake.payload["mapped_fields"]["product_type"] == "Condo"
+
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.profile_name == "permit_v1"
+    assert agent_run.project_id == project.id
+    assert agent_run.triggered_by == ["product_type_change"]
+
+
+def test_persist_collected_records_routes_combined_ladbs_triggers_to_one_agent_run(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9504 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9504 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+        product_type=ProductType.APARTMENT,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10002",
+        raw_payload={"pcis_permit": "12010-30000-10002"},
+        canonical_address="9504 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10002"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 112,
+            "product_type": "Condo",
+        },
+        source_row_hash="combined-agent-hash",
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.trigger_reasons == ("unit_delta", "product_type_change")
+
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["unit_delta", "product_type_change"]
+
+
+def test_persist_collected_records_writes_permit_audit_row_without_live_llm_client(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9502 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9502 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10000",
+        raw_payload={"pcis_permit": "12010-30000-10000"},
+        canonical_address="9502 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10000"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 112,
+        },
+        source_row_hash="small-unit-delta-agent-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        settings=Settings(agent_enabled_for_permits=True, agent_allow_live_llm=False),
+    )
+    postgres_session.flush()
+
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.outcome == AgentRunOutcome.KILLED_BY_SWITCH.value
+    assert agent_run.error_text == (
+        "agent_allow_live_llm=false; no AgentClient was provided for profile permit_v1"
+    )
+    assert agent_run.triggered_by == ["unit_delta"]
+    assert agent_run.project_id == project.id
+
+
+def test_persist_collected_records_writes_permit_kill_switch_audit_row(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9505 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9505 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10003",
+        raw_payload={"pcis_permit": "12010-30000-10003"},
+        canonical_address="9505 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10003"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 112,
+        },
+        source_row_hash="kill-switch-agent-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        settings=Settings(agent_enabled_for_permits=False),
+    )
+    postgres_session.flush()
+
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.outcome == AgentRunOutcome.KILLED_BY_SWITCH.value
+    assert agent_run.error_text == "agent_enabled_for_permits=false"
+    assert agent_run.triggered_by == ["unit_delta"]
+
+
+def test_persist_collected_records_does_not_route_exact_ten_percent_unit_delta(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9506 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9506 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10004",
+        raw_payload={"pcis_permit": "12010-30000-10004"},
+        canonical_address="9506 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10004"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 110,
+        },
+        source_row_hash="ten-percent-agent-hash",
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert client.requests == []
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one_or_none()
+    assert agent_run is None
+
+
+def test_persist_collected_records_does_not_route_non_permit_sources_to_permit_agent(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9507 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9507 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="costar",
+        source_record_id="costar-non-permit-10005",
+        raw_payload={"costar_property_id": "costar-non-permit-10005"},
+        canonical_address="9507 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"costar_property_id": ["costar-non-permit-10005"]},
+        mapped_fields={"total_units": 112},
+        source_row_hash="non-permit-agent-hash",
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="costar",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert client.requests == []
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one_or_none()
+    assert agent_run is None
 
 
 def test_persist_collected_records_reviews_resolved_developer_change(

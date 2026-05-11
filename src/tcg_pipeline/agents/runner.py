@@ -136,6 +136,35 @@ def run_agent_for_intake(
                 review_item_ids=review_item_ids,
             )
 
+    if client is None and not resolved_settings.agent_allow_live_llm:
+        with resolved_session_factory() as session:
+            agent_run = _persist_agent_run(
+                session,
+                intake=intake,
+                profile=profile,
+                trigger_reasons=normalized_triggers,
+                provider=profile.default_provider,
+                model=profile.default_model,
+                prompt_version=profile.prompt_version,
+                outcome=AgentRunOutcome.KILLED_BY_SWITCH.value,
+                error_text=(
+                    "agent_allow_live_llm=false; no AgentClient was provided "
+                    f"for profile {profile.name}"
+                ),
+                started_at=current,
+                completed_at=current,
+                matcher_results=matcher_results,
+                review_item_ids=review_item_ids,
+            )
+            session.commit()
+            return AgentRunResult(
+                agent_run_id=agent_run.id,
+                outcome=AgentRunOutcome.KILLED_BY_SWITCH.value,
+                error_text=agent_run.error_text,
+                cost_usd=Decimal("0"),
+                review_item_ids=review_item_ids,
+            )
+
     if client is None:
         raise RuntimeError("An AgentClient is required until the AGENT.2 LLM client lands.")
 

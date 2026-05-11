@@ -2,19 +2,28 @@ from __future__ import annotations
 
 import enum
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from tcg_pipeline.agents.client import build_anthropic_agent_client
+from tcg_pipeline.agents.profiles import PERMIT_AGENT_PROFILE, AgentTrigger
+from tcg_pipeline.agents.runner import (
+    AgentClient,
+    AgentRunResult,
+    IntakeRecord,
+    run_agent_for_intake,
+)
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.evidence import write_raw_record_evidence
 from tcg_pipeline.db.models import (
     DismissedRecord,
     IdentifierType,
     Priority,
+    ProductType,
     Project,
     ProjectIdentifier,
     ProjectSourceRecord,
@@ -27,6 +36,7 @@ from tcg_pipeline.ingesters._common import serialize_json_value
 from tcg_pipeline.matching.differ import (
     DetectedChange,
     DiffResult,
+    ProjectDiffSnapshot,
     ReviewFlag,
     StatusSuggestion,
     diff_project_snapshots,
@@ -38,7 +48,12 @@ from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
 )
+from tcg_pipeline.settings import Settings, get_settings
+from tcg_pipeline.source_tiers import get_logical_source_type
 from tcg_pipeline.status_rules import build_status_suggestion
+
+PERMIT_AGENT_UNIT_DELTA_THRESHOLD = 0.10
+PERMIT_AGENT_SOURCE_TYPES = frozenset({"ladbs_permit"})
 
 
 @dataclass(slots=True)
@@ -70,6 +85,18 @@ class SourceRecordUpsertOutcome(enum.StrEnum):
     UNCHANGED = "unchanged"
 
 
+@dataclass(slots=True)
+class PermitAgentRunOutcome:
+    client: AgentClient | None
+    result: AgentRunResult | None = None
+
+
+@dataclass(slots=True)
+class StatusReviewItemUpsertResult:
+    created_count: int = 0
+    review_item_ids: list[uuid.UUID] = field(default_factory=list)
+
+
 def persist_collected_records(
     session: Session,
     *,
@@ -79,8 +106,13 @@ def persist_collected_records(
     collection_mode: str = "full",
     incremental_since: datetime | None = None,
     create_new_candidates: bool = True,
+    permit_agent_client: AgentClient | None = None,
+    settings: Settings | None = None,
 ) -> CollectPersistResult:
     run_started_at = datetime.now(UTC)
+    resolved_settings = settings or get_settings()
+    permit_agent_session_factory = _session_factory_for_current_bind(session)
+    resolved_permit_agent_client = permit_agent_client
     identifier_owner_cache: dict[tuple[IdentifierType, str], uuid.UUID] = {}
     source_min_updated_at, source_max_updated_at = _source_updated_at_bounds(raw_records)
     source_run = SourceRun(
@@ -131,6 +163,27 @@ def persist_collected_records(
                 result=result,
                 create_new_candidates=create_new_candidates,
             )
+            session.flush()
+            review_item_ids = _review_item_ids_for_source_record(
+                session,
+                source_run=source_run,
+                raw_record=raw_record,
+            )
+            resolved_permit_agent_client = _run_permit_agent_for_record(
+                raw_record=raw_record,
+                match_result=match_result,
+                triggers=_permit_agent_triggers_for_unmatched_record(
+                    raw_record=raw_record,
+                    match_result=match_result,
+                    create_new_candidates=create_new_candidates,
+                ),
+                source_run=source_run,
+                review_item_ids=review_item_ids,
+                settings=resolved_settings,
+                session_factory=permit_agent_session_factory,
+                client=resolved_permit_agent_client,
+                now=run_started_at,
+            ).client
             continue
 
         project = session.get(Project, match_result.project_id)
@@ -196,9 +249,10 @@ def persist_collected_records(
             status_reason=_status_reason_from_resolution(resolution_result),
             review_flags=_review_flags_from_resolution(resolution_result),
         )
+        status_review_item_ids: list[uuid.UUID] = []
         if diff_result.has_reviewable_changes:
             source_run.updates_found += 1
-            result.status_change_review_items += _upsert_status_change_review_items(
+            status_review_items = _upsert_status_change_review_items(
                 session,
                 project=project,
                 source_run=source_run,
@@ -208,6 +262,25 @@ def persist_collected_records(
                 resolution_result=resolution_result,
                 evidence_id=evidence_result.evidence.id if evidence_result.evidence else None,
             )
+            status_review_item_ids = status_review_items.review_item_ids
+            result.status_change_review_items += status_review_items.created_count
+            session.flush()
+        resolved_permit_agent_client = _run_permit_agent_for_record(
+            raw_record=raw_record,
+            match_result=match_result,
+            triggers=_permit_agent_triggers_for_matched_record(
+                previous_snapshot=previous_snapshot,
+                raw_record=raw_record,
+            ),
+            source_run=source_run,
+            project_id=project.id,
+            evidence_id=evidence_result.evidence.id if evidence_result.evidence else None,
+            review_item_ids=status_review_item_ids,
+            settings=resolved_settings,
+            session_factory=permit_agent_session_factory,
+            client=resolved_permit_agent_client,
+            now=run_started_at,
+        ).client
 
     source_run.duration_seconds = max(int((datetime.now(UTC) - run_started_at).total_seconds()), 0)
     return result
@@ -220,6 +293,20 @@ def _increment_match_counter(result: CollectPersistResult, match_result: MatchRe
         result.matched_by_identifier += 1
     elif match_result.match_type == "address":
         result.matched_by_address += 1
+
+
+def _session_factory_for_current_bind(session: Session) -> sessionmaker[Session]:
+    # Bind the inner sessionmaker to the outer Connection so agent_runs and
+    # agent_run_review_items share the collector transaction. The runner's
+    # inner Session joins that transaction, so its commit() flushes without
+    # issuing a DB-level COMMIT. Do not switch this to get_session_factory();
+    # source_run/review_item FK targets would not be visible before outer commit.
+    return sessionmaker(
+        bind=session.connection(),
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
 
 
 def _upsert_source_record(
@@ -379,6 +466,165 @@ def _create_unmatched_review_item(
     )
 
 
+def _run_permit_agent_for_record(
+    *,
+    raw_record: RawRecord,
+    match_result: MatchResult,
+    triggers: tuple[AgentTrigger, ...],
+    source_run: SourceRun,
+    settings: Settings,
+    session_factory: sessionmaker[Session],
+    client: AgentClient | None,
+    now: datetime,
+    project_id: uuid.UUID | None = None,
+    evidence_id: uuid.UUID | None = None,
+    review_item_ids: list[uuid.UUID] | None = None,
+) -> PermitAgentRunOutcome:
+    if not triggers:
+        return PermitAgentRunOutcome(client=client)
+    resolved_client = client
+    if settings.agent_enabled_for_permits and resolved_client is None:
+        if settings.agent_allow_live_llm:
+            resolved_client = build_anthropic_agent_client(
+                settings=settings,
+                profile=PERMIT_AGENT_PROFILE,
+            )
+    agent_result = run_agent_for_intake(
+        IntakeRecord(
+            source_type=PERMIT_AGENT_PROFILE.intake_source_type,
+            intake_record_id=raw_record.source_record_id,
+            project_id=project_id,
+            source_run_id=source_run.id,
+            payload=_permit_agent_intake_payload(
+                raw_record,
+                match_result=match_result,
+                evidence_id=evidence_id,
+            ),
+        ),
+        matcher_results=[_serialize_match_result(match_result)],
+        trigger_reasons=list(triggers),
+        profile=PERMIT_AGENT_PROFILE,
+        client=resolved_client,
+        produced_review_item_ids=review_item_ids or [],
+        settings=settings,
+        session_factory=session_factory,
+        now=now,
+    )
+    # Permit integration is audit-only in this slice; deterministic review items stay authoritative.
+    return PermitAgentRunOutcome(client=resolved_client, result=agent_result)
+
+
+def _permit_agent_triggers_for_unmatched_record(
+    *,
+    raw_record: RawRecord,
+    match_result: MatchResult,
+    create_new_candidates: bool,
+) -> tuple[AgentTrigger, ...]:
+    if not _is_permit_agent_source(raw_record):
+        return ()
+    if (
+        create_new_candidates
+        and match_result.project_id is None
+        and not match_result.candidate_project_ids
+    ):
+        return (AgentTrigger.NEW_CANDIDATE,)
+    return ()
+
+
+def _permit_agent_triggers_for_matched_record(
+    *,
+    previous_snapshot: ProjectDiffSnapshot,
+    raw_record: RawRecord,
+) -> tuple[AgentTrigger, ...]:
+    if not _is_permit_agent_source(raw_record):
+        return ()
+    triggers: list[AgentTrigger] = []
+    if _unit_delta_exceeds_threshold(
+        previous_snapshot.total_units,
+        _coerce_int(raw_record.mapped_fields.get("total_units")),
+    ):
+        triggers.append(AgentTrigger.UNIT_DELTA)
+    # Real LADBS rows do not emit product_type until the deterministic LADBS
+    # semantic port lands; this trigger is currently wired but inert in production.
+    new_product_type = _coerce_product_type(raw_record.mapped_fields.get("product_type"))
+    if new_product_type is not None and new_product_type != previous_snapshot.product_type:
+        triggers.append(AgentTrigger.PRODUCT_TYPE_CHANGE)
+    return tuple(triggers)
+
+
+def _is_permit_agent_source(raw_record: RawRecord) -> bool:
+    return get_logical_source_type(raw_record.source_name) in PERMIT_AGENT_SOURCE_TYPES
+
+
+def _unit_delta_exceeds_threshold(current_units: int | None, new_units: int | None) -> bool:
+    if current_units is None or new_units is None or current_units == new_units:
+        return False
+    denominator = max(abs(current_units), 1)
+    return abs(new_units - current_units) / denominator > PERMIT_AGENT_UNIT_DELTA_THRESHOLD
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_product_type(value: Any) -> ProductType | None:
+    if not value:
+        return None
+    if isinstance(value, ProductType):
+        return value
+    try:
+        return ProductType(str(value))
+    except ValueError:
+        return None
+
+
+def _permit_agent_intake_payload(
+    raw_record: RawRecord,
+    *,
+    match_result: MatchResult,
+    evidence_id: uuid.UUID | None,
+) -> dict[str, Any]:
+    return {
+        "source_name": raw_record.source_name,
+        "source_type": get_logical_source_type(raw_record.source_name),
+        "source_record_id": raw_record.source_record_id,
+        "source_row_id": raw_record.source_row_id,
+        "canonical_address": raw_record.canonical_address,
+        "project_name": raw_record.project_name,
+        "identifiers": _serialize_identifiers(raw_record.identifiers),
+        "mapped_fields": _serialize_payload(raw_record.mapped_fields),
+        "raw_payload": _serialize_payload(raw_record.raw_payload),
+        "lat": raw_record.lat,
+        "lng": raw_record.lng,
+        "source_created_at": serialize_json_value(raw_record.source_created_at),
+        "source_updated_at": serialize_json_value(raw_record.source_updated_at),
+        "source_row_hash": raw_record.source_row_hash,
+        "evidence_id": str(evidence_id) if evidence_id is not None else None,
+        "match": _serialize_match_result(match_result),
+    }
+
+
+def _review_item_ids_for_source_record(
+    session: Session,
+    *,
+    source_run: SourceRun,
+    raw_record: RawRecord,
+) -> list[uuid.UUID]:
+    return list(
+        session.execute(
+            select(ReviewItem.id).where(
+                ReviewItem.source_run_id == source_run.id,
+                ReviewItem.payload["source_record_id"].astext == raw_record.source_record_id,
+            )
+        ).scalars()
+    )
+
+
 def _upsert_status_change_review_items(
     session: Session,
     *,
@@ -389,14 +635,14 @@ def _upsert_status_change_review_items(
     diff_result: DiffResult,
     resolution_result,
     evidence_id: uuid.UUID | None,
-) -> int:
+) -> StatusReviewItemUpsertResult:
     base_payload = {
         "match": _serialize_match_result(match_result),
         "source_record_id": raw_record.source_record_id,
         "canonical_address": raw_record.canonical_address,
         "mapped_fields": _serialize_payload(raw_record.mapped_fields),
     }
-    created_count = 0
+    result = StatusReviewItemUpsertResult()
     for field_name in _review_item_fields(diff_result):
         field_changes = [
             change for change in diff_result.field_changes if change.field == field_name
@@ -421,7 +667,7 @@ def _upsert_status_change_review_items(
             field_name,
             fallback=evidence_id,
         )
-        _, created = upsert_decision_card_review_item(
+        item, _created = upsert_decision_card_review_item(
             session,
             project_id=project.id,
             source_run_id=source_run.id,
@@ -433,9 +679,10 @@ def _upsert_status_change_review_items(
             proposed_value=proposed_value,
             winning_evidence_id=winning_evidence_id,
         )
-        if created:
-            created_count += 1
-    return created_count
+        result.review_item_ids.append(item.id)
+        if _created:
+            result.created_count += 1
+    return result
 
 
 def _review_item_fields(diff_result: DiffResult) -> list[str]:
