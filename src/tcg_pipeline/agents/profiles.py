@@ -78,6 +78,7 @@ NEWS_AGENT_TOOLS = frozenset(
 )
 PERMIT_AGENT_TOOLS = frozenset(
     {
+        "get_articles_about_parcel_or_address",
         "get_permits_for_parcel",
         "get_permits_for_project",
     }

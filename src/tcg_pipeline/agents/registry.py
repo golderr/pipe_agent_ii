@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tcg_pipeline.agents.news_tools import GET_ARTICLE_BODY_TOOL, SEARCH_ARTICLES_SIMILAR_TOOL
 from tcg_pipeline.agents.permit_tools import (
+    GET_ARTICLES_ABOUT_PARCEL_OR_ADDRESS_TOOL,
     GET_PERMITS_FOR_PARCEL_TOOL,
     GET_PERMITS_FOR_PROJECT_TOOL,
 )
@@ -16,6 +17,9 @@ def build_agent_tool_registry() -> AgentToolRegistry:
             SEARCH_PROJECTS_TOOL.name: SEARCH_PROJECTS_TOOL,
             GET_ARTICLE_BODY_TOOL.name: GET_ARTICLE_BODY_TOOL,
             SEARCH_ARTICLES_SIMILAR_TOOL.name: SEARCH_ARTICLES_SIMILAR_TOOL,
+            GET_ARTICLES_ABOUT_PARCEL_OR_ADDRESS_TOOL.name: (
+                GET_ARTICLES_ABOUT_PARCEL_OR_ADDRESS_TOOL
+            ),
             GET_PERMITS_FOR_PARCEL_TOOL.name: GET_PERMITS_FOR_PARCEL_TOOL,
             GET_PERMITS_FOR_PROJECT_TOOL.name: GET_PERMITS_FOR_PROJECT_TOOL,
         }

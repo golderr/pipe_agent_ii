@@ -121,12 +121,17 @@ def test_default_tool_registry_includes_permit_profile_tools() -> None:
     specs = registry.tool_specs_for_profile(PERMIT_AGENT_PROFILE)
 
     assert [spec["name"] for spec in specs] == [
+        "get_articles_about_parcel_or_address",
         "get_permits_for_parcel",
         "get_permits_for_project",
         "get_project_state",
         "search_projects",
     ]
     spec_by_name = {spec["name"]: spec for spec in specs}
+    assert spec_by_name["get_articles_about_parcel_or_address"]["input_schema"]["anyOf"] == [
+        {"required": ["parcel_id"]},
+        {"required": ["address"]},
+    ]
     assert spec_by_name["get_permits_for_parcel"]["input_schema"]["required"] == [
         "parcel_id"
     ]
@@ -769,6 +774,160 @@ def test_get_permits_payload_prefers_extracted_values_before_raw_fallback(
     assert match["description"] == "Extracted description"
 
 
+def test_get_articles_about_parcel_or_address_uses_apn_project_crosswalk(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent1_tables(postgres_session)
+    source = _news_source()
+    article = _news_article(
+        source,
+        title="Permit Crosswalk Apartments advance",
+        body_text="Permit Crosswalk Apartments received coverage near the permit parcel.",
+    )
+    project = Project(
+        canonical_address="1500 PERMIT CROSSWALK AVENUE LOS ANGELES CA 90012",
+        raw_addresses=["1500 Permit Crosswalk Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Permit Crosswalk Apartments",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=120,
+    )
+    postgres_session.add_all([source, article, project])
+    postgres_session.flush()
+    permit_evidence = Evidence(
+        project_id=project.id,
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="test",
+        source_record_id="24010-10000-01000",
+        collected_at=datetime(2026, 5, 10, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 10),
+        raw_data={"permit_nbr": "24010-10000-01000", "apn": "5146-013-024"},
+        raw_data_hash=uuid.uuid4().hex,
+        extracted_fields={"apn": {"value": "5146013024", "confidence": None}},
+    )
+    extraction = _news_extraction(article)
+    postgres_session.add_all([permit_evidence, extraction])
+    postgres_session.flush()
+    reference = NewsProjectReference(
+        article_id=article.id,
+        extraction_id=extraction.id,
+        reference_index=0,
+        candidate_name="Permit Crosswalk Apartments",
+        candidate_address="1500 Permit Crosswalk Ave",
+        candidate_city="Los Angeles",
+        candidate_developer="Crosswalk Sponsor",
+        candidate_unit_total=120,
+        candidate_confidence="high",
+        match_status=NewsMatchStatus.CONFIRMED.value,
+        matched_project_id=project.id,
+        passage_excerpts=[
+            {
+                "field": "candidate_name",
+                "value": "Permit Crosswalk Apartments",
+                "passage": "Permit Crosswalk Apartments would bring 120 homes.",
+            }
+        ],
+    )
+    postgres_session.add(reference)
+    postgres_session.flush()
+    news_evidence = Evidence(
+        project_id=project.id,
+        source_type="news_article",
+        source_tier=2,
+        ingest_method="test",
+        source_record_id=str(reference.id),
+        collected_at=datetime(2026, 5, 11, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 11),
+        raw_data={"article_id": str(article.id)},
+        raw_data_hash=uuid.uuid4().hex,
+        extracted_fields={"total_units": {"value": 120, "confidence": "high"}},
+        notes="Accepted news coverage for the crosswalk project.",
+    )
+    postgres_session.add(news_evidence)
+    postgres_session.flush()
+    reference.matched_evidence_id = news_evidence.id
+    postgres_session.flush()
+    request = _permit_agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_articles_about_parcel_or_address",
+        tool_input={"parcel_id": "5146-013-024"},
+        profile=PERMIT_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content.get("truncated") is not True
+    assert result.content["normalized_parcel_id"] == "5146013024"
+    assert result.content["total_returned"] == 1
+    match = result.content["matches"][0]
+    assert match["match_basis"] == "parcel_project_news_evidence"
+    assert match["article_id"] == str(article.id)
+    assert match["evidence_id"] == str(news_evidence.id)
+    assert match["project_id"] == str(project.id)
+    assert match["candidate_unit_total"] == 120
+    assert match["excerpt"] == "Permit Crosswalk Apartments would bring 120 homes."
+
+
+def test_get_articles_about_parcel_or_address_matches_normalized_reference_address(
+    postgres_session: Session,
+) -> None:
+    _ensure_agent1_tables(postgres_session)
+    source = _news_source()
+    article = _news_article(
+        source,
+        title="Address-only reference",
+        body_text="The address-only project was mentioned without a matched project.",
+    )
+    postgres_session.add_all([source, article])
+    postgres_session.flush()
+    extraction = _news_extraction(article)
+    postgres_session.add(extraction)
+    postgres_session.flush()
+    reference = NewsProjectReference(
+        article_id=article.id,
+        extraction_id=extraction.id,
+        reference_index=0,
+        candidate_name="Address Only Residences",
+        candidate_address="777 Permit News Ave",
+        candidate_city="Los Angeles",
+        candidate_developer="Address Sponsor",
+        candidate_confidence="medium",
+        match_status=NewsMatchStatus.PENDING.value,
+        passage_excerpts=[
+            {
+                "field": "candidate_address",
+                "value": "777 Permit News Ave",
+                "passage": "The project at 777 Permit News Ave remains in review.",
+            }
+        ],
+    )
+    postgres_session.add(reference)
+    postgres_session.flush()
+    request = _permit_agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_articles_about_parcel_or_address",
+        tool_input={"address": "777 Permit News Avenue, Los Angeles, CA"},
+        profile=PERMIT_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content["normalized_address"] == "777 PERMIT NEWS AVENUE LOS ANGELES CA"
+    assert result.content["total_returned"] == 1
+    match = result.content["matches"][0]
+    assert match["match_basis"] == "address_reference_exact"
+    assert match["article_id"] == str(article.id)
+    assert match["reference_id"] == str(reference.id)
+    assert "evidence_id" not in match
+    assert match["excerpt"] == "The project at 777 Permit News Ave remains in review."
+
+
 def test_get_permits_for_parcel_requires_session_factory() -> None:
     request = AgentRunRequest(
         intake=IntakeRecord(
@@ -784,6 +943,32 @@ def test_get_permits_for_parcel_requires_session_factory() -> None:
     with pytest.raises(AgentToolError, match="requires a session_factory"):
         registry.dispatch(
             tool_name="get_permits_for_parcel",
+            tool_input={"parcel_id": "5146013024"},
+            profile=PERMIT_AGENT_PROFILE,
+            request=request,
+        )
+
+
+def test_get_articles_about_parcel_or_address_requires_input() -> None:
+    request = _permit_agent_request_without_session()
+    registry = build_agent_tool_registry()
+
+    with pytest.raises(AgentToolError, match="parcel_id or address"):
+        registry.dispatch(
+            tool_name="get_articles_about_parcel_or_address",
+            tool_input={},
+            profile=PERMIT_AGENT_PROFILE,
+            request=request,
+        )
+
+
+def test_get_articles_about_parcel_or_address_requires_session_factory() -> None:
+    request = _permit_agent_request_without_session()
+    registry = build_agent_tool_registry()
+
+    with pytest.raises(AgentToolError, match="requires a session_factory"):
+        registry.dispatch(
+            tool_name="get_articles_about_parcel_or_address",
             tool_input={"parcel_id": "5146013024"},
             profile=PERMIT_AGENT_PROFILE,
             request=request,
@@ -869,6 +1054,19 @@ def _permit_agent_request(postgres_session: Session) -> AgentRunRequest:
         trigger_reasons=("new_candidate",),
         profile=PERMIT_AGENT_PROFILE,
         session_factory=factory,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+
+
+def _permit_agent_request_without_session() -> AgentRunRequest:
+    return AgentRunRequest(
+        intake=IntakeRecord(
+            source_type="ladbs_permit",
+            intake_record_id="24010-10000-00001",
+        ),
+        matcher_results=(),
+        trigger_reasons=("new_candidate",),
+        profile=PERMIT_AGENT_PROFILE,
         settings=Settings(agent_enabled_for_permits=True),
     )
 
