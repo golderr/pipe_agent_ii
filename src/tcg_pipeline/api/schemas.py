@@ -246,12 +246,13 @@ class ActivityArticleSummary(BaseModel):
 
 
 class ActivityPermitSummary(BaseModel):
-    """Reserved Activity intake branch for AGENT.3 permit events."""
-
+    source_record_id: str | None = None
     permit_number: str | None = None
     permit_type: str | None = None
     issue_date: str | None = None
     address: str | None = None
+    apn: str | None = None
+    status: str | None = None
 
 
 class ActivityIntakeSummary(BaseModel):

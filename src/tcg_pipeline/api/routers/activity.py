@@ -21,6 +21,7 @@ from tcg_pipeline.api.schemas import (
     ActivityEvidenceSummary,
     ActivityFeedResponse,
     ActivityIntakeSummary,
+    ActivityPermitSummary,
     ActivityProjectSummary,
     ActivitySemanticMetricResponse,
     ActivitySemanticMetricsResponse,
@@ -63,6 +64,7 @@ INTAKE_KIND_LABELS = {
     "costar": "CoStar upload",
     "pipedream": "Pipedream import",
 }
+PERMIT_ACTIVITY_SOURCE_TYPES = ("ladbs_permit", "ladbs_inspection", "ladbs_cofo")
 SEMANTIC_LOGICAL_SOURCE = "semantic.news_v1"
 SEMANTIC_SOURCE_LABEL = "Semantic Pass 2c"
 SEMANTIC_GAP_RATE_THRESHOLD = 0.15
@@ -1408,6 +1410,7 @@ def _agent_events_by_ids(
         session,
         [article.news_source_id for article in articles.values()],
     )
+    permit_evidence_by_record = _permit_evidence_by_intake_record(session, rows)
     evidence_context = _agent_evidence_context(session, rows)
     events: dict[uuid.UUID, ActivityEventResponse] = {}
     for row in rows:
@@ -1420,6 +1423,7 @@ def _agent_events_by_ids(
             review_item_ids=review_item_ids_by_agent.get(row.id, []),
             article=article,
             news_source=news_source,
+            permit_evidence=permit_evidence_by_record.get(row.intake_record_id),
             evidence_refs=evidence_context.refs_by_agent.get(row.id, []),
             evidence_context=evidence_context,
         )
@@ -1638,6 +1642,7 @@ def _agent_events(
         session,
         [article.news_source_id for article in articles.values()],
     )
+    permit_evidence_by_record = _permit_evidence_by_intake_record(session, rows)
     evidence_context = _agent_evidence_context(session, rows)
     events: list[ActivityEventResponse] = []
     for row in rows:
@@ -1651,6 +1656,7 @@ def _agent_events(
                 review_item_ids=review_item_ids_by_agent.get(row.id, []),
                 article=article,
                 news_source=news_source,
+                permit_evidence=permit_evidence_by_record.get(row.intake_record_id),
                 evidence_refs=evidence_context.refs_by_agent.get(row.id, []),
                 evidence_context=evidence_context,
             )
@@ -1665,6 +1671,7 @@ def _agent_event(
     review_item_ids: list[uuid.UUID],
     article: NewsArticle | None,
     news_source: NewsSource | None,
+    permit_evidence: Evidence | None,
     evidence_refs: list[_AgentEvidenceRef],
     evidence_context: _AgentEvidenceContext,
 ) -> ActivityEventResponse:
@@ -1695,7 +1702,12 @@ def _agent_event(
         summary=f"{_source_label(row.outcome)} after {row.tool_calls_count} tool calls",
         review_item_ids=review_item_ids,
         article=article_summary,
-        intake_summary=_intake_summary_for_agent_run(row, article_summary),
+        intake_summary=_intake_summary_for_agent_run(
+            row,
+            article_summary,
+            permit_evidence=permit_evidence,
+            project=project,
+        ),
         article_fetched_at=article_summary.fetched_at if article_summary else None,
         agent_created_at=row.created_at.isoformat(),
         agent_outcome=row.outcome,
@@ -1940,12 +1952,99 @@ def _news_article_intake_summary(
 def _intake_summary_for_agent_run(
     row: AgentRun,
     article_summary: ActivityArticleSummary | None,
+    *,
+    permit_evidence: Evidence | None,
+    project: Project | None,
 ) -> ActivityIntakeSummary | None:
     if row.intake_source_type == "news_article":
         return _news_article_intake_summary(article_summary)
+    if row.intake_source_type == "ladbs_permit":
+        return _permit_intake_summary(row, permit_evidence=permit_evidence, project=project)
     return ActivityIntakeSummary(
         kind=row.intake_source_type,
         label=INTAKE_KIND_LABELS.get(row.intake_source_type, _source_label(row.intake_source_type)),
+    )
+
+
+def _permit_intake_summary(
+    row: AgentRun,
+    *,
+    permit_evidence: Evidence | None,
+    project: Project | None,
+) -> ActivityIntakeSummary:
+    permit = ActivityPermitSummary(
+        source_record_id=row.intake_record_id,
+        permit_number=_permit_field_value(
+            permit_evidence,
+            "permit_number",
+            "permit_nbr",
+            "pcis_permit",
+            "cofo_number",
+        )
+        or row.intake_record_id,
+        permit_type=_permit_field_value(permit_evidence, "permit_type", "permit_sub_type"),
+        issue_date=_permit_field_value(
+            permit_evidence,
+            "permit_issue_date",
+            "issue_date",
+            "status_evidence_date",
+            "inspection_date",
+            "cofo_issue_date",
+        ),
+        address=(
+            _permit_address(permit_evidence)
+            or (project.canonical_address if project else None)
+        ),
+        apn=_permit_field_value(permit_evidence, "apn"),
+        status=_permit_field_value(
+            permit_evidence,
+            "status_desc",
+            "latest_status",
+            "status_evidence_type",
+        ),
+    )
+    label_parts = [
+        permit.permit_number,
+        permit.permit_type,
+        permit.address,
+    ]
+    label = " | ".join(part for part in label_parts if part)
+    return ActivityIntakeSummary(
+        kind=row.intake_source_type,
+        label=label or INTAKE_KIND_LABELS["ladbs_permit"],
+        permit=permit,
+    )
+
+
+def _permit_field_value(evidence: Evidence | None, *field_names: str) -> str | None:
+    if evidence is None:
+        return None
+    extracted_fields = (
+        evidence.extracted_fields if isinstance(evidence.extracted_fields, dict) else {}
+    )
+    raw_data = evidence.raw_data if isinstance(evidence.raw_data, dict) else {}
+    for field_name in field_names:
+        extracted = extracted_fields.get(field_name)
+        if isinstance(extracted, dict):
+            value = _clean_text(extracted.get("value"))
+            if value is not None:
+                return value
+        value = _clean_text(raw_data.get(field_name))
+        if value is not None:
+            return value
+    return None
+
+
+def _permit_address(evidence: Evidence | None) -> str | None:
+    if evidence is None:
+        return None
+    return _permit_field_value(
+        evidence,
+        "canonical_address",
+        "primary_address",
+        "address",
+        "site_address",
+        "street_address",
     )
 
 
@@ -2161,6 +2260,43 @@ def _news_sources_by_id(
         return {}
     rows = session.execute(select(NewsSource).where(NewsSource.id.in_(ids))).scalars().all()
     return {row.id: row for row in rows}
+
+
+def _permit_evidence_by_intake_record(
+    session: Session,
+    rows: list[AgentRun],
+) -> dict[str, Evidence]:
+    intake_record_ids = sorted(
+        {
+            row.intake_record_id
+            for row in rows
+            if row.intake_source_type == "ladbs_permit" and row.intake_record_id
+        }
+    )
+    if not intake_record_ids:
+        return {}
+    evidence_rows = (
+        session.execute(
+            select(Evidence)
+            .where(
+                Evidence.source_type.in_(PERMIT_ACTIVITY_SOURCE_TYPES),
+                Evidence.superseded_at.is_(None),
+                Evidence.source_record_id.in_(intake_record_ids),
+            )
+            .order_by(
+                Evidence.collected_at.desc(),
+                Evidence.evidence_date.desc().nulls_last(),
+                Evidence.id.desc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    evidence_by_record: dict[str, Evidence] = {}
+    for evidence in evidence_rows:
+        if evidence.source_record_id is not None:
+            evidence_by_record.setdefault(evidence.source_record_id, evidence)
+    return evidence_by_record
 
 
 def _news_article_id(row: AgentRun) -> uuid.UUID | None:

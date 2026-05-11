@@ -19,10 +19,13 @@ export type ActivityArticleSummary = {
 };
 
 export type ActivityPermitSummary = {
+  source_record_id: string | null;
   permit_number: string | null;
   permit_type: string | null;
   issue_date: string | null;
   address: string | null;
+  apn: string | null;
+  status: string | null;
 };
 
 export type ActivityIntakeSummary = {

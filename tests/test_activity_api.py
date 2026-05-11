@@ -831,7 +831,7 @@ def test_activity_resolution_event_dispatches_mixed_source_snippets(
     assert event.evidence_summaries[2].summary == "pipeline_status: Approved"
 
 
-def test_activity_feed_agent_event_exposes_generic_non_news_intake_summary(
+def test_activity_feed_agent_event_exposes_permit_intake_summary(
     postgres_session: Session,
 ) -> None:
     project = _project(postgres_session, "175 Permit Activity Way")
@@ -841,6 +841,25 @@ def test_activity_feed_agent_event_exposes_generic_non_news_intake_summary(
         intake_source_type="ladbs_permit",
         intake_record_id="2026LA12345",
         profile_name="permit_v1",
+    )
+    _evidence(
+        postgres_session,
+        project,
+        source_type="ladbs_permit",
+        source_tier=1,
+        source_record_id="2026LA12345",
+        field_name="pipeline_status",
+        value="Approved",
+        raw_data={
+            "permit_nbr": "2026LA12345",
+            "primary_address": "175 Permit Activity Way",
+            "status_desc": "Issued",
+        },
+        extracted_fields={
+            "permit_type": {"value": "Bldg-New", "confidence": "high"},
+            "permit_issue_date": {"value": "2026-05-10", "confidence": "high"},
+            "apn": {"value": "5146013024", "confidence": "high"},
+        },
     )
 
     response = list_activity_events(
@@ -855,7 +874,16 @@ def test_activity_feed_agent_event_exposes_generic_non_news_intake_summary(
     assert event.article is None
     assert event.intake_summary is not None
     assert event.intake_summary.kind == "ladbs_permit"
-    assert event.intake_summary.label == "LADBS permit"
+    assert event.intake_summary.label == (
+        "2026LA12345 | Bldg-New | 175 Permit Activity Way"
+    )
+    assert event.intake_summary.permit is not None
+    assert event.intake_summary.permit.permit_number == "2026LA12345"
+    assert event.intake_summary.permit.permit_type == "Bldg-New"
+    assert event.intake_summary.permit.issue_date == "2026-05-10"
+    assert event.intake_summary.permit.address == "175 Permit Activity Way"
+    assert event.intake_summary.permit.apn == "5146013024"
+    assert event.intake_summary.permit.status == "Issued"
 
 
 def test_activity_feed_non_news_orphan_agent_keeps_intake_summary(
@@ -873,7 +901,7 @@ def test_activity_feed_non_news_orphan_agent_keeps_intake_summary(
         user=_auth_user(),
         session=postgres_session,
         event_type="agent",
-        limit=10,
+        limit=100,
     )
 
     event = next(item for item in response.events if item.id == f"agent:{agent_run.id}")
@@ -881,7 +909,10 @@ def test_activity_feed_non_news_orphan_agent_keeps_intake_summary(
     assert event.article is None
     assert event.intake_summary is not None
     assert event.intake_summary.kind == "ladbs_permit"
-    assert event.intake_summary.label == "LADBS permit"
+    assert event.intake_summary.label == "2026LA67890"
+    assert event.intake_summary.permit is not None
+    assert event.intake_summary.permit.permit_number == "2026LA67890"
+    assert event.intake_summary.permit.source_record_id == "2026LA67890"
 
 
 def test_activity_feed_news_agent_missing_article_keeps_intake_discriminator(

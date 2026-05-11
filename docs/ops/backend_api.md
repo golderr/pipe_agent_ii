@@ -104,9 +104,10 @@ agent decision time when child-job queue depth creates lag.
 Activity rows also include `intake_summary`, a source-typed wrapper for the
 record that produced the event. Today this is populated as
 `{kind: "news_article", article: ...}` for news agent and Pass 2c semantic
-events, while non-news agent rows get a generic `{kind, label}` placeholder.
-AGENT.3 permit work will fill the `permit` branch without changing the top-level
-activity event shape.
+events. Permit agent rows populate `{kind: "ladbs_permit", permit: ...}` from
+the active LADBS evidence row whose `source_record_id` matches
+`agent_runs.intake_record_id`, with source-record/project fallbacks when the
+evidence row is unavailable. The top-level Activity event shape is unchanged.
 
 ## Required Environment
 

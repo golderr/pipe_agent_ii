@@ -728,5 +728,15 @@ function detailBoolean(event: ActivityEvent, key: string) {
 }
 
 function intakeSummaryLabel(summary: NonNullable<ActivityEvent["intake_summary"]>) {
+  if (summary.permit) {
+    return [
+      summary.permit.permit_number ?? summary.permit.source_record_id,
+      summary.permit.permit_type,
+      summary.permit.issue_date,
+      summary.permit.address,
+    ]
+      .filter(Boolean)
+      .join(" | ") || summary.label || summary.kind;
+  }
   return summary.label ?? summary.kind;
 }
