@@ -48,6 +48,7 @@ from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
 )
+from tcg_pipeline.semantic.ladbs import enrich_ladbs_mapped_fields
 from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.source_tiers import get_logical_source_type
 from tcg_pipeline.status_rules import build_status_suggestion
@@ -137,6 +138,12 @@ def persist_collected_records(
     )
 
     for raw_record in raw_records:
+        # The collector consumes each RawRecord once; enrich in place so matching, evidence,
+        # resolution, and agent-trigger detection all see the same deterministic semantics.
+        raw_record.mapped_fields = enrich_ladbs_mapped_fields(
+            source_name=raw_record.source_name,
+            mapped_fields=raw_record.mapped_fields,
+        )
         match_result = match_raw_record(session, market=market, raw_record=raw_record)
         if match_result.project_id is None:
             if _is_dismissed_source_record(
@@ -544,10 +551,13 @@ def _permit_agent_triggers_for_matched_record(
         _coerce_int(raw_record.mapped_fields.get("total_units")),
     ):
         triggers.append(AgentTrigger.UNIT_DELTA)
-    # Real LADBS rows do not emit product_type until the deterministic LADBS
-    # semantic port lands; this trigger is currently wired but inert in production.
     new_product_type = _coerce_product_type(raw_record.mapped_fields.get("product_type"))
-    if new_product_type is not None and new_product_type != previous_snapshot.product_type:
+    if (
+        previous_snapshot.product_type is not None
+        and previous_snapshot.product_type != ProductType.UNKNOWN
+        and new_product_type is not None
+        and new_product_type != previous_snapshot.product_type
+    ):
         triggers.append(AgentTrigger.PRODUCT_TYPE_CHANGE)
     return tuple(triggers)
 

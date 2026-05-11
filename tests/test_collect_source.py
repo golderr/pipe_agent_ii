@@ -891,7 +891,7 @@ def test_persist_collected_records_routes_ladbs_product_type_change_to_agent(
             "status_evidence_type": "building_permit_issued",
             "status_evidence_date": "2026-03-02",
             "total_units": 100,
-            "product_type": "Condo",
+            "description": "Construct new 100-unit condominium building.",
         },
         source_row_hash="product-type-agent-hash",
     )
@@ -913,6 +913,10 @@ def test_persist_collected_records_routes_ladbs_product_type_change_to_agent(
     assert request.trigger_reasons == ("product_type_change",)
     assert request.intake.project_id == project.id
     assert request.intake.payload["mapped_fields"]["product_type"] == "Condo"
+    assert (
+        request.intake.payload["mapped_fields"]["description"]
+        == "Construct new 100-unit condominium building."
+    )
 
     agent_run = postgres_session.execute(
         select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
@@ -920,6 +924,74 @@ def test_persist_collected_records_routes_ladbs_product_type_change_to_agent(
     assert agent_run.profile_name == "permit_v1"
     assert agent_run.project_id == project.id
     assert agent_run.triggered_by == ["product_type_change"]
+    evidence = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.source_type == "ladbs_permit",
+            Evidence.source_record_id == "12010-30000-10001",
+        )
+    ).scalar_one()
+    assert evidence.extracted_fields["product_type"]["value"] == "Condo"
+    assert evidence.extracted_fields["product_type"]["confidence"] == "medium"
+    assert evidence.extracted_fields["product_type"]["semantic"]["reason_code"] == (
+        "ladbs_product_type_condo"
+    )
+
+
+def test_persist_collected_records_does_not_route_initial_ladbs_product_type(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="9508 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9508 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10008",
+        raw_payload={"pcis_permit": "12010-30000-10008"},
+        canonical_address="9508 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10008"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 100,
+            "description": "Construct new 100-unit apartment building.",
+        },
+        source_row_hash="initial-product-type-agent-hash",
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert client.requests == []
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one_or_none()
+    assert agent_run is None
+    evidence = postgres_session.execute(
+        select(Evidence).where(
+            Evidence.source_type == "ladbs_permit",
+            Evidence.source_record_id == "12010-30000-10008",
+        )
+    ).scalar_one()
+    assert evidence.extracted_fields["product_type"]["value"] == "Apartment"
 
 
 def test_persist_collected_records_routes_combined_ladbs_triggers_to_one_agent_run(
@@ -949,7 +1021,7 @@ def test_persist_collected_records_routes_combined_ladbs_triggers_to_one_agent_r
             "status_evidence_type": "building_permit_issued",
             "status_evidence_date": "2026-03-02",
             "total_units": 112,
-            "product_type": "Condo",
+            "description": "Construct new 112-unit condominium building.",
         },
         source_row_hash="combined-agent-hash",
     )

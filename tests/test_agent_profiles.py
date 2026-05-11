@@ -48,7 +48,12 @@ def test_permit_agent_profile_contract() -> None:
     assert "get_permits_for_parcel" in profile.allowed_tools
     assert "get_permits_for_project" in profile.allowed_tools
     assert "get_article_body" not in profile.allowed_tools
-    assert dict(profile.semantic_interpreters) == {}
+    assert set(profile.semantic_interpreters) == {"product_type"}
+    assert profile.semantic_interpreters["product_type"].deterministic_first is True
+    assert (
+        profile.semantic_interpreters["product_type"].llm_allowed_for_ambiguous_language
+        is False
+    )
     assert profile.required_intake_fields == frozenset()
 
 

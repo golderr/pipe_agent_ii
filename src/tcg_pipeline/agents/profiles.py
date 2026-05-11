@@ -91,9 +91,15 @@ NEWS_SEMANTIC_INTERPRETERS = MappingProxyType(
         "unit_buckets": SemanticInterpreterProfile("unit_buckets"),
     }
 )
-# AGENT.3 first wires the source profile and tools. The deterministic LADBS
-# semantic port will populate this mapping when the integration slice lands.
-PERMIT_SEMANTIC_INTERPRETERS = MappingProxyType({})
+PERMIT_SEMANTIC_INTERPRETERS = MappingProxyType(
+    {
+        "product_type": SemanticInterpreterProfile(
+            "product_type",
+            deterministic_first=True,
+            llm_allowed_for_ambiguous_language=False,
+        ),
+    }
+)
 
 NEWS_AGENT_PROFILE = SourceProfile(
     name="news_v1",

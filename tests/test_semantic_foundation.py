@@ -39,6 +39,11 @@ def test_reason_code_registry_contains_step7_critical_codes() -> None:
         "news_age_restriction_unmappable",
         "news_delivery_date_unmappable",
         "news_tenure_unmappable",
+        "ladbs_product_type_apartment",
+        "ladbs_product_type_condo",
+        "ladbs_product_type_townhome",
+        "ladbs_product_type_single_family",
+        "ladbs_product_type_micro_co_living",
     }
 
     assert expected <= set(REASON_CODES_BY_CODE)
@@ -69,7 +74,7 @@ def test_reason_code_registry_contains_future_scope_placeholders() -> None:
 
 
 def test_reason_code_registry_count_is_stable() -> None:
-    assert len(REASON_CODES_BY_CODE) == 75
+    assert len(REASON_CODES_BY_CODE) == 80
 
 
 def test_review_item_templates_stay_in_allowed_vocabulary() -> None:
@@ -113,6 +118,9 @@ def test_reason_codes_group_by_source_profile_and_field() -> None:
 
     workforce_codes = REASON_CODES_BY_PROFILE_FIELD[("news_v1", "workforce_units")]
     assert set(workforce_codes) == {"news_units_workforce_explicit"}
+
+    permit_product_codes = REASON_CODES_BY_PROFILE_FIELD[("permit_v1", "product_type")]
+    assert "ladbs_product_type_apartment" in permit_product_codes
 
 
 def test_reason_code_registry_accepts_market_extensions() -> None:

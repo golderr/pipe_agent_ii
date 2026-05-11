@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 
 from tcg_pipeline.collectors.base import RawRecord
 from tcg_pipeline.db.models import Evidence, Project, ProjectSourceRecord
+from tcg_pipeline.semantic.ladbs import ladbs_semantic_metadata_by_field
+from tcg_pipeline.semantic.types import SemanticInterpretation
 from tcg_pipeline.source_tiers import get_logical_source_type, get_source_tier
 
 PIPEDREAM_SNAPSHOT_FIELDS = (
@@ -184,6 +186,12 @@ def write_evidence(
 ) -> EvidenceWriteResult:
     source_type = get_logical_source_type(source_name)
     wrapped_fields = extracted_fields or wrap_extracted_fields(dict(mapped_fields or {}))
+    if extracted_fields is None:
+        _apply_ladbs_semantic_metadata(
+            wrapped_fields,
+            source_name=source_name,
+            mapped_fields=mapped_fields or {},
+        )
     serialized_raw_data = serialize_json(raw_data) if raw_data is not None else None
     effective_raw_data_hash = raw_data_hash or compute_evidence_hash(
         raw_data=serialized_raw_data,
@@ -235,6 +243,47 @@ def wrap_extracted_fields(fields: Mapping[str, Any]) -> dict[str, dict[str, Any]
             continue
         wrapped[str(field_name)] = {"value": serialized, "confidence": None}
     return wrapped
+
+
+def _apply_ladbs_semantic_metadata(
+    wrapped_fields: dict[str, dict[str, Any]],
+    *,
+    source_name: str,
+    mapped_fields: Mapping[str, Any],
+) -> None:
+    for field_name, interpretation in ladbs_semantic_metadata_by_field(
+        source_name=source_name,
+        mapped_fields=mapped_fields,
+    ).items():
+        if field_name not in wrapped_fields:
+            continue
+        wrapped_fields[field_name].update(_semantic_field_payload(interpretation))
+
+
+def _semantic_field_payload(interpretation: SemanticInterpretation) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "confidence": interpretation.confidence,
+        "semantic": {
+            "reason_code": interpretation.reason_code,
+            "requires_corroboration": interpretation.requires_corroboration,
+            "promotes_status_alone": False,
+            "review_item_template": None,
+        },
+    }
+    highlights = [
+        {
+            "field": anchor.field_name or interpretation.field_name,
+            "value": serialize_json(interpretation.canonical_value),
+            "passage": anchor.text,
+            "offset_start": anchor.offset_start,
+            "offset_end": anchor.offset_end,
+            "reason_code": interpretation.reason_code,
+        }
+        for anchor in interpretation.source_anchors
+    ]
+    if highlights:
+        payload["highlights"] = highlights
+    return payload
 
 
 def derive_evidence_date(

@@ -279,6 +279,53 @@ NEWS_PRODUCT_TYPE_REASON_CODES: Mapping[str, ReasonCode] = {
 }
 
 
+LADBS_PRODUCT_TYPE_REASON_CODES: Mapping[str, ReasonCode] = {
+    code.code: code
+    for code in (
+        _reason(
+            "ladbs_product_type_apartment",
+            "product_type",
+            "LADBS apartment product type",
+            description="LADBS permit row describes apartment residential use.",
+            confidence_default="high",
+            source_profile="permit_v1",
+        ),
+        _reason(
+            "ladbs_product_type_condo",
+            "product_type",
+            "LADBS condo product type",
+            description="LADBS permit row describes condominium residential use.",
+            confidence_default="high",
+            source_profile="permit_v1",
+        ),
+        _reason(
+            "ladbs_product_type_townhome",
+            "product_type",
+            "LADBS townhome product type",
+            description="LADBS permit row describes townhome or townhouse residential use.",
+            confidence_default="high",
+            source_profile="permit_v1",
+        ),
+        _reason(
+            "ladbs_product_type_single_family",
+            "product_type",
+            "LADBS single-family product type",
+            description="LADBS permit row describes single-family or 1-2 family dwelling use.",
+            confidence_default="medium",
+            source_profile="permit_v1",
+        ),
+        _reason(
+            "ladbs_product_type_micro_co_living",
+            "product_type",
+            "LADBS micro/co-living product type",
+            description="LADBS permit row describes micro-unit or co-living residential use.",
+            confidence_default="high",
+            source_profile="permit_v1",
+        ),
+    )
+}
+
+
 NEWS_MISC_REASON_CODES: Mapping[str, ReasonCode] = {
     code.code: code
     for code in (
@@ -683,6 +730,7 @@ REASON_CODE_GROUPS: Mapping[str, Mapping[str, ReasonCode]] = {
     "news_v1.pipeline_status": NEWS_STATUS_REASON_CODES,
     "news_v1.product_type": NEWS_PRODUCT_TYPE_REASON_CODES,
     "news_v1.misc": NEWS_MISC_REASON_CODES,
+    "permit_v1.product_type": LADBS_PRODUCT_TYPE_REASON_CODES,
 }
 
 REASON_CODES_BY_CODE: Mapping[str, ReasonCode] = _build_by_code(REASON_CODE_GROUPS.values())
