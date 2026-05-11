@@ -12,6 +12,8 @@ from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROP
 AGENT_PROMPT_ROOT = Path(__file__).parent / "prompts"
 NEWS_AGENT_PROMPT_VERSION = "agent_news_v1"
 NEWS_AGENT_PROFILE_VERSION = "1.0.0"
+PERMIT_AGENT_PROMPT_VERSION = "agent_permit_v1"
+PERMIT_AGENT_PROFILE_VERSION = "1.0.0"
 DEFAULT_AGENT_MAX_TOOL_CALLS = 15
 DEFAULT_AGENT_MAX_COST_USD = Decimal("5.00")
 DEFAULT_AGENT_MAX_WALLCLOCK_SECONDS = 300
@@ -22,6 +24,8 @@ class AgentTrigger(enum.StrEnum):
     PASS1_PASS2_CONFLICT = "pass1_pass2_conflict"
     LOW_CONFIDENCE = "low_confidence"
     NEW_CANDIDATE = "new_candidate"
+    UNIT_DELTA = "unit_delta"
+    PRODUCT_TYPE_CHANGE = "product_type_change"
     # Historical string kept for audit continuity; the gate covers any
     # deterministic possible match with candidate_project_ids, including one
     # candidate, because the agent action is still "pick from matcher choices."
@@ -63,16 +67,19 @@ class SourceProfile:
 CORE_AGENT_TOOLS = frozenset(
     {
         "get_project_state",
-        "get_project_evidence",
         "search_projects",
-        "search_articles_by_address",
     }
 )
 NEWS_AGENT_TOOLS = frozenset(
     {
         "get_article_body",
-        "search_articles_by_project",
         "search_articles_similar",
+    }
+)
+PERMIT_AGENT_TOOLS = frozenset(
+    {
+        "get_permits_for_parcel",
+        "get_permits_for_project",
     }
 )
 NEWS_SEMANTIC_INTERPRETERS = MappingProxyType(
@@ -84,6 +91,9 @@ NEWS_SEMANTIC_INTERPRETERS = MappingProxyType(
         "unit_buckets": SemanticInterpreterProfile("unit_buckets"),
     }
 )
+# AGENT.3 first wires the source profile and tools. The deterministic LADBS
+# semantic port will populate this mapping when the integration slice lands.
+PERMIT_SEMANTIC_INTERPRETERS = MappingProxyType({})
 
 NEWS_AGENT_PROFILE = SourceProfile(
     name="news_v1",
@@ -99,9 +109,29 @@ NEWS_AGENT_PROFILE = SourceProfile(
     prompt_version=NEWS_AGENT_PROMPT_VERSION,
     required_intake_fields=frozenset({"extraction_id"}),
 )
+PERMIT_AGENT_PROFILE = SourceProfile(
+    name="permit_v1",
+    intake_source_type="ladbs_permit",
+    triggers=frozenset(
+        {
+            AgentTrigger.NEW_CANDIDATE.value,
+            AgentTrigger.UNIT_DELTA.value,
+            AgentTrigger.PRODUCT_TYPE_CHANGE.value,
+        }
+    ),
+    allowed_tools=CORE_AGENT_TOOLS | PERMIT_AGENT_TOOLS,
+    system_prompt_path=AGENT_PROMPT_ROOT / "permit_v1" / "system.md",
+    cost_cap_bucket="permits",
+    kill_switch_setting="agent_enabled_for_permits",
+    semantic_interpreters=PERMIT_SEMANTIC_INTERPRETERS,
+    capability_key="agent.permit_v1",
+    profile_version=PERMIT_AGENT_PROFILE_VERSION,
+    prompt_version=PERMIT_AGENT_PROMPT_VERSION,
+)
 SOURCE_PROFILES: Mapping[str, SourceProfile] = MappingProxyType(
     {
         NEWS_AGENT_PROFILE.name: NEWS_AGENT_PROFILE,
+        PERMIT_AGENT_PROFILE.name: PERMIT_AGENT_PROFILE,
     }
 )
 

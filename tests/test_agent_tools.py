@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session, sessionmaker
 
-from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE
+from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE, PERMIT_AGENT_PROFILE
 from tcg_pipeline.agents.project_tools import (
     GET_PROJECT_STATE_OUTPUT_TOKEN_BUDGET,
     handle_get_project_state,
@@ -113,6 +113,26 @@ def test_default_tool_registry_includes_get_project_state() -> None:
     assert spec_by_name["get_article_body"]["input_schema"]["required"] == ["article_id"]
     assert spec_by_name["search_articles_similar"]["input_schema"]["required"] == ["query_text"]
     assert "query_text" in spec_by_name["search_projects"]["input_schema"]["properties"]
+
+
+def test_default_tool_registry_includes_permit_profile_tools() -> None:
+    registry = build_agent_tool_registry()
+
+    specs = registry.tool_specs_for_profile(PERMIT_AGENT_PROFILE)
+
+    assert [spec["name"] for spec in specs] == [
+        "get_permits_for_parcel",
+        "get_permits_for_project",
+        "get_project_state",
+        "search_projects",
+    ]
+    spec_by_name = {spec["name"]: spec for spec in specs}
+    assert spec_by_name["get_permits_for_parcel"]["input_schema"]["required"] == [
+        "parcel_id"
+    ]
+    assert spec_by_name["get_permits_for_project"]["input_schema"]["required"] == [
+        "project_id"
+    ]
 
 
 def test_get_project_state_requires_session_factory() -> None:
@@ -509,6 +529,267 @@ def test_search_articles_similar_requires_query_text() -> None:
         )
 
 
+def test_get_permits_for_project_returns_ladbs_evidence(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="1200 PERMIT TOOL WAY LOS ANGELES CA 90012",
+        raw_addresses=["1200 Permit Tool Way"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Permit Tool Apartments",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    permit = Evidence(
+        project_id=project.id,
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="test",
+        source_record_id="24010-10000-00001",
+        collected_at=datetime(2026, 5, 10, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 10),
+        raw_data={"permit_nbr": "24010-10000-00001", "apn": "5146013024"},
+        raw_data_hash=uuid.uuid4().hex,
+        extracted_fields={
+            "apn": {"value": "5146013024", "confidence": None},
+            "permit_type": {"value": "Bldg-New", "confidence": None},
+            "permit_sub_type": {"value": "Apartment", "confidence": None},
+            "permit_issue_date": {"value": "2026-05-10", "confidence": None},
+            "description": {
+                "value": "Construct new six-story apartment building.",
+                "confidence": None,
+            },
+            "valuation": {"value": 10_000_000, "confidence": None},
+            "total_units": {"value": 118, "confidence": None},
+        },
+    )
+    inspection = Evidence(
+        project_id=project.id,
+        source_type="ladbs_inspection",
+        source_tier=1,
+        ingest_method="test",
+        source_record_id="inspection-1",
+        collected_at=datetime(2026, 5, 11, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 11),
+        raw_data={"permit_nbr": "24010-10000-00001"},
+        raw_data_hash=uuid.uuid4().hex,
+        extracted_fields={
+            "inspection_date": {"value": "2026-05-11", "confidence": None},
+            "status_evidence_type": {
+                "value": "substantive_inspection",
+                "confidence": None,
+            },
+            "status_desc": {"value": "Approved", "confidence": None},
+        },
+    )
+    postgres_session.add_all([permit, inspection])
+    postgres_session.flush()
+    request = _permit_agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_permits_for_project",
+        tool_input={"project_id": str(project.id), "limit": 5},
+        profile=PERMIT_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content["project_id"] == str(project.id)
+    assert result.content["total_returned"] == 2
+    first = result.content["permits"][0]
+    assert first["source_type"] == "ladbs_inspection"
+    assert first["permit_number"] == "24010-10000-00001"
+    assert first["status_evidence_type"] == "substantive_inspection"
+    second = result.content["permits"][1]
+    assert second["source_type"] == "ladbs_permit"
+    assert second["permit_type"] == "Bldg-New"
+    assert second["total_units"] == 118
+    assert second["valuation"] == 10_000_000
+
+
+def test_get_permits_for_parcel_matches_raw_or_mapped_apn(
+    postgres_session: Session,
+) -> None:
+    evidence = Evidence(
+        project_id=None,
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="test",
+        source_record_id="24010-10000-00002",
+        collected_at=datetime(2026, 5, 12, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 12),
+        raw_data={"permit_nbr": "24010-10000-00002", "apn": "5146-013-024"},
+        raw_data_hash=uuid.uuid4().hex,
+        extracted_fields={
+            "apn": {"value": "5146013024", "confidence": None},
+            "permit_type": {"value": "Bldg-New", "confidence": None},
+            "description": {"value": "New apartment building.", "confidence": None},
+        },
+    )
+    unrelated = Evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="test",
+        source_record_id="24010-10000-00003",
+        collected_at=datetime(2026, 5, 13, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 13),
+        raw_data={"permit_nbr": "24010-10000-00003", "apn": "9999999999"},
+        raw_data_hash=uuid.uuid4().hex,
+        extracted_fields={"apn": {"value": "9999999999", "confidence": None}},
+    )
+    postgres_session.add_all([evidence, unrelated])
+    postgres_session.flush()
+    request = _permit_agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_permits_for_parcel",
+        tool_input={"parcel_id": "5146-013-024"},
+        profile=PERMIT_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content["normalized_parcel_id"] == "5146013024"
+    assert result.content["total_returned"] == 1
+    match = result.content["permits"][0]
+    assert match["source_record_id"] == "24010-10000-00002"
+    assert match["apn"] == "5146013024"
+    assert match["description"] == "New apartment building."
+
+
+def test_get_permits_for_project_clamps_requested_limit_without_truncating(
+    postgres_session: Session,
+) -> None:
+    project = Project(
+        canonical_address="1225 PERMIT LIMIT WAY LOS ANGELES CA 90012",
+        raw_addresses=["1225 Permit Limit Way"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Permit Limit Apartments",
+        pipeline_status=PipelineStatus.APPROVED,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    for index in range(25):
+        postgres_session.add(
+            Evidence(
+                project_id=project.id,
+                source_type="ladbs_permit",
+                source_tier=1,
+                ingest_method="test",
+                source_record_id=f"24010-10000-{index:05d}",
+                collected_at=datetime(2026, 5, 12, 12, index % 60, tzinfo=UTC),
+                evidence_date=date(2026, 5, 12),
+                raw_data={
+                    "permit_nbr": f"24010-10000-{index:05d}",
+                    "apn": "5146013024",
+                },
+                raw_data_hash=uuid.uuid4().hex,
+                extracted_fields={
+                    "apn": {"value": "5146013024", "confidence": None},
+                    "permit_type": {"value": "Bldg-New", "confidence": None},
+                    "permit_sub_type": {"value": "Apartment", "confidence": None},
+                    "permit_issue_date": {"value": "2026-05-12", "confidence": None},
+                    "description": {
+                        "value": (
+                            "Construct new seven-story mixed-use apartment building "
+                            "with residential units, ground-floor retail, and "
+                            "subterranean parking."
+                        ),
+                        "confidence": None,
+                    },
+                    "valuation": {"value": 12_500_000 + index, "confidence": None},
+                    "total_units": {"value": 100 + index, "confidence": None},
+                },
+            )
+        )
+    postgres_session.flush()
+    request = _permit_agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_permits_for_project",
+        tool_input={"project_id": str(project.id), "limit": 25},
+        profile=PERMIT_AGENT_PROFILE,
+        request=request,
+    )
+
+    assert result.content.get("truncated") is not True
+    assert result.content["limit"] == 10
+    assert result.content["total_returned"] == 10
+    assert len(result.content["permits"]) == 10
+
+
+def test_get_permits_payload_prefers_extracted_values_before_raw_fallback(
+    postgres_session: Session,
+) -> None:
+    evidence = Evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="test",
+        source_record_id="raw-source-record",
+        collected_at=datetime(2026, 5, 14, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 5, 14),
+        raw_data={
+            "pcis_permit": "RAW-PCIS",
+            "permit_nbr": "RAW-PERMIT-NBR",
+            "apn": "RAW-APN",
+            "work_desc": "Raw description",
+        },
+        raw_data_hash=uuid.uuid4().hex,
+        extracted_fields={
+            "permit_number": {"value": "EXTRACTED-PERMIT", "confidence": None},
+            "apn": {"value": "5146013024", "confidence": None},
+            "description": {"value": "Extracted description", "confidence": None},
+        },
+    )
+    postgres_session.add(evidence)
+    postgres_session.flush()
+    request = _permit_agent_request(postgres_session)
+    registry = build_agent_tool_registry()
+
+    result = registry.dispatch(
+        tool_name="get_permits_for_parcel",
+        tool_input={"parcel_id": "5146013024"},
+        profile=PERMIT_AGENT_PROFILE,
+        request=request,
+    )
+
+    match = result.content["permits"][0]
+    assert match["permit_number"] == "EXTRACTED-PERMIT"
+    assert match["apn"] == "5146013024"
+    assert match["description"] == "Extracted description"
+
+
+def test_get_permits_for_parcel_requires_session_factory() -> None:
+    request = AgentRunRequest(
+        intake=IntakeRecord(
+            source_type="ladbs_permit",
+            intake_record_id="24010-10000-00002",
+        ),
+        matcher_results=(),
+        trigger_reasons=("new_candidate",),
+        profile=PERMIT_AGENT_PROFILE,
+    )
+    registry = build_agent_tool_registry()
+
+    with pytest.raises(AgentToolError, match="requires a session_factory"):
+        registry.dispatch(
+            tool_name="get_permits_for_parcel",
+            tool_input={"parcel_id": "5146013024"},
+            profile=PERMIT_AGENT_PROFILE,
+            request=request,
+        )
+
+
 def _ensure_project_state_views(postgres_session: Session) -> None:
     inspector = inspect(postgres_session.bind)
     missing_tables = [
@@ -569,6 +850,26 @@ def _agent_request(
         session_factory=factory,
         settings=Settings(agent_enabled_for_news=True, openai_api_key="test"),
         embedding_client=embedding_client,
+    )
+
+
+def _permit_agent_request(postgres_session: Session) -> AgentRunRequest:
+    factory = sessionmaker(
+        bind=postgres_session.get_bind(),
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    return AgentRunRequest(
+        intake=IntakeRecord(
+            source_type="ladbs_permit",
+            intake_record_id="24010-10000-00001",
+        ),
+        matcher_results=(),
+        trigger_reasons=("new_candidate",),
+        profile=PERMIT_AGENT_PROFILE,
+        session_factory=factory,
+        settings=Settings(agent_enabled_for_permits=True),
     )
 
 

@@ -4,6 +4,7 @@ import pytest
 
 from tcg_pipeline.agents.profiles import (
     NEWS_AGENT_PROFILE,
+    PERMIT_AGENT_PROFILE,
     AgentTrigger,
     get_source_profile,
     normalize_agent_triggers,
@@ -26,6 +27,39 @@ def test_news_agent_profile_contract() -> None:
     assert "date_delivery" in profile.semantic_interpreters
     assert profile.max_tool_calls == 15
     assert profile.required_intake_fields == frozenset({"extraction_id"})
+
+
+def test_permit_agent_profile_contract() -> None:
+    profile = get_source_profile("permit_v1")
+
+    assert profile is PERMIT_AGENT_PROFILE
+    assert profile.intake_source_type == "ladbs_permit"
+    assert profile.triggers == frozenset(
+        {
+            "new_candidate",
+            "unit_delta",
+            "product_type_change",
+        }
+    )
+    assert profile.cost_cap_bucket == "permits"
+    assert profile.kill_switch_setting == "agent_enabled_for_permits"
+    assert profile.capability_key == "agent.permit_v1"
+    assert profile.system_prompt_path.exists()
+    assert "get_permits_for_parcel" in profile.allowed_tools
+    assert "get_permits_for_project" in profile.allowed_tools
+    assert "get_article_body" not in profile.allowed_tools
+    assert dict(profile.semantic_interpreters) == {}
+    assert profile.required_intake_fields == frozenset()
+
+
+def test_permit_agent_prompt_defines_trigger_contract() -> None:
+    prompt = PERMIT_AGENT_PROFILE.system_prompt_path.read_text(encoding="utf-8")
+
+    assert "For new_candidate triggers:" in prompt
+    assert "For unit_delta triggers:" in prompt
+    assert "greater than 10%" in prompt
+    assert "For product_type_change triggers:" in prompt
+    assert "Do not promote Under Construction from permit issuance alone." in prompt
 
 
 def test_news_agent_prompt_defines_pass1_conflict_combined_trigger_contract() -> None:

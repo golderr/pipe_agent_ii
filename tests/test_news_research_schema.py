@@ -111,6 +111,26 @@ def test_news_research_seed_rows_are_present(postgres_session: Session) -> None:
     assert cost_cap["daily_hard_usd"] >= Decimal("35.00")
     assert cost_cap["daily_warn_usd"] <= cost_cap["daily_hard_usd"]
 
+    permits_cost_cap = postgres_session.execute(
+        text(
+            """
+            SELECT effective_from, daily_warn_usd, daily_hard_usd
+            FROM cost_caps
+            WHERE bucket = 'permits'
+            ORDER BY effective_from DESC
+            LIMIT 1
+            """
+        )
+    ).mappings().one_or_none()
+    if permits_cost_cap is None and not _migration_applied(
+        postgres_session,
+        "202605100036",
+    ):
+        pytest.skip("Apply migration 202605100036 before checking permits cost cap seed.")
+    assert permits_cost_cap is not None
+    assert permits_cost_cap["daily_warn_usd"] == Decimal("50.00")
+    assert permits_cost_cap["daily_hard_usd"] == Decimal("75.00")
+
     flag_summary = postgres_session.execute(
         text(
             """
@@ -314,6 +334,17 @@ def _to_regclass(postgres_session: Session, relation_name: str) -> str | None:
         text("SELECT to_regclass(:relation_name)"),
         {"relation_name": f"public.{relation_name}"},
     ).scalar_one()
+
+
+def _migration_applied(postgres_session: Session, revision: str) -> bool:
+    if _to_regclass(postgres_session, "alembic_version") is None:
+        return False
+    return bool(
+        postgres_session.execute(
+            text("SELECT 1 FROM alembic_version WHERE version_num = :revision"),
+            {"revision": revision},
+        ).scalar_one_or_none()
+    )
 
 
 def _role_exists(postgres_session: Session, role_name: str) -> bool:
