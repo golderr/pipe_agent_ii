@@ -38,7 +38,11 @@ Supported filters include `view`, `event_type`, `source`, `field`, `actor`,
 `project_id`, `market`, `jurisdiction`, `from_date`, `to_date`, `limit`, and
 `cursor`.
 The first saved-view presets are `agent`, `auto_applied`, and `semantic`;
-richer evidence drill-through remains a later AGENT.2 step 11 follow-up.
+resolution rows include top-level `evidence_summaries[]` hydrated from
+`resolution_log.evidence_ids` with the same source-specific snippet renderer
+used by Review Queue. The raw `detail.evidence_ids` list is preserved, and
+summary hydration is capped at five evidence rows per Activity row to keep
+feed payloads bounded.
 Candidate rows are selected with one ordered SQL union across change,
 resolution, agent, and semantic sources before hydration, so `limit` applies to
 the newest rows across the whole feed rather than independently per source

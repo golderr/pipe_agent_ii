@@ -32,6 +32,20 @@ export type ActivityIntakeSummary = {
   permit: ActivityPermitSummary | null;
 };
 
+export type ActivityEvidenceSummary = {
+  evidence_id: string;
+  source_type: string;
+  source_tier: number;
+  source_record_id: string | null;
+  evidence_date: string | null;
+  collected_at: string;
+  summary: string;
+  detail: string;
+  external_link: string | null;
+  highlights: Array<Record<string, unknown>>;
+  extracted_value: unknown;
+};
+
 export type ActivityEvent = {
   id: string;
   event_type: "change" | "resolution" | "agent" | "semantic";
@@ -58,6 +72,7 @@ export type ActivityEvent = {
   agent_triggers: string[];
   agent_reasoning_trace: string | null;
   cost_usd: number | null;
+  evidence_summaries: ActivityEvidenceSummary[];
   detail: Record<string, unknown>;
 };
 

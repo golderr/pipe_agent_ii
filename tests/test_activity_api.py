@@ -23,6 +23,7 @@ from tcg_pipeline.db.models import (
     AgentRunReviewItem,
     ChangeLog,
     ChangeType,
+    Evidence,
     NewsArticle,
     NewsExtraction,
     NewsExtractionParseStatus,
@@ -83,6 +84,41 @@ def _project(
     postgres_session.add(project)
     postgres_session.flush()
     return project
+
+
+def _evidence(
+    postgres_session: Session,
+    project: Project,
+    *,
+    source_type: str,
+    source_tier: int,
+    source_record_id: str,
+    field_name: str = "total_units",
+    value: object = 100,
+    raw_data: dict | None = None,
+    extracted_fields: dict | None = None,
+) -> Evidence:
+    evidence = Evidence(
+        project_id=project.id,
+        source_type=source_type,
+        source_tier=source_tier,
+        source_record_id=source_record_id,
+        ingest_method="test",
+        collected_at=datetime(2026, 5, 8, 9, 30, tzinfo=UTC),
+        evidence_date=date(2026, 5, 7),
+        raw_data=raw_data,
+        raw_data_hash=str(uuid.uuid4()),
+        extracted_fields=extracted_fields
+        or {
+            field_name: {
+                "value": value,
+                "confidence": "high",
+            }
+        },
+    )
+    postgres_session.add(evidence)
+    postgres_session.flush()
+    return evidence
 
 
 def _agent_run(
@@ -448,6 +484,223 @@ def test_activity_feed_combines_change_resolution_and_agent_rows(
     assert agent_event.agent_created_at == "2026-05-08T10:02:00+00:00"
     assert agent_event.review_item_ids == [review_item.id]
     assert agent_event.cost_usd == 0.012345
+
+
+def test_activity_resolution_event_includes_evidence_summaries(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "150 Evidence Activity Way")
+    missing_evidence_id = uuid.uuid4()
+    evidence = Evidence(
+        project_id=project.id,
+        source_type="news_article",
+        source_tier=2,
+        source_record_id="reference-activity-1",
+        ingest_method="news_paste_a_link",
+        collected_at=datetime(2026, 5, 8, 9, 30, tzinfo=UTC),
+        evidence_date=date(2026, 5, 7),
+        raw_data={
+            "publication": "Urbanize LA",
+            "published_at": "2026-05-07",
+            "author": "Ava Reporter",
+            "article_url": "https://example.com/activity-evidence",
+        },
+        raw_data_hash=str(uuid.uuid4()),
+        extracted_fields={
+            "total_units": {
+                "value": 140,
+                "confidence": "high",
+                "highlights": [
+                    {
+                        "field": "total_units",
+                        "value": 140,
+                        "passage": "The project would include 140 apartments.",
+                    }
+                ],
+            }
+        },
+    )
+    postgres_session.add(evidence)
+    postgres_session.flush()
+    resolution = ResolutionLog(
+        project_id=project.id,
+        field="total_units",
+        current_value=100,
+        resolved_value=140,
+        evidence_ids=[evidence.id, missing_evidence_id],
+        rule_applied="most_recent_wins",
+        confidence=StatusConfidence.HIGH,
+        created_at=datetime(2026, 5, 8, 10, 4, tzinfo=UTC),
+    )
+    postgres_session.add(resolution)
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"resolution:{resolution.id}"
+    assert event.detail["evidence_ids"] == [str(evidence.id), str(missing_evidence_id)]
+    assert event.detail["evidence_count"] == 2
+    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summaries_truncated"] is False
+    assert len(event.evidence_summaries) == 1
+    summary = event.evidence_summaries[0]
+    assert summary.evidence_id == evidence.id
+    assert summary.source_type == "news_article"
+    assert summary.summary == "total_units: 140"
+    assert "Urbanize LA" in summary.detail
+    assert "Ava Reporter" in summary.detail
+    assert summary.external_link == "https://example.com/activity-evidence"
+    assert summary.highlights[0]["passage"] == "The project would include 140 apartments."
+    assert summary.extracted_value == 140
+
+
+def test_activity_resolution_event_caps_evidence_summaries(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "151 Evidence Cap Activity Way")
+    evidence_rows = [
+        _evidence(
+            postgres_session,
+            project,
+            source_type="costar",
+            source_tier=3,
+            source_record_id=f"CST-ACTIVITY-{index}",
+            value=100 + index,
+        )
+        for index in range(7)
+    ]
+    resolution = ResolutionLog(
+        project_id=project.id,
+        field="total_units",
+        current_value=100,
+        resolved_value=106,
+        evidence_ids=[evidence.id for evidence in evidence_rows],
+        rule_applied="most_recent_wins",
+        confidence=StatusConfidence.HIGH,
+        created_at=datetime(2026, 5, 8, 10, 4, tzinfo=UTC),
+    )
+    postgres_session.add(resolution)
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert event.id == f"resolution:{resolution.id}"
+    assert event.detail["evidence_count"] == 7
+    assert event.detail["evidence_summary_cap"] == 5
+    assert event.detail["evidence_summaries_truncated"] is True
+    assert event.detail["evidence_ids"] == [str(evidence.id) for evidence in evidence_rows]
+    assert [summary.evidence_id for summary in event.evidence_summaries] == [
+        evidence.id for evidence in evidence_rows[:5]
+    ]
+    assert [summary.summary for summary in event.evidence_summaries] == [
+        f"total_units: {100 + index}" for index in range(5)
+    ]
+
+
+def test_activity_resolution_event_dispatches_mixed_source_snippets(
+    postgres_session: Session,
+) -> None:
+    project = _project(postgres_session, "152 Mixed Evidence Activity Way")
+    news_evidence = _evidence(
+        postgres_session,
+        project,
+        source_type="news_article",
+        source_tier=2,
+        source_record_id="reference-activity-mixed",
+        field_name="pipeline_status",
+        value="Under Construction",
+        raw_data={
+            "publication": "Urbanize LA",
+            "published_at": "2026-05-07",
+            "article_url": "https://example.com/mixed-evidence",
+        },
+        extracted_fields={
+            "pipeline_status": {
+                "value": "Under Construction",
+                "confidence": "high",
+                "highlights": [
+                    {
+                        "field": "pipeline_status",
+                        "value": "Under Construction",
+                        "passage": "Crews have started vertical construction.",
+                    }
+                ],
+            }
+        },
+    )
+    ladbs_evidence = _evidence(
+        postgres_session,
+        project,
+        source_type="ladbs_permit",
+        source_tier=1,
+        source_record_id="23010-10000-12345",
+        field_name="pipeline_status",
+        value="Approved",
+        raw_data={"pcis_permit": "23010-10000-12345"},
+        extracted_fields={
+            "status_evidence_type": {
+                "value": "building_permit_issued",
+                "confidence": None,
+            },
+            "status_desc": {"value": "Issued", "confidence": None},
+            "pipeline_status": {"value": "Approved", "confidence": "high"},
+        },
+    )
+    costar_evidence = _evidence(
+        postgres_session,
+        project,
+        source_type="costar",
+        source_tier=3,
+        source_record_id="CST-ACTIVITY-MIXED",
+        field_name="pipeline_status",
+        value="Approved",
+    )
+    resolution = ResolutionLog(
+        project_id=project.id,
+        field="pipeline_status",
+        current_value="Approved",
+        resolved_value="Under Construction",
+        evidence_ids=[news_evidence.id, ladbs_evidence.id, costar_evidence.id],
+        rule_applied="status_signal_priority",
+        confidence=StatusConfidence.HIGH,
+        created_at=datetime(2026, 5, 8, 10, 4, tzinfo=UTC),
+    )
+    postgres_session.add(resolution)
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    event = response.events[0]
+    assert [summary.source_type for summary in event.evidence_summaries] == [
+        "news_article",
+        "ladbs_permit",
+        "costar",
+    ]
+    assert [summary.evidence_id for summary in event.evidence_summaries] == [
+        news_evidence.id,
+        ladbs_evidence.id,
+        costar_evidence.id,
+    ]
+    assert event.evidence_summaries[0].summary == "pipeline_status: Under Construction"
+    assert "PCIS 23010-10000-12345" in event.evidence_summaries[1].summary
+    assert event.evidence_summaries[2].summary == "pipeline_status: Approved"
 
 
 def test_activity_feed_agent_event_exposes_generic_non_news_intake_summary(

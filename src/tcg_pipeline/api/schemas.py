@@ -261,6 +261,20 @@ class ActivityIntakeSummary(BaseModel):
     permit: ActivityPermitSummary | None = None
 
 
+class ActivityEvidenceSummary(BaseModel):
+    evidence_id: uuid.UUID
+    source_type: str
+    source_tier: int
+    source_record_id: str | None
+    evidence_date: str | None
+    collected_at: str
+    summary: str
+    detail: str
+    external_link: str | None
+    highlights: list[dict[str, Any]]
+    extracted_value: Any | None
+
+
 class ActivityEventResponse(BaseModel):
     id: str
     event_type: str
@@ -290,6 +304,7 @@ class ActivityEventResponse(BaseModel):
     agent_triggers: list[str] = Field(default_factory=list)
     agent_reasoning_trace: str | None = None
     cost_usd: float | None = None
+    evidence_summaries: list[ActivityEvidenceSummary] = Field(default_factory=list)
     detail: dict[str, Any] = Field(default_factory=dict)
 
 

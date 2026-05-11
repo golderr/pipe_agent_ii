@@ -18,6 +18,7 @@ from tcg_pipeline.api.deps import get_db_session, require_user
 from tcg_pipeline.api.schemas import (
     ActivityArticleSummary,
     ActivityEventResponse,
+    ActivityEvidenceSummary,
     ActivityFeedResponse,
     ActivityIntakeSummary,
     ActivityProjectSummary,
@@ -30,6 +31,7 @@ from tcg_pipeline.db.models import (
     AgentRun,
     AgentRunReviewItem,
     ChangeLog,
+    Evidence,
     NewsArticle,
     NewsExtractionParseStatus,
     NewsProjectReference,
@@ -38,6 +40,7 @@ from tcg_pipeline.db.models import (
     Project,
     ResolutionLog,
 )
+from tcg_pipeline.review.snippets import render_snippet
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 AUTH_USER = Depends(require_user)
@@ -65,6 +68,7 @@ SEMANTIC_UNMAPPABLE_RATE_THRESHOLD = 0.05
 SEMANTIC_REJECTION_SIGMA_THRESHOLD = 2.0
 MAX_INTERNAL_LIMIT = 500
 ACTIVITY_CURSOR_VERSION = 1
+MAX_ACTIVITY_EVIDENCE_SUMMARIES = 5
 
 
 @router.get("/events")
@@ -973,14 +977,28 @@ def _resolution_events_by_ids(
         .all()
     )
     projects = _projects_by_id(session, [row.project_id for row in rows])
-    return {row.id: _resolution_event(row, project=projects.get(row.project_id)) for row in rows}
+    evidence_by_id = _evidence_by_id_for_resolution_rows(session, rows)
+    return {
+        row.id: _resolution_event(
+            row,
+            project=projects.get(row.project_id),
+            evidence_by_id=evidence_by_id,
+        )
+        for row in rows
+    }
 
 
 def _resolution_event(
     row: ResolutionLog,
     *,
     project: Project | None,
+    evidence_by_id: dict[uuid.UUID, Evidence] | None = None,
 ) -> ActivityEventResponse:
+    evidence_ids = list(row.evidence_ids or [])
+    evidence_summaries = _activity_evidence_summaries(
+        row,
+        evidence_by_id=evidence_by_id or {},
+    )
     return ActivityEventResponse(
         id=f"resolution:{row.id}",
         event_type="resolution",
@@ -997,12 +1015,67 @@ def _resolution_event(
         new_value=row.resolved_value,
         change_type="resolved",
         priority=None,
+        evidence_summaries=evidence_summaries,
         detail={
             "rule_applied": row.rule_applied,
             "confidence": row.confidence.value if row.confidence else None,
-            "evidence_ids": [str(evidence_id) for evidence_id in (row.evidence_ids or [])],
+            "evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
+            "evidence_count": len(evidence_ids),
+            "evidence_summary_cap": MAX_ACTIVITY_EVIDENCE_SUMMARIES,
+            "evidence_summaries_truncated": (
+                len(evidence_ids) > MAX_ACTIVITY_EVIDENCE_SUMMARIES
+            ),
         },
     )
+
+
+def _evidence_by_id_for_resolution_rows(
+    session: Session,
+    rows: list[ResolutionLog],
+) -> dict[uuid.UUID, Evidence]:
+    evidence_ids: set[uuid.UUID] = set()
+    for row in rows:
+        for evidence_id in list(row.evidence_ids or [])[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
+            evidence_ids.add(evidence_id)
+    if not evidence_ids:
+        return {}
+    evidence_rows = (
+        session.execute(select(Evidence).where(Evidence.id.in_(sorted(evidence_ids, key=str))))
+        .scalars()
+        .all()
+    )
+    return {evidence.id: evidence for evidence in evidence_rows}
+
+
+def _activity_evidence_summaries(
+    row: ResolutionLog,
+    *,
+    evidence_by_id: dict[uuid.UUID, Evidence],
+) -> list[ActivityEvidenceSummary]:
+    summaries: list[ActivityEvidenceSummary] = []
+    for evidence_id in list(row.evidence_ids or [])[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
+        evidence = evidence_by_id.get(evidence_id)
+        if evidence is None:
+            continue
+        snippet = render_snippet(evidence, field_name=row.field)
+        summaries.append(
+            ActivityEvidenceSummary(
+                evidence_id=evidence.id,
+                source_type=evidence.source_type,
+                source_tier=evidence.source_tier,
+                source_record_id=evidence.source_record_id,
+                evidence_date=evidence.evidence_date.isoformat()
+                if evidence.evidence_date
+                else None,
+                collected_at=evidence.collected_at.isoformat(),
+                summary=snippet.summary,
+                detail=snippet.detail,
+                external_link=snippet.external_link,
+                highlights=snippet.highlights,
+                extracted_value=snippet.fields.extracted_value,
+            )
+        )
+    return summaries
 
 
 def _agent_events_by_ids(

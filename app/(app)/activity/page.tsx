@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { getActivityData, getActivitySemanticMetrics } from "@/lib/activity/data";
 import type {
+  ActivityEvidenceSummary,
   ActivityEvent,
   ActivityQuery,
   ActivitySemanticMetric,
@@ -279,6 +280,10 @@ function ActivityRow({ event }: { event: ActivityEvent }) {
 }
 
 function DetailRows({ event }: { event: ActivityEvent }) {
+  const evidenceSummaries = event.evidence_summaries ?? [];
+  const evidenceCount = detailNumber(event, "evidence_count") ?? evidenceSummaries.length;
+  const evidenceSummaryCap = detailNumber(event, "evidence_summary_cap") ?? evidenceSummaries.length;
+
   return (
     <dl className="grid gap-2 text-sm md:grid-cols-[9rem_minmax(0,1fr)]">
       <DetailRow label="Field" value={event.field_label ?? "-"} />
@@ -310,6 +315,20 @@ function DetailRows({ event }: { event: ActivityEvent }) {
       {event.cost_usd !== null ? <DetailRow label="Cost" value={`$${event.cost_usd.toFixed(6)}`} /> : null}
       {detailString(event, "reason_code") ? <DetailRow label="Reason code" value={detailString(event, "reason_code")} /> : null}
       {detailString(event, "confidence") ? <DetailRow label="Confidence" value={detailString(event, "confidence")} /> : null}
+      {evidenceSummaries.length ? (
+        <DetailRow
+          label="Evidence"
+          value={
+            <EvidenceSummaryList
+              projectId={event.project?.id ?? null}
+              rows={evidenceSummaries}
+              summaryCap={evidenceSummaryCap}
+              totalCount={evidenceCount}
+              truncated={detailBoolean(event, "evidence_summaries_truncated") ?? false}
+            />
+          }
+        />
+      ) : null}
       {event.review_item_id ? (
         <DetailRow
           label="Review item"
@@ -343,6 +362,99 @@ function DetailRows({ event }: { event: ActivityEvent }) {
         />
       ) : null}
     </dl>
+  );
+}
+
+function EvidenceSummaryList({
+  projectId,
+  rows,
+  summaryCap,
+  totalCount,
+  truncated
+}: {
+  projectId: string | null;
+  rows: ActivityEvidenceSummary[];
+  summaryCap: number;
+  totalCount: number;
+  truncated: boolean;
+}) {
+  const attemptedCount = Math.min(totalCount, summaryCap);
+  const missingCount = Math.max(attemptedCount - rows.length, 0);
+  return (
+    <div className="space-y-2">
+      {rows.map((row) => (
+        <EvidenceSummaryRow key={row.evidence_id} row={row} />
+      ))}
+      {truncated ? (
+        <p className="text-xs text-slate-500">
+          {rows.length} of {totalCount} shown - see{" "}
+          {projectId ? (
+            <Link className="font-medium text-teal-700 hover:text-teal-900" href={`/pipeline/${projectId}?tab=evidence`}>
+              Project Detail Evidence
+            </Link>
+          ) : (
+            "Project Detail Evidence"
+          )}{" "}
+          for the rest.
+        </p>
+      ) : null}
+      {missingCount > 0 ? (
+        <p className="text-xs text-amber-700">
+          {missingCount} of {attemptedCount} evidence IDs could not be loaded.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function EvidenceSummaryRow({ row }: { row: ActivityEvidenceSummary }) {
+  const highlightedPassages = row.highlights
+    .map((highlight) => highlight.passage)
+    .filter((passage) => passage !== null && passage !== undefined)
+    .slice(0, 2);
+  return (
+    <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs">
+      <div className="flex items-start gap-2">
+        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-slate-300" />
+        <div className="min-w-0">
+          <p className="break-words font-medium text-slate-900">{row.summary}</p>
+          {row.detail ? <p className="mt-1 break-words text-slate-500">{row.detail}</p> : null}
+          {highlightedPassages.length ? (
+            <div className="mt-2 space-y-1">
+              {highlightedPassages.map((passage, index) => (
+                <p
+                  className="break-words rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-700"
+                  key={`${row.evidence_id}-highlight-${index}`}
+                >
+                  {formatUnknown(passage)}
+                </p>
+              ))}
+            </div>
+          ) : null}
+          <p className="mt-1 text-slate-500">
+            {humanize(row.source_type)}
+            {row.evidence_date ? ` - ${formatDate(row.evidence_date)}` : ""}
+            {row.source_record_id ? ` - ${row.source_record_id}` : ""}
+          </p>
+          {row.extracted_value !== null && row.extracted_value !== undefined ? (
+            <p className="mt-2 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-700">
+              {formatUnknown(row.extracted_value)}
+            </p>
+          ) : null}
+          {row.external_link ? (
+            <a
+              className="mt-2 inline-flex items-center gap-1 font-medium text-teal-700 hover:text-teal-900"
+              href={row.external_link}
+              rel="noreferrer"
+              target="_blank"
+            >
+              Source
+              <ExternalLink className="size-3.5" aria-hidden="true" />
+            </a>
+          ) : null}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -547,6 +659,25 @@ function parseStatusLabel(value: string) {
   return value.replaceAll("_", " ");
 }
 
+function humanize(value: string) {
+  return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function formatDate(value: string | null | undefined) {
+  if (!value) {
+    return "-";
+  }
+  const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const parsed = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(value);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  }).format(parsed);
+}
+
 function formatDateTime(value: string | null | undefined) {
   if (!value) {
     return "-";
@@ -576,6 +707,16 @@ function CompactId({ id }: { id: string }) {
 function detailString(event: ActivityEvent, key: string) {
   const value = event.detail[key];
   return typeof value === "string" && value.length ? value : null;
+}
+
+function detailNumber(event: ActivityEvent, key: string) {
+  const value = event.detail[key];
+  return typeof value === "number" ? value : null;
+}
+
+function detailBoolean(event: ActivityEvent, key: string) {
+  const value = event.detail[key];
+  return typeof value === "boolean" ? value : null;
 }
 
 function intakeSummaryLabel(summary: NonNullable<ActivityEvent["intake_summary"]>) {
