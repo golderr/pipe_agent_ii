@@ -5,14 +5,15 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
 import anthropic
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from sqlalchemy import select
+from sqlalchemy import select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from tcg_pipeline.db.evidence import serialize_json
@@ -22,6 +23,7 @@ from tcg_pipeline.db.models import (
     NewsExtractionParseStatus,
     NewsProjectReference,
     NewsSemanticInterpretation,
+    SystemAlert,
 )
 from tcg_pipeline.news.costs import (
     record_llm_cost,
@@ -58,12 +60,25 @@ from tcg_pipeline.settings import Settings, get_settings
 INTERPRET_TEMPERATURE = 0
 INTERPRET_TOOL_NAME = "emit_semantic_interpretations"
 INTERPRET_SCHEMA_NAME = "news_semantic_interpretation"
+INTERPRET_RETRY_PROMPT_ID = "interpret_retry_v1"
+INTERPRET_RETRY_PROMPT_VERSION = "v1"
 # Reservation ceiling for one Pass 2c call; actual billing is recorded from token usage.
 INTERPRET_ESTIMATED_COST_USD = Decimal("0.10")
+INTERPRET_RETRY_ESTIMATED_COST_USD = Decimal("0.20")
 MAX_ARTICLE_BODY_CHARS = 30_000
 PROMPT_VERSION_RE = re.compile(r".*_(v\d+)$")
 TRUNCATED_STOP_REASONS = frozenset({"max_tokens", "length", "max_output_tokens"})
 REFUSAL_STOP_REASONS = frozenset({"refusal"})
+SEMANTIC_PARSE_ALERT_KEY = "news_semantic_parse_failed"
+SEMANTIC_PARSE_ALERT_STATUSES = frozenset(
+    {
+        NewsExtractionParseStatus.TRUNCATED.value,
+        NewsExtractionParseStatus.REFUSED.value,
+        NewsExtractionParseStatus.PARSE_ERROR.value,
+        NewsExtractionParseStatus.SCHEMA_INVALID.value,
+    }
+)
+SEMANTIC_RETRY_STATUSES = frozenset({NewsExtractionParseStatus.TRUNCATED.value})
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,15 +274,20 @@ class SemanticOutputPayload(BaseModel):
     diagnostic: dict[str, Any] = Field(default_factory=dict)
 
 
-def build_pass2c_client(settings: Settings) -> Pass2cClient:
+def build_pass2c_client(
+    settings: Settings,
+    *,
+    max_tokens_override: int | None = None,
+) -> Pass2cClient:
     provider = normalize_llm_provider(settings.news_semantic_provider)
+    max_tokens = max_tokens_override or settings.news_semantic_max_tokens
     if provider == LLM_PROVIDER_ANTHROPIC:
         if not settings.anthropic_api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is required for news semantic interpretation.")
         return AnthropicPass2cClient(
             api_key=settings.anthropic_api_key,
             model=settings.news_semantic_model,
-            max_tokens=settings.news_semantic_max_tokens,
+            max_tokens=max_tokens,
         )
     if provider in OPENAI_COMPATIBLE_PROVIDERS:
         api_key = provider_api_key(settings, provider)
@@ -278,7 +298,7 @@ def build_pass2c_client(settings: Settings) -> Pass2cClient:
             model=settings.news_semantic_model,
             provider=provider,
             base_url=provider_base_url(settings, provider),
-            max_tokens=settings.news_semantic_max_tokens,
+            max_tokens=max_tokens,
             timeout_seconds=settings.news_llm_timeout_seconds,
         )
     raise RuntimeError(f"Unsupported news semantic provider: {provider}")
@@ -386,20 +406,77 @@ def run_news_semantic_interpretation_for_extraction(
 
     pass2c_client = client or build_pass2c_client(resolved_settings)
     pricing_for_model(pass2c_client.model)
-    with resolved_session_factory() as session:
+    result = _run_pass2c_call(
+        session_factory=resolved_session_factory,
+        article_id=article.id,
+        extraction_id=extraction.id,
+        prompt=prompt,
+        pass2c_client=pass2c_client,
+        estimated_cost_usd=INTERPRET_ESTIMATED_COST_USD,
+        now=current,
+    )
+    if result.parse_status not in SEMANTIC_RETRY_STATUSES:
+        return result
+
+    retry_prompt = replace(
+        prompt,
+        prompt_id=INTERPRET_RETRY_PROMPT_ID,
+        prompt_version=INTERPRET_RETRY_PROMPT_VERSION,
+    )
+    # Injected clients cannot be rebuilt with a larger max-token ceiling, so tests
+    # and harnesses that pass a custom client get the same client with retry audit
+    # metadata. Production client construction applies the retry token bump.
+    retry_client = client or build_pass2c_client(
+        resolved_settings,
+        max_tokens_override=resolved_settings.news_semantic_retry_max_tokens,
+    )
+    pricing_for_model(retry_client.model)
+    return _run_pass2c_call(
+        session_factory=resolved_session_factory,
+        article_id=article.id,
+        extraction_id=extraction.id,
+        prompt=retry_prompt,
+        pass2c_client=retry_client,
+        estimated_cost_usd=INTERPRET_RETRY_ESTIMATED_COST_USD,
+        diagnostic_extra={
+            "retry_reason": result.parse_status,
+            "retry_of_semantic_interpretation_id": (
+                str(result.semantic_interpretation_id)
+                if result.semantic_interpretation_id is not None
+                else None
+            ),
+            "initial_error_text": result.error_text,
+            "max_tokens": resolved_settings.news_semantic_retry_max_tokens,
+        },
+        now=_retry_timestamp_after(current),
+    )
+
+
+def _run_pass2c_call(
+    *,
+    session_factory: sessionmaker[Session],
+    article_id: uuid.UUID,
+    extraction_id: uuid.UUID,
+    prompt: RenderedInterpretPrompt,
+    pass2c_client: Pass2cClient,
+    estimated_cost_usd: Decimal,
+    diagnostic_extra: dict[str, Any] | None = None,
+    now: datetime,
+) -> NewsSemanticInterpretationRunResult:
+    with session_factory() as session:
         reservation = reserve_llm_cost(
             session,
             pass_name=NEWS_SEMANTIC_CAPABILITY,
             model=pass2c_client.model,
             provider=pass2c_client.provider,
-            estimated_cost_usd=INTERPRET_ESTIMATED_COST_USD,
-            now=current,
+            estimated_cost_usd=estimated_cost_usd,
+            now=now,
         )
         session.commit()
     if reservation is None:
         return NewsSemanticInterpretationRunResult(
-            article_id=article.id,
-            extraction_id=extraction.id,
+            article_id=article_id,
+            extraction_id=extraction_id,
             semantic_interpretation_id=None,
             interpretation_count=0,
             parse_status=None,
@@ -409,44 +486,53 @@ def run_news_semantic_interpretation_for_extraction(
     try:
         llm_response = pass2c_client.interpret(prompt)
     except Exception as exc:  # noqa: BLE001 - provider SDK exceptions vary.
-        with resolved_session_factory() as session:
+        with session_factory() as session:
             release_llm_cost_reservation(
                 session,
-                reserved_cost_usd=INTERPRET_ESTIMATED_COST_USD,
-                now=current,
+                reserved_cost_usd=estimated_cost_usd,
+                now=now,
             )
             row = persist_semantic_api_error(
                 session,
-                article_id=article.id,
-                extraction_id=extraction.id,
+                article_id=article_id,
+                extraction_id=extraction_id,
                 rendered_prompt=prompt,
                 model=pass2c_client.model,
                 provider=pass2c_client.provider,
                 error=exc,
-                now=current,
+                diagnostic_extra=diagnostic_extra,
+                now=now,
             )
             session.commit()
         return NewsSemanticInterpretationRunResult(
-            article_id=article.id,
-            extraction_id=extraction.id,
+            article_id=article_id,
+            extraction_id=extraction_id,
             semantic_interpretation_id=row.id,
             interpretation_count=0,
             parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
             error_text=str(exc),
         )
 
-    with resolved_session_factory() as session:
+    with session_factory() as session:
         result = persist_semantic_response(
             session,
-            article_id=article.id,
-            extraction_id=extraction.id,
+            article_id=article_id,
+            extraction_id=extraction_id,
             rendered_prompt=prompt,
             llm_response=llm_response,
-            reserved_cost_usd=INTERPRET_ESTIMATED_COST_USD,
-            now=current,
+            reserved_cost_usd=estimated_cost_usd,
+            diagnostic_extra=diagnostic_extra,
+            now=now,
         )
         session.commit()
         return result
+
+
+def _retry_timestamp_after(initial_timestamp: datetime) -> datetime:
+    current = datetime.now(UTC)
+    if current <= initial_timestamp:
+        return initial_timestamp + timedelta(microseconds=1)
+    return current
 
 
 def persist_semantic_response(
@@ -457,6 +543,7 @@ def persist_semantic_response(
     rendered_prompt: RenderedInterpretPrompt,
     llm_response: SemanticLLMResponse,
     reserved_cost_usd: Decimal = Decimal("0"),
+    diagnostic_extra: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> NewsSemanticInterpretationRunResult:
     current = now or datetime.now(UTC)
@@ -491,6 +578,8 @@ def persist_semantic_response(
         "capability_key": rendered_prompt.capability_key,
     }
     diagnostic.update(parsed.diagnostic)
+    if diagnostic_extra:
+        diagnostic.update(serialize_json(diagnostic_extra))
     row = NewsSemanticInterpretation(
         article_id=article_id,
         extraction_id=extraction_id,
@@ -510,15 +599,26 @@ def persist_semantic_response(
         parse_status=parsed.parse_status,
         parse_error_text=parsed.parse_error_text,
         diagnostic=diagnostic,
+        created_at=current,
     )
     session.add(row)
     session.flush()
+    _sync_semantic_parse_alert(
+        session,
+        article_id=article_id,
+        extraction_id=extraction_id,
+        row=row,
+        parse_status=parsed.parse_status,
+        parse_error_text=parsed.parse_error_text,
+        now=current,
+    )
     return NewsSemanticInterpretationRunResult(
         article_id=article_id,
         extraction_id=extraction_id,
         semantic_interpretation_id=row.id,
         interpretation_count=len(parsed.interpretations),
         parse_status=parsed.parse_status,
+        error_text=parsed.parse_error_text,
     )
 
 
@@ -531,9 +631,16 @@ def persist_semantic_api_error(
     model: str,
     provider: str,
     error: Exception,
+    diagnostic_extra: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> NewsSemanticInterpretation:
     current = now or datetime.now(UTC)
+    diagnostic = {
+        "capability_key": rendered_prompt.capability_key,
+        "error_type": type(error).__name__,
+    }
+    if diagnostic_extra:
+        diagnostic.update(serialize_json(diagnostic_extra))
     row = NewsSemanticInterpretation(
         article_id=article_id,
         extraction_id=extraction_id,
@@ -546,15 +653,149 @@ def persist_semantic_api_error(
         raw_response_text=None,
         parse_status=NewsExtractionParseStatus.PARSE_ERROR.value,
         parse_error_text=str(error),
-        diagnostic={
-            "capability_key": rendered_prompt.capability_key,
-            "error_type": type(error).__name__,
-        },
+        diagnostic=diagnostic,
         created_at=current,
     )
     session.add(row)
     session.flush()
+    _sync_semantic_parse_alert(
+        session,
+        article_id=article_id,
+        extraction_id=extraction_id,
+        row=row,
+        parse_status=row.parse_status,
+        parse_error_text=row.parse_error_text,
+        now=current,
+    )
     return row
+
+
+def _sync_semantic_parse_alert(
+    session: Session,
+    *,
+    article_id: uuid.UUID,
+    extraction_id: uuid.UUID,
+    row: NewsSemanticInterpretation,
+    parse_status: str,
+    parse_error_text: str | None,
+    now: datetime,
+) -> None:
+    if parse_status in SEMANTIC_PARSE_ALERT_STATUSES:
+        _raise_semantic_parse_alert(
+            session,
+            article_id=article_id,
+            extraction_id=extraction_id,
+            row=row,
+            parse_status=parse_status,
+            parse_error_text=parse_error_text,
+            now=now,
+        )
+        return
+    _clear_semantic_parse_alert(
+        session,
+        article_id=article_id,
+        extraction_id=extraction_id,
+        now=now,
+        cleared_reason="news_semantic_interpretation_succeeded",
+    )
+
+
+def _raise_semantic_parse_alert(
+    session: Session,
+    *,
+    article_id: uuid.UUID,
+    extraction_id: uuid.UUID,
+    row: NewsSemanticInterpretation,
+    parse_status: str,
+    parse_error_text: str | None,
+    now: datetime,
+) -> None:
+    scope = _semantic_parse_alert_scope(
+        article_id=article_id,
+        extraction_id=extraction_id,
+    )
+    detail = {
+        "article_id": str(article_id),
+        "extraction_id": str(extraction_id),
+        "semantic_interpretation_id": str(row.id),
+        "parse_status": parse_status,
+        "parse_error_text": parse_error_text,
+        "prompt_id": row.prompt_id,
+        "prompt_version": row.prompt_version,
+        "model": row.model,
+        "provider": row.model_provider,
+        "output_tokens": row.output_tokens,
+        "cost_usd": str(row.cost_usd) if row.cost_usd is not None else None,
+        "diagnostic": row.diagnostic or {},
+    }
+    message = (
+        "News semantic interpretation did not produce usable structured output "
+        f"for extraction {extraction_id}; parse_status={parse_status}."
+    )
+    statement = (
+        insert(SystemAlert)
+        .values(
+            alert_key=SEMANTIC_PARSE_ALERT_KEY,
+            severity="warning",
+            scope=scope,
+            message=message,
+            detail=serialize_json(detail),
+            raised_at=now,
+            last_seen_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[
+                SystemAlert.alert_key,
+                text("COALESCE(scope::text, '{}')"),
+            ],
+            index_where=text("cleared_at IS NULL"),
+            set_={
+                "severity": "warning",
+                "message": message,
+                "detail": serialize_json(detail),
+                "last_seen_at": now,
+            },
+        )
+    )
+    session.execute(statement)
+
+
+def _clear_semantic_parse_alert(
+    session: Session,
+    *,
+    article_id: uuid.UUID,
+    extraction_id: uuid.UUID,
+    now: datetime,
+    cleared_reason: str,
+) -> None:
+    session.execute(
+        update(SystemAlert)
+        .where(
+            SystemAlert.alert_key == SEMANTIC_PARSE_ALERT_KEY,
+            SystemAlert.scope
+            == _semantic_parse_alert_scope(
+                article_id=article_id,
+                extraction_id=extraction_id,
+            ),
+            SystemAlert.cleared_at.is_(None),
+        )
+        .values(
+            cleared_at=now,
+            cleared_reason=cleared_reason,
+            last_seen_at=now,
+        )
+    )
+
+
+def _semantic_parse_alert_scope(
+    *,
+    article_id: uuid.UUID,
+    extraction_id: uuid.UUID,
+) -> dict[str, str]:
+    return {
+        "article_id": str(article_id),
+        "extraction_id": str(extraction_id),
+    }
 
 
 def parse_semantic_response(

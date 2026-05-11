@@ -298,6 +298,7 @@ class _SemanticIntegrationContext:
     by_reference_id: dict[uuid.UUID, tuple[SemanticInterpretation, ...]] = field(
         default_factory=dict
     )
+    suppress_raw_status_evidence: bool = False
 
 
 ReextractionRunner = Callable[..., NewsExtractionRunResult]
@@ -1342,6 +1343,8 @@ def _integrate_current_extraction(
     confirmed_by_project: dict[uuid.UUID, _ProjectIntegrationContext] = defaultdict(
         _ProjectIntegrationContext
     )
+    # Suppression is only active on the Pass 2c path. Legacy semantic rollback
+    # intentionally keeps raw Pass 2b status behavior by bypassing this loader.
     semantic_context = (
         _load_semantic_context_for_extraction(
             session,
@@ -1385,6 +1388,7 @@ def _integrate_current_extraction(
             semantic_interpretations=semantic_context.by_reference_id.get(reference.id, ()),
             semantic_interpretation_row=semantic_context.row,
             reason_registry=semantic_context.reason_registry,
+            suppress_raw_status_evidence=semantic_context.suppress_raw_status_evidence,
             now=now,
         )
         if inserted:
@@ -1822,7 +1826,7 @@ def _load_semantic_context_for_extraction(
 ) -> _SemanticIntegrationContext:
     row = load_current_semantic_interpretation_row(session, extraction.id)
     if row is None:
-        return _SemanticIntegrationContext()
+        return _SemanticIntegrationContext(suppress_raw_status_evidence=True)
     registry = _semantic_reason_registry_for_article(article)
     interpretations = semantic_interpretations_from_output_json(
         row.output_json,
@@ -1909,6 +1913,7 @@ def _write_news_evidence(
     semantic_interpretations: tuple[SemanticInterpretation, ...] = (),
     semantic_interpretation_row: NewsSemanticInterpretation | None = None,
     reason_registry: ReasonCodeRegistry | None = None,
+    suppress_raw_status_evidence: bool = False,
     now: datetime,
 ) -> tuple[Evidence, bool]:
     if reference.matched_evidence_id is not None:
@@ -1923,12 +1928,14 @@ def _write_news_evidence(
         extraction=extraction,
         reference=reference,
         semantic_interpretation_row=semantic_interpretation_row,
+        suppress_raw_status_evidence=suppress_raw_status_evidence,
     )
     extracted_fields = _news_extracted_fields(
         article,
         reference,
         semantic_interpretations=semantic_interpretations,
         reason_registry=reason_registry,
+        suppress_raw_status_evidence=suppress_raw_status_evidence,
     )
     write_result = write_evidence(
         session,
@@ -1960,6 +1967,7 @@ def _news_raw_data(
     extraction: NewsExtraction,
     reference: NewsProjectReference,
     semantic_interpretation_row: NewsSemanticInterpretation | None = None,
+    suppress_raw_status_evidence: bool = False,
 ) -> dict[str, Any]:
     source = article.source
     return {
@@ -1994,6 +2002,9 @@ def _news_raw_data(
             if semantic_interpretation_row is not None
             else None
         ),
+        "raw_status_suppressed_due_to_semantic_unavailable": (
+            suppress_raw_status_evidence or None
+        ),
     }
 
 
@@ -2003,6 +2014,7 @@ def _news_extracted_fields(
     *,
     semantic_interpretations: tuple[SemanticInterpretation, ...] = (),
     reason_registry: ReasonCodeRegistry | None = None,
+    suppress_raw_status_evidence: bool = False,
 ) -> dict[str, dict[str, Any]]:
     confidence = reference.candidate_confidence
     fields: dict[str, Any] = {
@@ -2015,9 +2027,10 @@ def _news_extracted_fields(
         "workforce_units": reference.candidate_unit_workforce,
         "product_type": _product_type_value(reference.candidate_product_type),
         "age_restriction": _age_restriction_value(reference.candidate_age_restriction),
-        "pipeline_status": reference.candidate_status_signal,
         "date_delivery": reference.candidate_delivery_year_normalized,
     }
+    if not suppress_raw_status_evidence:
+        fields["pipeline_status"] = reference.candidate_status_signal
     highlights_by_field = _highlights_by_project_field(reference)
     wrapped: dict[str, dict[str, Any]] = {}
     for field_name, value in fields.items():

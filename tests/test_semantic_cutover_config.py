@@ -32,28 +32,50 @@ def test_news_semantic_llm_settings_are_separate_from_extraction_settings() -> N
     assert settings.news_semantic_model == "claude-haiku-4-5-20251001"
     assert settings.news_semantic_provider == "anthropic"
     assert Settings(_env_file=None).news_semantic_max_tokens == 5000
+    assert Settings(_env_file=None).news_semantic_retry_max_tokens == 10000
 
 
 def test_render_services_use_pass2c_after_controlled_smoke() -> None:
     render_config = yaml.safe_load(Path("render.yaml").read_text())
     service_env = {
-        service["name"]: {entry["key"]: entry.get("value") for entry in service["envVars"]}
+        service["name"]: {entry["key"]: entry for entry in service["envVars"]}
         for service in render_config["services"]
         if service["name"] in {"tcg-pipeline-api", "tcg-pipeline-worker"}
     }
 
     semantic_keys = {
-        "NEWS_USE_LEGACY_SEMANTIC",
         "NEWS_SEMANTIC_PROVIDER",
         "NEWS_SEMANTIC_MODEL",
         "NEWS_SEMANTIC_MAX_TOKENS",
+        "NEWS_SEMANTIC_RETRY_MAX_TOKENS",
     }
     api_env = service_env["tcg-pipeline-api"]
     worker_env = service_env["tcg-pipeline-worker"]
 
-    assert {key: api_env[key] for key in semantic_keys} == {
-        key: worker_env[key] for key in semantic_keys
+    assert {key: api_env[key].get("value") for key in semantic_keys} == {
+        key: worker_env[key].get("value") for key in semantic_keys
     }
-    assert api_env["NEWS_USE_LEGACY_SEMANTIC"] == "false"
-    assert api_env["NEWS_SEMANTIC_MODEL"] == "claude-opus-4-7"
-    assert api_env["NEWS_SEMANTIC_MAX_TOKENS"] == "5000"
+    assert api_env["NEWS_SEMANTIC_MODEL"]["value"] == "claude-opus-4-7"
+    assert api_env["NEWS_SEMANTIC_MAX_TOKENS"]["value"] == "5000"
+    assert api_env["NEWS_SEMANTIC_RETRY_MAX_TOKENS"]["value"] == "10000"
+
+
+def test_render_operational_kill_switches_are_dashboard_owned() -> None:
+    render_config = yaml.safe_load(Path("render.yaml").read_text())
+    service_env = {
+        service["name"]: {entry["key"]: entry for entry in service["envVars"]}
+        for service in render_config["services"]
+        if service["name"] in {"tcg-pipeline-api", "tcg-pipeline-worker"}
+    }
+    kill_switches = {
+        "AGENT_ENABLED_FOR_NEWS",
+        "AGENT_ENABLED_FOR_PERMITS",
+        "AGENT_ALLOW_LIVE_LLM",
+        "NEWS_USE_LEGACY_PASS3",
+        "NEWS_USE_LEGACY_SEMANTIC",
+    }
+
+    for service_name, env in service_env.items():
+        for key in kill_switches:
+            assert env[key].get("sync") is False, (service_name, key)
+            assert "value" not in env[key], (service_name, key)

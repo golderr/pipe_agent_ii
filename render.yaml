@@ -82,17 +82,23 @@ services:
         value: claude-opus-4-7
       - key: NEWS_SEMANTIC_MAX_TOKENS
         value: "5000"
-      # --- Agent routing guardrails ---
+      - key: NEWS_SEMANTIC_RETRY_MAX_TOKENS
+        value: "10000"
+      # --- Dashboard-owned operational kill switches ---
+      # Render Blueprint must not sync these values. The Render dashboard is
+      # source of truth so emergency toggles survive unrelated deploys.
+      # Current production intent: news=true, permits=false, live_llm=true,
+      # legacy_pass3=false, legacy_semantic=false.
       - key: AGENT_ENABLED_FOR_NEWS
-        value: "true"
+        sync: false
       - key: AGENT_ENABLED_FOR_PERMITS
-        value: "false"
+        sync: false
       - key: AGENT_ALLOW_LIVE_LLM
-        value: "true"
+        sync: false
       - key: NEWS_USE_LEGACY_PASS3
-        value: "false"
+        sync: false
       - key: NEWS_USE_LEGACY_SEMANTIC
-        value: "false"
+        sync: false
       # --- Queue ---
       - key: REDIS_URL
         fromService:
@@ -160,17 +166,23 @@ services:
         value: claude-opus-4-7
       - key: NEWS_SEMANTIC_MAX_TOKENS
         value: "5000"
-      # --- Agent routing guardrails ---
+      - key: NEWS_SEMANTIC_RETRY_MAX_TOKENS
+        value: "10000"
+      # --- Dashboard-owned operational kill switches ---
+      # Render Blueprint must not sync these values. The Render dashboard is
+      # source of truth so emergency toggles survive unrelated deploys.
+      # Current production intent: news=true, permits=false, live_llm=true,
+      # legacy_pass3=false, legacy_semantic=false.
       - key: AGENT_ENABLED_FOR_NEWS
-        value: "true"
+        sync: false
       - key: AGENT_ENABLED_FOR_PERMITS
-        value: "false"
+        sync: false
       - key: AGENT_ALLOW_LIVE_LLM
-        value: "true"
+        sync: false
       - key: NEWS_USE_LEGACY_PASS3
-        value: "false"
+        sync: false
       - key: NEWS_USE_LEGACY_SEMANTIC
-        value: "false"
+        sync: false
       # --- Worker identity / heartbeat / scheduler ---
       - key: WORKER_NAME
         value: tcg-pipeline-worker-prod

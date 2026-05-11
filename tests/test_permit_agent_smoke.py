@@ -33,18 +33,19 @@ runner = CliRunner()
 def test_permit_agent_smoke_report_summarizes_latest_source_run(
     postgres_session: Session,
 ) -> None:
+    base_time = datetime(2099, 5, 10, tzinfo=UTC)
     older_run = SourceRun(
         market="los_angeles",
         source_name="ladbs_permits",
         collection_mode="preview",
-        run_timestamp=datetime(2026, 5, 9, tzinfo=UTC),
+        run_timestamp=base_time - timedelta(days=1),
         records_pulled=1,
     )
     source_run = SourceRun(
         market="los_angeles",
         source_name="ladbs_permits",
         collection_mode="preview",
-        run_timestamp=datetime(2026, 5, 10, tzinfo=UTC),
+        run_timestamp=base_time,
         records_pulled=3,
     )
     postgres_session.add_all([older_run, source_run])

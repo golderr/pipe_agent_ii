@@ -37,6 +37,13 @@ from tcg_pipeline.db.seed import (
     persist_pipedream_import_results,
 )
 from tcg_pipeline.developer import canonicalize_project_developers
+from tcg_pipeline.evaluation.news_agent_smoke import (
+    NewsAgentSmokeReport,
+    NewsAgentSmokeRun,
+    build_news_agent_smoke_report,
+    news_agent_smoke_report_to_dict,
+    validate_news_agent_smoke_report,
+)
 from tcg_pipeline.evaluation.permit_agent_smoke import (
     PermitAgentSmokeReport,
     PermitAgentSmokeRun,
@@ -276,6 +283,7 @@ def news_paste_link_smoke(
     from tcg_pipeline.api.schemas import ResearchArticleCreateRequest
     from tcg_pipeline.db.models import (
         AgentRun,
+        AgentRunReviewItem,
         NewsArticle,
         NewsProjectReference,
         ReviewItem,
@@ -339,10 +347,14 @@ def news_paste_link_smoke(
                 .order_by(AgentRun.started_at.desc())
             ).scalars().all()
             review_items = session.execute(
-                select(ReviewItem).where(
-                    ReviewItem.payload["source_article_id"].astext == str(article_id)
+                select(ReviewItem)
+                .join(
+                    AgentRunReviewItem,
+                    AgentRunReviewItem.review_item_id == ReviewItem.id,
                 )
-            ).scalars().all()
+                .join(AgentRun, AgentRun.id == AgentRunReviewItem.agent_run_id)
+                .where(AgentRun.intake_record_id == str(article_id))
+            ).unique().scalars().all()
 
             typer.echo(f"Job status: {job.status if job else 'missing'}")
             if job and job.error_text:
@@ -792,6 +804,224 @@ def collect_source(
     )
     typer.echo(f"Status change review items: {persist_result.status_change_review_items}")
     typer.echo(f"Possible match review items: {persist_result.possible_match_review_items}")
+
+
+@app.command("news-agent-smoke-report")
+def news_agent_smoke_report_command(
+    source_name: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional news source slug filter. Defaults to all registered news sources.",
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Inclusive ISO-8601 lower bound for agent/source rows. "
+                "Defaults to --hours before --until/now."
+            ),
+        ),
+    ] = None,
+    until: Annotated[
+        str | None,
+        typer.Option(help="Inclusive ISO-8601 upper bound. Defaults to now."),
+    ] = None,
+    hours: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            help="Lookback hours used when --since is omitted.",
+        ),
+    ] = 24,
+    require_triggers: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated triggers that must appear at least once."),
+    ] = None,
+    require_outcomes: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated outcomes that must appear at least once."),
+    ] = None,
+    allow_outcomes: Annotated[
+        str | None,
+        typer.Option(
+            "--allow-outcomes",
+            "--expect-outcomes",
+            help=(
+                "Comma-separated allowed outcomes for present news agent runs. "
+                "Use with --min-agent-runs and/or --require-outcomes to require non-empty results."
+            ),
+        ),
+    ] = None,
+    min_source_runs: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            help="Minimum number of news source runs expected in the report.",
+        ),
+    ] = 1,
+    max_source_runs: Annotated[
+        int | None,
+        typer.Option(
+            min=0,
+            help="Optional maximum number of news source runs expected in the report.",
+        ),
+    ] = None,
+    min_agent_runs: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            help="Minimum number of news agent runs expected in the report.",
+        ),
+    ] = 0,
+    max_agent_runs: Annotated[
+        int | None,
+        typer.Option(
+            min=0,
+            help="Optional maximum number of news agent runs expected in the report.",
+        ),
+    ] = None,
+    min_total_cost_usd: Annotated[
+        str | None,
+        typer.Option(help="Optional minimum total news bucket cost required for this smoke."),
+    ] = None,
+    max_total_cost_usd: Annotated[
+        str | None,
+        typer.Option(help="Optional maximum total news bucket cost allowed for this smoke."),
+    ] = None,
+    require_review_links: Annotated[
+        bool,
+        typer.Option(
+            "--require-review-links",
+            help=(
+                "Fail when a news agent run lacks an agent_run_review_items link. "
+                "Disabled by default because some news agent decisions auto-apply without a "
+                "fallback review item."
+            ),
+        ),
+    ] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Optional JSON report path."),
+    ] = None,
+) -> None:
+    """Summarize and validate recent AGENT.2 news audit rows."""
+    parsed_since = _parse_cli_datetime(since) if since is not None else None
+    parsed_until = _parse_cli_datetime(until) if until is not None else None
+    parsed_min_total_cost_usd = _decimal_option_value(
+        min_total_cost_usd,
+        option_name="--min-total-cost-usd",
+    )
+    parsed_max_total_cost_usd = _decimal_option_value(
+        max_total_cost_usd,
+        option_name="--max-total-cost-usd",
+    )
+    settings = get_settings()
+    database_label = (
+        redact_database_url(settings.database_url)
+        if settings.database_url
+        else "missing DATABASE_URL"
+    )
+    typer.echo(f"Reading news agent smoke report from {database_label}")
+    session_factory = get_session_factory()
+    try:
+        with session_factory() as session:
+            report = build_news_agent_smoke_report(
+                session,
+                source_name=source_name,
+                since=parsed_since,
+                until=parsed_until,
+                hours=hours,
+            )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    report_dict = news_agent_smoke_report_to_dict(report)
+    typer.echo(f"Window: {report.since.isoformat()} -> {report.until.isoformat()}")
+    typer.echo(f"Source filter: {report.source_name or 'all news sources'}")
+    typer.echo(f"Source runs: {report.source_run_count}")
+    typer.echo(f"Agent runs: {report.agent_run_count}")
+    typer.echo(f"Outcomes: {_format_counts(report.outcome_counts)}")
+    typer.echo(f"Triggers: {_format_counts(report.trigger_counts)}")
+    typer.echo(f"Missing review links: {report.missing_review_link_count}")
+    typer.echo(f"Agent-run total cost: ${report.agent_run_total_cost_usd}")
+    typer.echo(f"News bucket total cost: ${report.cost_usage_total_usd}")
+    if report.cost_usage_by_capability:
+        typer.echo("Cost-usage breakdown:")
+        for row in report.cost_usage_by_capability:
+            typer.echo(f"  {row.capability}: ${row.spent_usd} ({row.call_count} calls)")
+    if report.cost_cap_days:
+        typer.echo("Cost-cap headroom:")
+        for row in report.cost_cap_days:
+            typer.echo(
+                f"  {row.cost_date.isoformat()}: spent=${row.spent_usd}, "
+                f"warn=${row.daily_warn_usd}, hard=${row.daily_hard_usd}, "
+                f"hard_remaining=${row.hard_remaining_usd}"
+            )
+    typer.echo(f"Semantic parse statuses: {_format_counts(report.semantic_parse_status_counts)}")
+    if report.semantic_issues:
+        typer.echo("Semantic parse issues:")
+        for issue in report.semantic_issues[:5]:
+            typer.echo(
+                f"  {issue.parse_status} ({issue.article_id}): "
+                f"{issue.parse_error_text or 'no parse_error_text recorded'}"
+            )
+    typer.echo(f"News alerts: {report.alert_count}")
+    if report.alerts_truncated:
+        typer.echo(f"News alerts truncated at first {report.alert_limit} rows.")
+    failure_runs = _news_smoke_failure_runs(report)
+    if failure_runs:
+        typer.echo("Failure runs:")
+        for run in failure_runs:
+            typer.echo(
+                f"  {run.outcome} ({run.intake_record_id}): "
+                f"{run.error_text or 'no error_text recorded'}"
+            )
+    if report.alerts:
+        typer.echo("Recent/active news alerts:")
+        for alert in report.alerts[:5]:
+            typer.echo(f"  {alert.severity} {alert.alert_key}: {alert.message}")
+
+    validation = {
+        "min_source_runs": min_source_runs,
+        "max_source_runs": max_source_runs,
+        "min_agent_runs": min_agent_runs,
+        "max_agent_runs": max_agent_runs,
+        "required_triggers": list(_comma_option_values(require_triggers)),
+        "required_outcomes": list(_comma_option_values(require_outcomes)),
+        "allowed_outcomes": list(_comma_option_values(allow_outcomes)),
+        "min_total_cost_usd": (
+            str(parsed_min_total_cost_usd) if parsed_min_total_cost_usd is not None else None
+        ),
+        "max_total_cost_usd": (
+            str(parsed_max_total_cost_usd) if parsed_max_total_cost_usd is not None else None
+        ),
+        "require_review_links": require_review_links,
+    }
+
+    failures = validate_news_agent_smoke_report(
+        report,
+        min_source_runs=min_source_runs,
+        max_source_runs=max_source_runs,
+        min_agent_runs=min_agent_runs,
+        max_agent_runs=max_agent_runs,
+        required_triggers=_comma_option_values(require_triggers),
+        required_outcomes=_comma_option_values(require_outcomes),
+        allowed_outcomes=_comma_option_values(allow_outcomes),
+        min_total_cost_usd=parsed_min_total_cost_usd,
+        max_total_cost_usd=parsed_max_total_cost_usd,
+        require_review_links=require_review_links,
+    )
+    report_dict["validation"] = validation
+    report_dict["failures"] = failures
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report_dict, indent=2, sort_keys=True), encoding="utf-8")
+        typer.echo(f"Report: {output}")
+    if failures:
+        for failure in failures:
+            typer.echo(f"Smoke validation failed: {failure}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command("permit-agent-smoke-report")
@@ -1636,6 +1866,12 @@ def _format_counts(counts: Mapping[str, int]) -> str:
     if not counts:
         return "none"
     return ", ".join(f"{key}={value}" for key, value in counts.items())
+
+
+def _news_smoke_failure_runs(
+    report: NewsAgentSmokeReport,
+) -> tuple[NewsAgentSmokeRun, ...]:
+    return tuple(run for run in report.runs if run.outcome.startswith("failed_"))
 
 
 def _permit_smoke_failure_runs(

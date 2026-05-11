@@ -35,6 +35,7 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
     SourceRun,
     StatusConfidence,
+    SystemAlert,
 )
 from tcg_pipeline.db.researcher_overrides import upsert_researcher_overrides
 from tcg_pipeline.db.review_workflow import accept_review_item
@@ -102,14 +103,23 @@ class FakeSemanticClient:
     provider = LLM_PROVIDER_ANTHROPIC
     model = DEFAULT_EXTRACTION_MODEL
 
-    def __init__(self, payload: dict) -> None:
+    def __init__(
+        self,
+        payload: dict | None,
+        *,
+        stop_reason: str | None = None,
+        responses: list[tuple[dict | None, str | None]] | None = None,
+    ) -> None:
         self.payload = payload
+        self._responses = responses or [(payload, stop_reason)]
         self.prompts: list[RenderedInterpretPrompt] = []
 
     def interpret(self, prompt: RenderedInterpretPrompt) -> SemanticLLMResponse:
+        response_index = min(len(self.prompts), len(self._responses) - 1)
+        payload, stop_reason = self._responses[response_index]
         self.prompts.append(prompt)
         return SemanticLLMResponse(
-            payload=self.payload,
+            payload=payload,
             text="{}",
             model=self.model,
             provider=self.provider,
@@ -120,7 +130,7 @@ class FakeSemanticClient:
                 output_tokens=30,
             ),
             latency_ms=123,
-            stop_reason=None,
+            stop_reason=stop_reason,
         )
 
 
@@ -516,6 +526,148 @@ def test_news_integration_semantic_uncorroborated_status_creates_review_item(
     assert item.payload["system_recommendation"]["action"] == (
         "keep_current_until_corroborated_or_researcher_confirms"
     )
+
+
+def test_news_integration_suppresses_raw_status_when_pass2c_truncates(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("5432 Truncated Semantic Way, Los Angeles, CA 90026")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Truncated Semantic Tower",
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Truncated Semantic Tower",
+                candidate_address="5432 Truncated Semantic Way, Los Angeles, CA 90026",
+                candidate_status_signal=PipelineStatus.UNDER_CONSTRUCTION.value,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(None, stop_reason="max_tokens")
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.semantic_result is not None
+    assert result.semantic_result.parse_status == NewsExtractionParseStatus.TRUNCATED.value
+    assert len(semantic_client.prompts) == 2
+    postgres_session.expire_all()
+    refreshed_project = postgres_session.get(Project, project.id)
+    assert refreshed_project is not None
+    assert refreshed_project.pipeline_status == PipelineStatus.PROPOSED
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert "pipeline_status" not in evidence.extracted_fields
+    assert evidence.raw_data["raw_status_suppressed_due_to_semantic_unavailable"] is True
+    item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+        )
+    ).scalar_one_or_none()
+    assert item is None
+    alert = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.alert_key == "news_semantic_parse_failed",
+            SystemAlert.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert alert.scope == {
+        "article_id": str(article.id),
+        "extraction_id": str(extraction.id),
+    }
+    assert alert.detail["parse_status"] == NewsExtractionParseStatus.TRUNCATED.value
+
+
+def test_news_integration_legacy_semantic_preserves_raw_status(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("6789 Legacy Semantic Way, Los Angeles, CA 90026")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Legacy Semantic Tower",
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Legacy Semantic Tower",
+                candidate_address="6789 Legacy Semantic Way, Los Angeles, CA 90026",
+                candidate_status_signal=PipelineStatus.UNDER_CONSTRUCTION.value,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(None, stop_reason="max_tokens")
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=True,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=False,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert result.semantic_result is None
+    assert semantic_client.prompts == []
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.extracted_fields["pipeline_status"]["value"] == (
+        PipelineStatus.UNDER_CONSTRUCTION.value
+    )
+    assert "raw_status_suppressed_due_to_semantic_unavailable" in evidence.raw_data
+    assert evidence.raw_data["raw_status_suppressed_due_to_semantic_unavailable"] is None
 
 
 def test_news_integration_semantic_prompt_uses_matched_project_jurisdiction(
@@ -2675,7 +2827,7 @@ def _ensure_agent2_tables(postgres_session: Session) -> None:
 def _ensure_semantic_news_integration_tables(postgres_session: Session) -> None:
     _ensure_news_integration_tables(postgres_session)
     inspector = inspect(postgres_session.bind)
-    required_tables = {"news_semantic_interpretations", "llm_cost_usage"}
+    required_tables = {"news_semantic_interpretations", "llm_cost_usage", "system_alerts"}
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply semantic Pass 2c migrations before running tests: {missing}")

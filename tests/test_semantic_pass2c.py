@@ -20,6 +20,7 @@ from tcg_pipeline.db.models import (
     NewsProjectReference,
     NewsSemanticInterpretation,
     NewsSource,
+    SystemAlert,
 )
 from tcg_pipeline.news.costs import RESERVATION_MODEL, RESERVATION_PASS_NAME, RESERVATION_PROVIDER
 from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
@@ -41,15 +42,26 @@ class FakePass2cClient:
     provider = LLM_PROVIDER_ANTHROPIC
     model = DEFAULT_EXTRACTION_MODEL
 
-    def __init__(self, payload: dict) -> None:
+    def __init__(
+        self,
+        payload: dict | None,
+        *,
+        stop_reason: str | None = None,
+        text: str = "{}",
+        responses: list[tuple[dict | None, str | None]] | None = None,
+    ) -> None:
         self.payload = payload
+        self.text = text
+        self._responses = responses or [(payload, stop_reason)]
         self.prompts: list[RenderedInterpretPrompt] = []
 
     def interpret(self, prompt: RenderedInterpretPrompt) -> SemanticLLMResponse:
+        response_index = min(len(self.prompts), len(self._responses) - 1)
+        payload, stop_reason = self._responses[response_index]
         self.prompts.append(prompt)
         return SemanticLLMResponse(
-            payload=self.payload,
-            text="{}",
+            payload=payload,
+            text=self.text,
             model=self.model,
             provider=self.provider,
             usage=LLMUsage(
@@ -59,7 +71,7 @@ class FakePass2cClient:
                 output_tokens=30,
             ),
             latency_ms=123,
-            stop_reason=None,
+            stop_reason=stop_reason,
         )
 
 
@@ -278,6 +290,18 @@ def test_run_pass2c_persists_api_error_and_releases_reservation(
     assert row.parse_status == NewsExtractionParseStatus.PARSE_ERROR.value
     assert row.parse_error_text == "provider down"
     assert row.diagnostic["error_type"] == "RuntimeError"
+    alert = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.alert_key == "news_semantic_parse_failed",
+            SystemAlert.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert alert.severity == "warning"
+    assert alert.scope == {
+        "article_id": str(article.id),
+        "extraction_id": str(extraction.id),
+    }
+    assert alert.detail["parse_status"] == NewsExtractionParseStatus.PARSE_ERROR.value
 
     reservation = postgres_session.execute(
         select(LLMCostUsage).where(
@@ -288,6 +312,141 @@ def test_run_pass2c_persists_api_error_and_releases_reservation(
         )
     ).scalar_one()
     assert Decimal(reservation.spent_usd) == Decimal("0.000000")
+
+
+def test_run_pass2c_retries_truncation_and_clears_alert(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_tables(postgres_session)
+    article, extraction, _reference = _semantic_fixture(postgres_session)
+    now = datetime(2099, 1, 3, 12, tzinfo=UTC)
+    session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    fake_client = FakePass2cClient(
+        None,
+        responses=[
+            (None, "max_tokens"),
+            (_semantic_payload(), None),
+        ],
+    )
+
+    result = run_news_semantic_interpretation_for_extraction(
+        extraction.id,
+        settings=Settings(_env_file=None),
+        client=fake_client,
+        session_factory=session_factory,
+        now=now,
+    )
+
+    assert result.parse_status == NewsExtractionParseStatus.OK.value
+    assert result.interpretation_count == 1
+    assert len(fake_client.prompts) == 2
+    rows = (
+        postgres_session.execute(
+            select(NewsSemanticInterpretation)
+            .where(NewsSemanticInterpretation.extraction_id == extraction.id)
+            .order_by(
+                NewsSemanticInterpretation.created_at.asc(),
+                NewsSemanticInterpretation.id.asc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    rows_by_prompt = {row.prompt_id: row for row in rows}
+    assert set(rows_by_prompt) == {"interpret_v1", "interpret_retry_v1"}
+    assert rows_by_prompt["interpret_v1"].parse_status == NewsExtractionParseStatus.TRUNCATED.value
+    assert rows_by_prompt["interpret_retry_v1"].parse_status == NewsExtractionParseStatus.OK.value
+    assert rows_by_prompt["interpret_retry_v1"].created_at > (
+        rows_by_prompt["interpret_v1"].created_at
+    )
+    assert rows_by_prompt["interpret_retry_v1"].diagnostic["retry_reason"] == (
+        NewsExtractionParseStatus.TRUNCATED.value
+    )
+    assert rows_by_prompt["interpret_retry_v1"].diagnostic[
+        "retry_of_semantic_interpretation_id"
+    ] == str(rows_by_prompt["interpret_v1"].id)
+
+    alert = postgres_session.execute(
+        select(SystemAlert).where(SystemAlert.alert_key == "news_semantic_parse_failed")
+    ).scalar_one()
+    assert alert.cleared_at == rows_by_prompt["interpret_retry_v1"].created_at
+    assert alert.cleared_reason == "news_semantic_interpretation_succeeded"
+
+
+@pytest.mark.parametrize(
+    ("client", "expected_status", "expected_error"),
+    [
+        (
+            FakePass2cClient(None, stop_reason="refusal"),
+            NewsExtractionParseStatus.REFUSED.value,
+            "refusal",
+        ),
+        (
+            FakePass2cClient({"interpretations": [{"field_name": "pipeline_status"}]}),
+            NewsExtractionParseStatus.SCHEMA_INVALID.value,
+            "validation",
+        ),
+        (
+            FakePass2cClient(None, text="not-json"),
+            NewsExtractionParseStatus.PARSE_ERROR.value,
+            "Expecting value",
+        ),
+    ],
+)
+def test_run_pass2c_parse_failures_alert_without_retry(
+    postgres_session: Session,
+    client: FakePass2cClient,
+    expected_status: str,
+    expected_error: str,
+) -> None:
+    _ensure_semantic_tables(postgres_session)
+    article, extraction, _reference = _semantic_fixture(postgres_session)
+    session_factory = sessionmaker(
+        bind=postgres_session.bind,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+
+    result = run_news_semantic_interpretation_for_extraction(
+        extraction.id,
+        settings=Settings(_env_file=None),
+        client=client,
+        session_factory=session_factory,
+        now=datetime(2099, 1, 4, 12, tzinfo=UTC),
+    )
+
+    assert result.parse_status == expected_status
+    assert result.interpretation_count == 0
+    assert expected_error in (result.error_text or "")
+    assert len(client.prompts) == 1
+    row = postgres_session.get(NewsSemanticInterpretation, result.semantic_interpretation_id)
+    assert row is not None
+    assert row.prompt_id == "interpret_v1"
+    assert row.parse_status == expected_status
+    retry_rows = postgres_session.execute(
+        select(NewsSemanticInterpretation).where(
+            NewsSemanticInterpretation.extraction_id == extraction.id,
+            NewsSemanticInterpretation.prompt_id == "interpret_retry_v1",
+        )
+    ).scalars().all()
+    assert retry_rows == []
+    alert = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.alert_key == "news_semantic_parse_failed",
+            SystemAlert.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert alert.scope == {
+        "article_id": str(article.id),
+        "extraction_id": str(extraction.id),
+    }
+    assert alert.detail["parse_status"] == expected_status
 
 
 def test_current_semantic_interpretation_loader_uses_latest_ok_row(
@@ -331,6 +490,7 @@ def _ensure_semantic_tables(postgres_session: Session) -> None:
         "news_articles",
         "news_sources",
         "llm_cost_usage",
+        "system_alerts",
     } - set(inspector.get_table_names())
     assert not missing
 
