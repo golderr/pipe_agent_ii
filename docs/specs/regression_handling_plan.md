@@ -247,7 +247,10 @@ Slice 5: Structured source rollout.
 
 Slice 6: Monitoring and stabilization.
 
-- Extend daily news smoke validation.
+- Extend daily news smoke validation with `status_regression_candidate` trigger
+  counts, linked `status_regression_review` card counts, and an optional
+  minimum linked-card validator for curated smokes.
+- Defer permit smoke regression-count parity to a follow-up monitoring slice.
 - Add regression trigger counts to AGENT.reset review artifacts.
 - Watch duplicate-trigger rates and cost for 3-5 organic cron days before any broad backfill.
 - Ensure AGENT.2 Activity / Audit Log rendering is live for regression-specific agent, review, and resolution audit rows before declaring the regression rollout complete.

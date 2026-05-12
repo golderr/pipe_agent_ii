@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
@@ -40,9 +42,30 @@ from tcg_pipeline.settings import Settings
 runner = CliRunner()
 
 
+def _ensure_status_regression_review_item_type(postgres_session: Session) -> None:
+    exists = postgres_session.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_enum enum_value
+                JOIN pg_type enum_type
+                  ON enum_type.oid = enum_value.enumtypid
+                WHERE enum_type.typname = 'review_item_type_enum'
+                  AND enum_value.enumlabel = :enum_label
+            )
+            """
+        ),
+        {"enum_label": ReviewItemType.STATUS_REGRESSION_REVIEW.value},
+    ).scalar()
+    if not exists:
+        pytest.skip("Apply the status regression review-item enum migration before this test.")
+
+
 def test_news_agent_smoke_report_summarizes_window(
     postgres_session: Session,
 ) -> None:
+    _ensure_status_regression_review_item_type(postgres_session)
     source = _news_source()
     now = datetime(2099, 5, 11, 21, tzinfo=UTC)
     old_source_run = _source_run(source, run_timestamp=now - timedelta(days=2))
@@ -80,6 +103,12 @@ def test_news_agent_smoke_report_summarizes_window(
     postgres_session.add_all([old_agent_run, completed_run, escalated_run])
     postgres_session.flush()
     _link_review_item(postgres_session, source_run=source_run, agent_run=completed_run)
+    _link_review_item(
+        postgres_session,
+        source_run=source_run,
+        agent_run=escalated_run,
+        item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+    )
     postgres_session.add_all(
         [
             _cost_usage(
@@ -138,8 +167,18 @@ def test_news_agent_smoke_report_summarizes_window(
         "pass1_pass2_conflict": 1,
         "status_regression_candidate": 1,
     }
+    assert report.review_item_type_counts == {
+        ReviewItemType.NEW_CANDIDATE.value: 1,
+        ReviewItemType.STATUS_REGRESSION_REVIEW.value: 1,
+    }
+    assert report.status_regression_agent_run_count == 1
+    assert report.status_regression_review_item_count == 1
     assert report.agent_run_total_cost_usd == Decimal("0.100000")
-    assert report.missing_review_link_count == 1
+    assert report.missing_review_link_count == 0
+    assert report.runs[1].review_item_type_counts == {
+        ReviewItemType.STATUS_REGRESSION_REVIEW.value: 1,
+    }
+    assert report.runs[1].status_regression_review_item_count == 1
     assert report.cost_usage_total_usd == Decimal("0.500000")
     capability_costs = [
         (row.capability, row.call_count, row.spent_usd)
@@ -168,6 +207,7 @@ def test_news_agent_smoke_report_summarizes_window(
         ),
         required_outcomes=(AgentRunOutcome.COMPLETED.value,),
         allowed_outcomes=(AgentRunOutcome.COMPLETED.value, AgentRunOutcome.ESCALATED.value),
+        min_status_regression_review_items=1,
         min_total_cost_usd=Decimal("0.05"),
         max_total_cost_usd=Decimal("0.50"),
     ) == []
@@ -216,6 +256,7 @@ def test_news_agent_smoke_validation_reports_missing_expectations(
         required_triggers=("low_confidence",),
         required_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
         allowed_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
+        min_status_regression_review_items=1,
         min_total_cost_usd=Decimal("0.30"),
         max_total_cost_usd=Decimal("0.10"),
         require_review_links=True,
@@ -229,10 +270,48 @@ def test_news_agent_smoke_validation_reports_missing_expectations(
         "Missing required trigger(s): low_confidence.",
         "Missing required outcome(s): killed_by_switch.",
         "Unexpected outcome(s): completed.",
+        "Expected at least 1 linked status regression review item(s); found 0.",
         "Expected total news bucket cost >= $0.30; found $0.250000.",
         "Expected total news bucket cost <= $0.10; found $0.250000.",
         "1 news agent run(s) have no linked review item.",
     ]
+
+
+def test_news_agent_smoke_report_counts_review_item_types(
+    postgres_session: Session,
+) -> None:
+    source = _news_source()
+    now = datetime(2099, 5, 13, 18, tzinfo=UTC)
+    source_run = _source_run(source, run_timestamp=now - timedelta(minutes=30))
+    article = _article(source, fetched_at=now - timedelta(minutes=25))
+    postgres_session.add_all([source, source_run, article])
+    postgres_session.flush()
+    agent_run = _agent_run(
+        source_run=source_run,
+        article=article,
+        triggered_by=["new_candidate"],
+        outcome=AgentRunOutcome.COMPLETED.value,
+        created_at=now - timedelta(minutes=20),
+    )
+    postgres_session.add(agent_run)
+    postgres_session.flush()
+    _link_review_item(postgres_session, source_run=source_run, agent_run=agent_run)
+    postgres_session.flush()
+
+    report = build_news_agent_smoke_report(
+        postgres_session,
+        since=now - timedelta(hours=1),
+        until=now,
+        source_name=source.slug,
+    )
+
+    assert report.review_item_type_counts == {ReviewItemType.NEW_CANDIDATE.value: 1}
+    assert report.status_regression_agent_run_count == 0
+    assert report.status_regression_review_item_count == 0
+    assert report.missing_review_link_count == 0
+    assert report.runs[0].review_item_type_counts == {
+        ReviewItemType.NEW_CANDIDATE.value: 1,
+    }
 
 
 def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
@@ -240,6 +319,7 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     postgres_session: Session,
     tmp_path,
 ) -> None:
+    _ensure_status_regression_review_item_type(postgres_session)
     source = _news_source()
     now = datetime(2099, 5, 13, 21, tzinfo=UTC)
     source_run = _source_run(source, run_timestamp=now - timedelta(minutes=30))
@@ -251,7 +331,7 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     completed_run = _agent_run(
         source_run=source_run,
         article=completed_article,
-        triggered_by=["new_candidate"],
+        triggered_by=["new_candidate", "status_regression_candidate"],
         outcome=AgentRunOutcome.COMPLETED.value,
         cost_usd=Decimal("0.060000"),
         created_at=now - timedelta(minutes=20),
@@ -268,6 +348,12 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     postgres_session.add_all([completed_run, timeout_run])
     postgres_session.flush()
     _link_review_item(postgres_session, source_run=source_run, agent_run=completed_run)
+    _link_review_item(
+        postgres_session,
+        source_run=source_run,
+        agent_run=completed_run,
+        item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+    )
     _link_review_item(postgres_session, source_run=source_run, agent_run=timeout_run)
     postgres_session.add_all(
         [
@@ -324,11 +410,13 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
             "--min-agent-runs",
             "2",
             "--require-triggers",
-            "new_candidate,material_contradiction",
+            "new_candidate,material_contradiction,status_regression_candidate",
             "--require-outcomes",
             "completed",
             "--allow-outcomes",
             "completed,failed_timeout",
+            "--min-status-regression-review-items",
+            "1",
             "--min-total-cost-usd",
             "0.05",
             "--max-total-cost-usd",
@@ -342,7 +430,13 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert "Source runs: 1" in result.output
     assert "Agent runs: 2" in result.output
     assert "Outcomes: completed=1, failed_timeout=1" in result.output
-    assert "Triggers: material_contradiction=1, new_candidate=1" in result.output
+    assert (
+        "Triggers: material_contradiction=1, new_candidate=1, "
+        "status_regression_candidate=1"
+    ) in result.output
+    assert "Review item types: new_candidate=2, status_regression_review=1" in result.output
+    assert "Status regression agent runs: 1" in result.output
+    assert "Status regression review items: 1" in result.output
     assert "News bucket total cost: $0.070000" in result.output
     assert "Cost-usage breakdown:" in result.output
     assert "agent.news_v1: $0.070000 (2 calls)" in result.output
@@ -354,6 +448,9 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert "Recent/active news alerts:" in result.output
     report_json = output_path.read_text(encoding="utf-8")
     assert '"min_source_runs": 1' in report_json
+    assert '"min_status_regression_review_items": 1' in report_json
+    assert '"status_regression_agent_run_count": 1' in report_json
+    assert '"status_regression_review_item_count": 1' in report_json
     assert '"max_total_cost_usd": "1.00"' in report_json
     assert '"cost_usage_by_capability": [' in report_json
     assert '"semantic_issue_count": 1' in report_json
@@ -551,10 +648,11 @@ def _link_review_item(
     *,
     source_run: SourceRun,
     agent_run: AgentRun,
+    item_type: ReviewItemType = ReviewItemType.NEW_CANDIDATE,
 ) -> None:
     review_item = ReviewItem(
         source_run_id=source_run.id,
-        item_type=ReviewItemType.NEW_CANDIDATE,
+        item_type=item_type,
         priority=Priority.MEDIUM,
         payload={"source_article_id": agent_run.intake_record_id},
     )

@@ -59,6 +59,24 @@ tcg-pipeline news-agent-smoke-report `
 Suggested rare paths: `material_contradiction`, `override_contradiction`,
 `pass1_pass2_conflict`, and `low_confidence`.
 
+For curated regression smokes that are expected to create a review card, require
+the trigger and linked review-item count explicitly:
+
+```powershell
+tcg-pipeline news-agent-smoke-report `
+  --hours 2 `
+  --source-name news_paste_a_link `
+  --min-source-runs 1 `
+  --min-agent-runs 1 `
+  --require-triggers status_regression_candidate `
+  --min-status-regression-review-items 1 `
+  --output data/output/news_agent_smoke/news-agent-regression-YYYYMMDDa.json
+```
+
+If the curated article is expected to produce a `dismiss` verdict, omit
+`--min-status-regression-review-items`; the agent run and trigger should still
+appear, but no review card is created by design.
+
 ## Reading The Report
 
 - `source_run_count`: number of news `source_runs` in the window. For daily
@@ -67,6 +85,15 @@ Suggested rare paths: `material_contradiction`, `override_contradiction`,
   valid for organic cron.
 - `outcome_counts` / `trigger_counts`: agent outcome and trigger distribution.
   Investigate `failed_*` outcomes immediately.
+- `review_item_type_counts`: linked review-item distribution across news-agent
+  rows in the window. This counts `agent_run_review_items` linkages, not
+  globally distinct review cards, so a card linked to multiple runs can appear
+  more than once.
+- `status_regression_agent_run_count`: number of `news_v1` runs whose trigger
+  set included `status_regression_candidate`.
+- `status_regression_review_item_count`: number of linked
+  `status_regression_review` cards. Use `--min-status-regression-review-items`
+  for curated smokes where a regression card is expected.
 - `agent_run_total_cost_usd`: sum of `agent_runs.cost_usd` for `news_v1`.
 - `cost_usage_total_usd`: full `news` bucket cost across all capabilities in
   `llm_cost_usage`, including extraction, triage, semantic, retry, embeddings,

@@ -881,6 +881,16 @@ def news_agent_smoke_report_command(
             help="Optional maximum number of news agent runs expected in the report.",
         ),
     ] = None,
+    min_status_regression_review_items: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            help=(
+                "Minimum linked status_regression_review items expected in the report. "
+                "Useful for curated regression paste-link smokes."
+            ),
+        ),
+    ] = 0,
     min_total_cost_usd: Annotated[
         str | None,
         typer.Option(help="Optional minimum total news bucket cost required for this smoke."),
@@ -943,6 +953,12 @@ def news_agent_smoke_report_command(
     typer.echo(f"Agent runs: {report.agent_run_count}")
     typer.echo(f"Outcomes: {_format_counts(report.outcome_counts)}")
     typer.echo(f"Triggers: {_format_counts(report.trigger_counts)}")
+    typer.echo(f"Review item types: {_format_counts(report.review_item_type_counts)}")
+    typer.echo(f"Status regression agent runs: {report.status_regression_agent_run_count}")
+    typer.echo(
+        "Status regression review items: "
+        f"{report.status_regression_review_item_count}"
+    )
     typer.echo(f"Missing review links: {report.missing_review_link_count}")
     typer.echo(f"Agent-run total cost: ${report.agent_run_total_cost_usd}")
     typer.echo(f"News bucket total cost: ${report.cost_usage_total_usd}")
@@ -990,6 +1006,7 @@ def news_agent_smoke_report_command(
         "required_triggers": list(_comma_option_values(require_triggers)),
         "required_outcomes": list(_comma_option_values(require_outcomes)),
         "allowed_outcomes": list(_comma_option_values(allow_outcomes)),
+        "min_status_regression_review_items": min_status_regression_review_items,
         "min_total_cost_usd": (
             str(parsed_min_total_cost_usd) if parsed_min_total_cost_usd is not None else None
         ),
@@ -1008,6 +1025,7 @@ def news_agent_smoke_report_command(
         required_triggers=_comma_option_values(require_triggers),
         required_outcomes=_comma_option_values(require_outcomes),
         allowed_outcomes=_comma_option_values(allow_outcomes),
+        min_status_regression_review_items=min_status_regression_review_items,
         min_total_cost_usd=parsed_min_total_cost_usd,
         max_total_cost_usd=parsed_max_total_cost_usd,
         require_review_links=require_review_links,
