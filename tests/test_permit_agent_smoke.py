@@ -16,7 +16,9 @@ from tcg_pipeline.db.models import (
     AgentRun,
     AgentRunOutcome,
     AgentRunReviewItem,
+    PipelineStatus,
     Priority,
+    Project,
     ReviewItem,
     ReviewItemType,
     SourceRun,
@@ -108,6 +110,7 @@ def test_permit_agent_smoke_report_summarizes_latest_source_run(
     assert report.review_item_type_counts == {ReviewItemType.NEW_CANDIDATE.value: 2}
     assert report.status_regression_agent_run_count == 0
     assert report.status_regression_review_item_count == 0
+    assert report.status_regression_duplicate_project_count == 0
     assert report.total_cost_usd == Decimal("0.250000")
     assert report.missing_review_link_count == 0
     assert validate_permit_agent_smoke_report(
@@ -157,6 +160,7 @@ def test_permit_agent_smoke_validation_reports_missing_expectations(
         required_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
         allowed_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
         min_status_regression_review_items=1,
+        max_status_regression_duplicate_projects=0,
         min_total_cost_usd=Decimal("0.30"),
         max_total_cost_usd=Decimal("0.10"),
     )
@@ -235,6 +239,7 @@ def test_permit_agent_smoke_report_counts_status_regression_links(
     }
     assert report.status_regression_agent_run_count == 1
     assert report.status_regression_review_item_count == 1
+    assert report.status_regression_duplicate_project_count == 0
     assert report.runs[0].review_item_type_counts == {
         ReviewItemType.STATUS_REGRESSION_REVIEW.value: 1,
     }
@@ -246,9 +251,121 @@ def test_permit_agent_smoke_report_counts_status_regression_links(
             required_triggers=("status_regression_candidate",),
             required_outcomes=(AgentRunOutcome.COMPLETED.value,),
             min_status_regression_review_items=1,
+            max_status_regression_duplicate_projects=0,
         )
         == []
     )
+
+
+def test_permit_agent_smoke_report_counts_duplicate_status_regression_projects(
+    postgres_session: Session,
+) -> None:
+    source_run = SourceRun(
+        market="los_angeles",
+        source_name="ladbs_permits",
+        collection_mode="preview",
+        run_timestamp=datetime(2026, 5, 10, tzinfo=UTC),
+        records_pulled=2,
+    )
+    project = _project("100 Duplicate Permit Way")
+    postgres_session.add_all([source_run, project])
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            _agent_run(
+                source_run=source_run,
+                intake_record_id="duplicate-permit-a",
+                project=project,
+                triggered_by=["status_regression_candidate"],
+                outcome=AgentRunOutcome.COMPLETED.value,
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+            ),
+            _agent_run(
+                source_run=source_run,
+                intake_record_id="duplicate-permit-b",
+                project=project,
+                triggered_by=["status_regression_candidate"],
+                outcome=AgentRunOutcome.COMPLETED.value,
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    report = build_permit_agent_smoke_report(
+        postgres_session,
+        source_run_id=source_run.id,
+    )
+
+    assert report.status_regression_duplicate_project_count == 1
+    assert validate_permit_agent_smoke_report(
+        report,
+        max_status_regression_duplicate_projects=0,
+        require_review_links=False,
+    ) == [
+        "Expected at most 0 projects with duplicate status_regression_candidate "
+        "triggers; found 1.",
+    ]
+
+
+def test_permit_agent_smoke_report_ignores_status_regression_runs_on_different_projects(
+    postgres_session: Session,
+) -> None:
+    source_run = SourceRun(
+        market="los_angeles",
+        source_name="ladbs_permits",
+        collection_mode="preview",
+        run_timestamp=datetime(2026, 5, 10, tzinfo=UTC),
+        records_pulled=2,
+    )
+    first_project = _project("101 Duplicate Permit Way")
+    second_project = _project("102 Duplicate Permit Way")
+    postgres_session.add_all([source_run, first_project, second_project])
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            _agent_run(
+                source_run=source_run,
+                intake_record_id="different-permit-a",
+                project=first_project,
+                triggered_by=["status_regression_candidate"],
+                outcome=AgentRunOutcome.COMPLETED.value,
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+            ),
+            _agent_run(
+                source_run=source_run,
+                intake_record_id="different-permit-b",
+                project=second_project,
+                triggered_by=["status_regression_candidate"],
+                outcome=AgentRunOutcome.COMPLETED.value,
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    report = build_permit_agent_smoke_report(
+        postgres_session,
+        source_run_id=source_run.id,
+    )
+
+    assert report.status_regression_duplicate_project_count == 0
 
 
 def test_permit_agent_smoke_cli_prints_validation_and_failed_run_details(
@@ -322,6 +439,8 @@ def test_permit_agent_smoke_cli_prints_validation_and_failed_run_details(
             "0.05",
             "--max-total-cost-usd",
             "1.00",
+            "--max-status-regression-duplicate-projects",
+            "0",
             "--output",
             str(output_path),
         ],
@@ -333,14 +452,17 @@ def test_permit_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert "Review item types: new_candidate=3" in result.output
     assert "Status regression agent runs: 0" in result.output
     assert "Status regression review items: 0" in result.output
+    assert "Status regression duplicate projects: 0" in result.output
     assert "Failure runs:" in result.output
     assert "failed_timeout (timeout-permit): wallclock exceeded 300s" in result.output
     assert "escalated (escalated-permit)" not in result.output
     report_json = output_path.read_text(encoding="utf-8")
     assert '"allowed_outcomes": [' in report_json
     assert '"min_status_regression_review_items": 0' in report_json
+    assert '"max_status_regression_duplicate_projects": 0' in report_json
     assert '"status_regression_agent_run_count": 0' in report_json
     assert '"status_regression_review_item_count": 0' in report_json
+    assert '"status_regression_duplicate_project_count": 0' in report_json
     assert '"max_total_cost_usd": "1.00"' in report_json
     assert '"failures": []' in report_json
 
@@ -403,6 +525,8 @@ def test_permit_agent_smoke_cli_validates_status_regression_review_items(
             "completed",
             "--min-status-regression-review-items",
             "1",
+            "--max-status-regression-duplicate-projects",
+            "0",
             "--max-total-cost-usd",
             "1.00",
             "--output",
@@ -415,10 +539,13 @@ def test_permit_agent_smoke_cli_validates_status_regression_review_items(
     assert "Review item types: status_regression_review=1" in result.output
     assert "Status regression agent runs: 1" in result.output
     assert "Status regression review items: 1" in result.output
+    assert "Status regression duplicate projects: 0" in result.output
     report_json = output_path.read_text(encoding="utf-8")
     assert '"min_status_regression_review_items": 1' in report_json
+    assert '"max_status_regression_duplicate_projects": 0' in report_json
     assert '"status_regression_agent_run_count": 1' in report_json
     assert '"status_regression_review_item_count": 1' in report_json
+    assert '"status_regression_duplicate_project_count": 0' in report_json
     assert '"failures": []' in report_json
 
 
@@ -427,6 +554,8 @@ def _agent_run(
     source_run: SourceRun,
     intake_record_id: str,
     triggered_by: list[str],
+    project: Project | None = None,
+    agent_revised_verdict: dict | None = None,
     outcome: str = AgentRunOutcome.KILLED_BY_SWITCH.value,
     cost_usd: Decimal = Decimal("0"),
     error_text: str | None = None,
@@ -439,6 +568,7 @@ def _agent_run(
         intake_source_type=PERMIT_AGENT_PROFILE.intake_source_type,
         intake_record_id=intake_record_id,
         source_run_id=source_run.id,
+        project_id=project.id if project is not None else None,
         profile_name=PERMIT_AGENT_PROFILE.name,
         profile_version=PERMIT_AGENT_PROFILE.profile_version,
         triggered_by=triggered_by,
@@ -453,6 +583,7 @@ def _agent_run(
         latency_ms=0,
         evidence_consulted=[],
         tool_calls_summary=[],
+        agent_revised_verdict=agent_revised_verdict,
         outcome=outcome,
         error_text=resolved_error_text,
         budget_consumed_usd=cost_usd,
@@ -460,6 +591,20 @@ def _agent_run(
         wallclock_seconds=0,
         started_at=now,
         completed_at=now,
+    )
+
+
+def _project(address: str) -> Project:
+    return Project(
+        canonical_address=address,
+        raw_addresses=[address],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        jurisdiction="city_of_los_angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+        project_name=address,
     )
 
 

@@ -84,6 +84,7 @@ Every cycle note should copy these values from the news and permit reports:
 
 - `trigger_counts.status_regression_candidate`
 - `status_regression_agent_run_count`
+- `status_regression_duplicate_project_count`
 - `review_item_type_counts.status_regression_review`
 - `status_regression_review_item_count`
 - News only: `status_regression_open_count`
@@ -97,16 +98,38 @@ While `NEWS_REGRESSION_AUTO_APPLY_ENABLED=false`,
 verify that this metric is present in the daily artifact and that the Activity
 view shows `auto_accepted` change rows.
 
-## Duplicate Trigger And Cost Watch
+## Automated Duplicate Trigger And Cost Watch
 
-For the first 3-5 organic Urbanize cron days after the regression slices ship,
-compare daily artifacts for repeated `status_regression_candidate` triggers on
-the same project/current-status/proposed-status combination.
+The smoke validators compute `status_regression_duplicate_project_count` as the
+number of distinct project/current-status/proposed-status tuples that triggered
+`status_regression_candidate` more than once inside the report window. Enforce
+the ceiling with `--max-status-regression-duplicate-projects` instead of
+hand-comparing JSON artifacts across days.
+
+Do not hard-code a default ceiling until a post-migration observation window has
+real regression volume. The 2026-05-12 preflight found the configured Supabase
+database one migration behind (`202605110037`); after the `202605110038`
+contract migration was applied, historical rows still contained no
+post-migration regression-candidate signal. The validator flag defaults to off
+so operators can first observe live volume, then choose an explicit ceiling.
+
+For the rolling duplicate watch, run a 3-5 day window with the approved ceiling
+for that cycle:
+
+```powershell
+$duplicateCeiling = <approved ceiling from observed post-migration data>
+tcg-pipeline news-agent-smoke-report `
+  --hours 120 `
+  --source-name urbanize_la `
+  --min-source-runs 3 `
+  --max-status-regression-duplicate-projects $duplicateCeiling `
+  --output "data/output/agent_reset/$cycle/news-regression-duplicate-watch.json"
+```
 
 Treat the following as investigation triggers:
 
 - Duplicate regression triggers for the same project/status pair across multiple
-  days without new evidence.
+  days or inside one smoke window without new evidence.
 - Any `failed_*` agent outcome.
 - Any active `news_semantic_parse_failed` alert.
 - News bucket cost materially above the observed production cadence.

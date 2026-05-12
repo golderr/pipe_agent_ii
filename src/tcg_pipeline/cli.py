@@ -891,6 +891,16 @@ def news_agent_smoke_report_command(
             ),
         ),
     ] = 0,
+    max_status_regression_duplicate_projects: Annotated[
+        int | None,
+        typer.Option(
+            min=0,
+            help=(
+                "Optional maximum number of project/status tuples with duplicate "
+                "status_regression_candidate triggers."
+            ),
+        ),
+    ] = None,
     min_total_cost_usd: Annotated[
         str | None,
         typer.Option(help="Optional minimum total news bucket cost required for this smoke."),
@@ -964,6 +974,10 @@ def news_agent_smoke_report_command(
         "Status regression auto-accepted items: "
         f"{report.status_regression_auto_accepted_count}"
     )
+    typer.echo(
+        "Status regression duplicate projects: "
+        f"{report.status_regression_duplicate_project_count}"
+    )
     typer.echo(f"Missing review links: {report.missing_review_link_count}")
     typer.echo(f"Agent-run total cost: ${report.agent_run_total_cost_usd}")
     typer.echo(f"News bucket total cost: ${report.cost_usage_total_usd}")
@@ -1012,6 +1026,9 @@ def news_agent_smoke_report_command(
         "required_outcomes": list(_comma_option_values(require_outcomes)),
         "allowed_outcomes": list(_comma_option_values(allow_outcomes)),
         "min_status_regression_review_items": min_status_regression_review_items,
+        "max_status_regression_duplicate_projects": (
+            max_status_regression_duplicate_projects
+        ),
         "min_total_cost_usd": (
             str(parsed_min_total_cost_usd) if parsed_min_total_cost_usd is not None else None
         ),
@@ -1031,6 +1048,9 @@ def news_agent_smoke_report_command(
         required_outcomes=_comma_option_values(require_outcomes),
         allowed_outcomes=_comma_option_values(allow_outcomes),
         min_status_regression_review_items=min_status_regression_review_items,
+        max_status_regression_duplicate_projects=(
+            max_status_regression_duplicate_projects
+        ),
         min_total_cost_usd=parsed_min_total_cost_usd,
         max_total_cost_usd=parsed_max_total_cost_usd,
         require_review_links=require_review_links,
@@ -1106,6 +1126,16 @@ def permit_agent_smoke_report_command(
             ),
         ),
     ] = 0,
+    max_status_regression_duplicate_projects: Annotated[
+        int | None,
+        typer.Option(
+            min=0,
+            help=(
+                "Optional maximum number of project/status tuples with duplicate "
+                "status_regression_candidate triggers."
+            ),
+        ),
+    ] = None,
     min_total_cost_usd: Annotated[
         str | None,
         typer.Option(help="Optional minimum total permit-agent cost required for this smoke."),
@@ -1164,6 +1194,10 @@ def permit_agent_smoke_report_command(
         "Status regression review items: "
         f"{report.status_regression_review_item_count}"
     )
+    typer.echo(
+        "Status regression duplicate projects: "
+        f"{report.status_regression_duplicate_project_count}"
+    )
     typer.echo(f"Missing review links: {report.missing_review_link_count}")
     typer.echo(f"Total cost: ${report.total_cost_usd}")
     failure_runs = _permit_smoke_failure_runs(report)
@@ -1182,6 +1216,9 @@ def permit_agent_smoke_report_command(
         "required_outcomes": list(_comma_option_values(require_outcomes)),
         "allowed_outcomes": list(_comma_option_values(allow_outcomes)),
         "min_status_regression_review_items": min_status_regression_review_items,
+        "max_status_regression_duplicate_projects": (
+            max_status_regression_duplicate_projects
+        ),
         "min_total_cost_usd": (
             str(parsed_min_total_cost_usd) if parsed_min_total_cost_usd is not None else None
         ),
@@ -1199,6 +1236,9 @@ def permit_agent_smoke_report_command(
         required_outcomes=_comma_option_values(require_outcomes),
         allowed_outcomes=_comma_option_values(allow_outcomes),
         min_status_regression_review_items=min_status_regression_review_items,
+        max_status_regression_duplicate_projects=(
+            max_status_regression_duplicate_projects
+        ),
         min_total_cost_usd=parsed_min_total_cost_usd,
         max_total_cost_usd=parsed_max_total_cost_usd,
         require_review_links=not allow_unlinked_review_items,

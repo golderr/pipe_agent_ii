@@ -253,7 +253,13 @@ Slice 6: Monitoring and stabilization.
 - Add news-smoke open vs auto-accepted status-regression card counts before
   flipping `NEWS_REGRESSION_AUTO_APPLY_ENABLED=true` in production.
 - Add `AGENT.reset` artifact checklist coverage for regression trigger counts,
-  linked-card counts, open/auto-accepted counts, duplicate-trigger observation,
-  and Activity / Audit verification.
-- Watch duplicate-trigger rates and cost for 3-5 organic cron days before any broad backfill.
+  linked-card counts, open/auto-accepted counts, automated duplicate-trigger
+  validation, and Activity / Audit verification.
+- Daily smoke validators can enforce a duplicate-trigger ceiling via
+  `--max-status-regression-duplicate-projects`. The flag defaults to off; set
+  an explicit ceiling only after observing post-migration regression volume. The
+  2026-05-12 preflight found the configured Supabase DB at `202605110037`, so
+  historical rows before the `202605110038` migration cannot calibrate the
+  duplicate threshold.
+- Watch cost for 3-5 organic cron days before any broad backfill.
 - Ensure AGENT.2 Activity / Audit Log rendering is live for regression-specific agent, review, and resolution audit rows before declaring the regression rollout complete.

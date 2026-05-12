@@ -41,6 +41,19 @@ Use `--min-agent-runs` only when the article set is expected to trigger the news
 agent. A normal Urbanize cron can legitimately produce zero agent rows if no
 article needs escalation.
 
+For the duplicate-trigger watch, run a rolling 3-5 day window after regression
+handling is live and set the ceiling from observed post-migration volume:
+
+```powershell
+$duplicateCeiling = <approved ceiling from observed post-migration data>
+tcg-pipeline news-agent-smoke-report `
+  --hours 120 `
+  --source-name urbanize_la `
+  --min-source-runs 3 `
+  --max-status-regression-duplicate-projects $duplicateCeiling `
+  --output data/output/news_agent_smoke/news-agent-duplicate-watch-YYYYMMDD.json
+```
+
 ## Curated Paste-Link Smokes
 
 Use curated paste-link smokes to exercise rare news-agent paths that organic
@@ -98,6 +111,18 @@ appear, but no review card is created by design.
   distinct linked regression cards by review status. Use these during
   `NEWS_REGRESSION_AUTO_APPLY_ENABLED` rollout to distinguish queueing from
   auto-accepted mutations.
+- `status_regression_duplicate_project_count`: distinct
+  `(project_id, current_status, proposed_status)` tuples that produced two or
+  more `status_regression_candidate` runs in the report window. The project ID
+  comes from `agent_runs.project_id`; the current/proposed statuses come from
+  `agent_revised_verdict` first because dismiss outcomes often have no review
+  card, with linked `status_regression_review` payloads as fallback. Use
+  `--max-status-regression-duplicate-projects` as the automated replacement for
+  manual cross-day duplicate checks. The flag defaults to off. On 2026-05-12
+  the configured Supabase DB was found one migration behind and then upgraded to
+  `202605110038`; historical rows before that migration cannot calibrate a
+  duplicate ceiling. Observe post-migration regression volume first, then pass
+  an explicit ceiling.
 - `agent_run_total_cost_usd`: sum of `agent_runs.cost_usd` for `news_v1`.
 - `cost_usage_total_usd`: full `news` bucket cost across all capabilities in
   `llm_cost_usage`, including extraction, triage, semantic, retry, embeddings,

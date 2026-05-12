@@ -26,7 +26,9 @@ from tcg_pipeline.db.models import (
     NewsSemanticInterpretation,
     NewsSource,
     NewsTriageStatus,
+    PipelineStatus,
     Priority,
+    Project,
     ReviewItem,
     ReviewItemStatus,
     ReviewItemType,
@@ -176,6 +178,7 @@ def test_news_agent_smoke_report_summarizes_window(
     assert report.status_regression_review_item_count == 1
     assert report.status_regression_open_count == 1
     assert report.status_regression_auto_accepted_count == 0
+    assert report.status_regression_duplicate_project_count == 0
     assert report.agent_run_total_cost_usd == Decimal("0.100000")
     assert report.missing_review_link_count == 0
     assert report.runs[1].review_item_type_counts == {
@@ -211,6 +214,7 @@ def test_news_agent_smoke_report_summarizes_window(
         required_outcomes=(AgentRunOutcome.COMPLETED.value,),
         allowed_outcomes=(AgentRunOutcome.COMPLETED.value, AgentRunOutcome.ESCALATED.value),
         min_status_regression_review_items=1,
+        max_status_regression_duplicate_projects=0,
         min_total_cost_usd=Decimal("0.05"),
         max_total_cost_usd=Decimal("0.50"),
     ) == []
@@ -260,6 +264,7 @@ def test_news_agent_smoke_validation_reports_missing_expectations(
         required_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
         allowed_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
         min_status_regression_review_items=1,
+        max_status_regression_duplicate_projects=0,
         min_total_cost_usd=Decimal("0.30"),
         max_total_cost_usd=Decimal("0.10"),
         require_review_links=True,
@@ -317,6 +322,118 @@ def test_news_agent_smoke_report_counts_review_item_types(
     assert report.runs[0].review_item_type_counts == {
         ReviewItemType.NEW_CANDIDATE.value: 1,
     }
+
+
+def test_news_agent_smoke_report_counts_duplicate_status_regression_projects(
+    postgres_session: Session,
+) -> None:
+    source = _news_source()
+    now = datetime(2099, 5, 13, 20, tzinfo=UTC)
+    source_run = _source_run(source, run_timestamp=now - timedelta(minutes=30))
+    first_article = _article(source, fetched_at=now - timedelta(minutes=25))
+    second_article = _article(source, fetched_at=now - timedelta(minutes=20))
+    project = _project("100 Duplicate News Way")
+    postgres_session.add_all([source, source_run, first_article, second_article, project])
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            _agent_run(
+                source_run=source_run,
+                article=first_article,
+                project=project,
+                triggered_by=["status_regression_candidate"],
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+                created_at=now - timedelta(minutes=15),
+            ),
+            _agent_run(
+                source_run=source_run,
+                article=second_article,
+                project=project,
+                triggered_by=["status_regression_candidate"],
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+                created_at=now - timedelta(minutes=10),
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    report = build_news_agent_smoke_report(
+        postgres_session,
+        since=now - timedelta(hours=1),
+        until=now,
+        source_name=source.slug,
+    )
+
+    assert report.status_regression_duplicate_project_count == 1
+    assert validate_news_agent_smoke_report(
+        report,
+        max_status_regression_duplicate_projects=0,
+    ) == [
+        "Expected at most 0 projects with duplicate status_regression_candidate "
+        "triggers; found 1.",
+    ]
+
+
+def test_news_agent_smoke_report_ignores_status_regression_runs_on_different_projects(
+    postgres_session: Session,
+) -> None:
+    source = _news_source()
+    now = datetime(2099, 5, 13, 21, tzinfo=UTC)
+    source_run = _source_run(source, run_timestamp=now - timedelta(minutes=30))
+    first_article = _article(source, fetched_at=now - timedelta(minutes=25))
+    second_article = _article(source, fetched_at=now - timedelta(minutes=20))
+    first_project = _project("101 Duplicate News Way")
+    second_project = _project("102 Duplicate News Way")
+    postgres_session.add_all(
+        [source, source_run, first_article, second_article, first_project, second_project]
+    )
+    postgres_session.flush()
+    postgres_session.add_all(
+        [
+            _agent_run(
+                source_run=source_run,
+                article=first_article,
+                project=first_project,
+                triggered_by=["status_regression_candidate"],
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+                created_at=now - timedelta(minutes=15),
+            ),
+            _agent_run(
+                source_run=source_run,
+                article=second_article,
+                project=second_project,
+                triggered_by=["status_regression_candidate"],
+                agent_revised_verdict={
+                    "decision": "dismiss",
+                    "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+                    "proposed_status": PipelineStatus.APPROVED.value,
+                },
+                created_at=now - timedelta(minutes=10),
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    report = build_news_agent_smoke_report(
+        postgres_session,
+        since=now - timedelta(hours=1),
+        until=now,
+        source_name=source.slug,
+    )
+
+    assert report.status_regression_duplicate_project_count == 0
 
 
 def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
@@ -422,6 +539,8 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
             "completed,failed_timeout",
             "--min-status-regression-review-items",
             "1",
+            "--max-status-regression-duplicate-projects",
+            "0",
             "--min-total-cost-usd",
             "0.05",
             "--max-total-cost-usd",
@@ -444,6 +563,7 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert "Status regression review items: 1" in result.output
     assert "Status regression open items: 1" in result.output
     assert "Status regression auto-accepted items: 0" in result.output
+    assert "Status regression duplicate projects: 0" in result.output
     assert "News bucket total cost: $0.070000" in result.output
     assert "Cost-usage breakdown:" in result.output
     assert "agent.news_v1: $0.070000 (2 calls)" in result.output
@@ -460,6 +580,8 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert '"status_regression_review_item_count": 1' in report_json
     assert '"status_regression_open_count": 1' in report_json
     assert '"status_regression_auto_accepted_count": 0' in report_json
+    assert '"status_regression_duplicate_project_count": 0' in report_json
+    assert '"max_status_regression_duplicate_projects": 0' in report_json
     assert '"max_total_cost_usd": "1.00"' in report_json
     assert '"cost_usage_by_capability": [' in report_json
     assert '"semantic_issue_count": 1' in report_json
@@ -591,11 +713,27 @@ def _article(
     )
 
 
+def _project(address: str) -> Project:
+    return Project(
+        canonical_address=address,
+        raw_addresses=[address],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        jurisdiction="city_of_los_angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+        project_name=address,
+    )
+
+
 def _agent_run(
     *,
     source_run: SourceRun,
     article: NewsArticle,
     triggered_by: list[str],
+    project: Project | None = None,
+    agent_revised_verdict: dict | None = None,
     outcome: str = AgentRunOutcome.COMPLETED.value,
     cost_usd: Decimal = Decimal("0"),
     error_text: str | None = None,
@@ -608,6 +746,7 @@ def _agent_run(
         intake_source_type=NEWS_AGENT_PROFILE.intake_source_type,
         intake_record_id=str(article.id),
         source_run_id=source_run.id,
+        project_id=project.id if project is not None else None,
         profile_name=NEWS_AGENT_PROFILE.name,
         profile_version=NEWS_AGENT_PROFILE.profile_version,
         triggered_by=triggered_by,
@@ -622,6 +761,7 @@ def _agent_run(
         latency_ms=0,
         evidence_consulted=[],
         tool_calls_summary=[],
+        agent_revised_verdict=agent_revised_verdict,
         outcome=outcome,
         error_text=resolved_error_text,
         budget_consumed_usd=cost_usd,

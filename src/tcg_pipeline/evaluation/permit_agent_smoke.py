@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import String, func, select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.agents.profiles import PERMIT_AGENT_PROFILE, AgentTrigger
@@ -48,6 +48,7 @@ class PermitAgentSmokeReport:
     review_item_type_counts: dict[str, int]
     status_regression_agent_run_count: int
     status_regression_review_item_count: int
+    status_regression_duplicate_project_count: int
     total_cost_usd: Decimal
     missing_review_link_count: int
     runs: tuple[PermitAgentSmokeRun, ...]
@@ -88,7 +89,12 @@ def build_permit_agent_smoke_report(
         .scalars()
         .all()
     )
-    review_link_counts = _review_link_counts(session, agent_run_ids=[run.id for run in agent_runs])
+    agent_run_ids = [run.id for run in agent_runs]
+    review_link_counts = _review_link_counts(session, agent_run_ids=agent_run_ids)
+    status_regression_payloads_by_agent = _status_regression_review_payloads_by_agent(
+        session,
+        agent_run_ids=agent_run_ids,
+    )
     runs = tuple(
         _smoke_run_for_agent_run(
             run,
@@ -121,6 +127,12 @@ def build_permit_agent_smoke_report(
             status_regression_review_type,
             0,
         ),
+        status_regression_duplicate_project_count=(
+            _status_regression_duplicate_project_count(
+                agent_runs,
+                review_payloads_by_agent=status_regression_payloads_by_agent,
+            )
+        ),
         total_cost_usd=total_cost,
         missing_review_link_count=sum(1 for run in runs if run.review_item_count == 0),
         runs=runs,
@@ -136,6 +148,7 @@ def validate_permit_agent_smoke_report(
     required_outcomes: tuple[str, ...] = (),
     allowed_outcomes: tuple[str, ...] = (),
     min_status_regression_review_items: int = 0,
+    max_status_regression_duplicate_projects: int | None = None,
     min_total_cost_usd: Decimal | None = None,
     max_total_cost_usd: Decimal | None = None,
     require_review_links: bool = True,
@@ -167,6 +180,17 @@ def validate_permit_agent_smoke_report(
             f"{min_status_regression_review_items} linked status regression review item(s); "
             f"found {report.status_regression_review_item_count}."
         )
+    if (
+        max_status_regression_duplicate_projects is not None
+        and report.status_regression_duplicate_project_count
+        > max_status_regression_duplicate_projects
+    ):
+        failures.append(
+            "Expected at most "
+            f"{max_status_regression_duplicate_projects} projects with duplicate "
+            "status_regression_candidate triggers; found "
+            f"{report.status_regression_duplicate_project_count}."
+        )
     if min_total_cost_usd is not None and report.total_cost_usd < min_total_cost_usd:
         failures.append(
             f"Expected total cost >= ${min_total_cost_usd}; found ${report.total_cost_usd}."
@@ -195,6 +219,9 @@ def permit_agent_smoke_report_to_dict(report: PermitAgentSmokeReport) -> dict[st
         "review_item_type_counts": report.review_item_type_counts,
         "status_regression_agent_run_count": report.status_regression_agent_run_count,
         "status_regression_review_item_count": report.status_regression_review_item_count,
+        "status_regression_duplicate_project_count": (
+            report.status_regression_duplicate_project_count
+        ),
         "total_cost_usd": str(report.total_cost_usd),
         "missing_review_link_count": report.missing_review_link_count,
         "runs": [
@@ -276,6 +303,81 @@ def _review_link_counts(
         item_type = getattr(row.item_type, "value", str(row.item_type))
         counts.setdefault(row.agent_run_id, {})[item_type] = int(row[2])
     return counts
+
+
+def _status_regression_review_payloads_by_agent(
+    session: Session,
+    *,
+    agent_run_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, tuple[dict[str, Any], ...]]:
+    if not agent_run_ids:
+        return {}
+    rows = session.execute(
+        select(
+            AgentRunReviewItem.agent_run_id,
+            ReviewItem.payload,
+        )
+        .join(ReviewItem, AgentRunReviewItem.review_item_id == ReviewItem.id)
+        .where(
+            AgentRunReviewItem.agent_run_id.in_(agent_run_ids),
+            ReviewItem.item_type.cast(String) == ReviewItemType.STATUS_REGRESSION_REVIEW.value,
+        )
+        .order_by(AgentRunReviewItem.agent_run_id.asc(), ReviewItem.updated_at.desc())
+    ).all()
+    payloads: dict[uuid.UUID, list[dict[str, Any]]] = {}
+    for row in rows:
+        if isinstance(row.payload, dict):
+            payloads.setdefault(row.agent_run_id, []).append(row.payload)
+    return {agent_run_id: tuple(items) for agent_run_id, items in payloads.items()}
+
+
+def _status_regression_duplicate_project_count(
+    agent_runs: list[AgentRun],
+    *,
+    review_payloads_by_agent: dict[uuid.UUID, tuple[dict[str, Any], ...]],
+) -> int:
+    status_regression_trigger = AgentTrigger.STATUS_REGRESSION_CANDIDATE.value
+    seen: dict[tuple[uuid.UUID, str, str], set[uuid.UUID]] = {}
+    for run in agent_runs:
+        if status_regression_trigger not in {str(trigger) for trigger in run.triggered_by or []}:
+            continue
+        if run.project_id is None:
+            continue
+        # Prefer agent_revised_verdict because dismiss outcomes often have no linked
+        # review card; fall back to linked status_regression_review payloads for
+        # killed-switch or deterministic review paths where no verdict was produced.
+        status_pair = _status_regression_pair_from_mapping(run.agent_revised_verdict)
+        if status_pair is None:
+            for payload in review_payloads_by_agent.get(run.id, ()):
+                status_pair = _status_regression_pair_from_mapping(payload)
+                if status_pair is not None:
+                    break
+        if status_pair is None:
+            continue
+        seen.setdefault((run.project_id, status_pair[0], status_pair[1]), set()).add(run.id)
+    return sum(1 for run_ids in seen.values() if len(run_ids) >= 2)
+
+
+def _status_regression_pair_from_mapping(
+    value: Any,
+) -> tuple[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    current = _clean_status_text(value.get("current_status") or value.get("current_value"))
+    proposed = _clean_status_text(value.get("proposed_status") or value.get("proposed_value"))
+    if current is None or proposed is None:
+        nested = value.get("status_regression")
+        if isinstance(nested, dict):
+            return _status_regression_pair_from_mapping(nested)
+        return None
+    return current, proposed
+
+
+def _clean_status_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text.casefold() if text else None
 
 
 def _decimal(value: Any) -> Decimal:
