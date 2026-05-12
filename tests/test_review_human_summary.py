@@ -131,6 +131,24 @@ def test_existing_summary_is_preserved_on_refresh() -> None:
             ),
         ),
         (
+            ReviewItemType.STATUS_REGRESSION_REVIEW,
+            "pipeline_status",
+            {
+                "source_name": "Urbanize LA",
+                "current_value": "Under Construction",
+                "proposed_value": "Approved",
+                "agent_recommendation": {
+                    "decision": "defer_to_review",
+                    "confidence": 0.81,
+                },
+            },
+            (
+                "Urbanize LA suggests Pipeline Status may need to regress",
+                "from Under Construction to Approved",
+                "review whether the lifecycle status should move backward",
+            ),
+        ),
+        (
             ReviewItemType.OVERRIDE_CONTRADICTION,
             "pipeline_status",
             {

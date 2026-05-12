@@ -104,12 +104,16 @@ def test_default_tool_registry_includes_get_project_state() -> None:
 
     assert [spec["name"] for spec in specs] == [
         "get_article_body",
+        "get_permits_for_project",
         "get_project_state",
         "search_articles_similar",
         "search_projects",
     ]
     spec_by_name = {spec["name"]: spec for spec in specs}
     assert spec_by_name["get_project_state"]["input_schema"]["required"] == ["project_id"]
+    assert spec_by_name["get_permits_for_project"]["input_schema"]["required"] == [
+        "project_id"
+    ]
     assert spec_by_name["get_article_body"]["input_schema"]["required"] == ["article_id"]
     assert spec_by_name["search_articles_similar"]["input_schema"]["required"] == ["query_text"]
     assert "query_text" in spec_by_name["search_projects"]["input_schema"]["properties"]

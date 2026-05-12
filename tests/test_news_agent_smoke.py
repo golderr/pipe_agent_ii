@@ -68,7 +68,11 @@ def test_news_agent_smoke_report_summarizes_window(
     escalated_run = _agent_run(
         source_run=source_run,
         article=article,
-        triggered_by=["low_confidence", "pass1_pass2_conflict"],
+        triggered_by=[
+            "low_confidence",
+            "pass1_pass2_conflict",
+            "status_regression_candidate",
+        ],
         outcome=AgentRunOutcome.ESCALATED.value,
         cost_usd=Decimal("0.030000"),
         created_at=now - timedelta(minutes=30),
@@ -132,6 +136,7 @@ def test_news_agent_smoke_report_summarizes_window(
         "low_confidence": 1,
         "new_candidate": 1,
         "pass1_pass2_conflict": 1,
+        "status_regression_candidate": 1,
     }
     assert report.agent_run_total_cost_usd == Decimal("0.100000")
     assert report.missing_review_link_count == 1
@@ -156,7 +161,11 @@ def test_news_agent_smoke_report_summarizes_window(
         report,
         min_source_runs=1,
         min_agent_runs=2,
-        required_triggers=("new_candidate", "low_confidence"),
+        required_triggers=(
+            "new_candidate",
+            "low_confidence",
+            "status_regression_candidate",
+        ),
         required_outcomes=(AgentRunOutcome.COMPLETED.value,),
         allowed_outcomes=(AgentRunOutcome.COMPLETED.value, AgentRunOutcome.ESCALATED.value),
         min_total_cost_usd=Decimal("0.05"),

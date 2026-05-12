@@ -17,6 +17,7 @@ from tcg_pipeline.review.human_summary import normalize_human_summary, payload_w
 ACTIVE_REVIEW_STATES = ("open", "staged")
 DECISION_CARD_ITEM_TYPES = {
     ReviewItemType.STATUS_CHANGE,
+    ReviewItemType.STATUS_REGRESSION_REVIEW,
     ReviewItemType.OVERRIDE_CONTRADICTION,
 }
 MAX_UPSERT_ATTEMPTS = 3

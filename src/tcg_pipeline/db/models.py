@@ -118,6 +118,7 @@ class ReviewItemType(str, enum.Enum):
     NEWS_STATUS_UNCORROBORATED = "news_status_uncorroborated"
     MULTI_TENURE_REVIEW = "multi_tenure_review"
     PROJECT_CANCELLATION_REVIEW = "project_cancellation_review"
+    STATUS_REGRESSION_REVIEW = "status_regression_review"
 
 
 class ReviewItemStatus(str, enum.Enum):
@@ -2223,6 +2224,11 @@ class ResolutionLog(Base):
     rule_applied: Mapped[str | None] = mapped_column(String(120), nullable=True)
     confidence: Mapped[StatusConfidence | None] = mapped_column(
         STATUS_CONFIDENCE_ENUM,
+        nullable=True,
+    )
+    metadata_json: Mapped[dict | list | str | int | float | bool | None] = mapped_column(
+        "metadata",
+        JSONB,
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(

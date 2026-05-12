@@ -137,12 +137,44 @@ def _news_status_uncorroborated_summary(
     source_name: str | None,
 ) -> str:
     source = _source_label(payload, source_name=source_name)
-    label = _field_label(field_name or _text(payload.get("field_name")) or "pipeline_status")
+    label = _field_label(
+        field_name or _text(payload.get("field_name")) or "pipeline_status"
+    )
     current = _format_value(payload.get("current_value"))
     proposed = _format_value(payload.get("proposed_value"))
     return (
         f"{source} suggests {label} should move from {current} to {proposed}, "
         "but corroboration is still needed; verify before applying."
+    )
+
+
+def _status_regression_review_summary(
+    payload: Mapping[str, Any],
+    *,
+    field_name: str | None,
+    source_name: str | None,
+) -> str:
+    source = _source_label(payload, source_name=source_name)
+    label = _field_label(field_name or _text(payload.get("field_name")) or "pipeline_status")
+    current = _format_value(payload.get("current_value"))
+    proposed = _format_value(payload.get("proposed_value"))
+    recommendation = _mapping(
+        payload.get("agent_recommendation") or payload.get("agent_revised_verdict")
+    )
+    decision = _text(recommendation.get("decision"))
+    if decision == "confirm_regression":
+        return (
+            f"{source} suggests {label} may need to regress from {current} to "
+            f"{proposed}; the agent recommends applying it after review."
+        )
+    if decision == "dismiss":
+        return (
+            f"{source} suggested {label} might regress from {current} to {proposed}, "
+            "but the agent recommends dismissing the signal."
+        )
+    return (
+        f"{source} suggests {label} may need to regress from {current} to {proposed}; "
+        "review whether the lifecycle status should move backward."
     )
 
 
@@ -472,6 +504,7 @@ _TEMPLATES = {
     ReviewItemType.NEW_CANDIDATE.value: _new_candidate_summary,
     ReviewItemType.POSSIBLE_MATCH.value: _possible_match_summary,
     ReviewItemType.NEWS_STATUS_UNCORROBORATED.value: _news_status_uncorroborated_summary,
+    ReviewItemType.STATUS_REGRESSION_REVIEW.value: _status_regression_review_summary,
     ReviewItemType.STATUS_CHANGE.value: _status_change_summary,
     ReviewItemType.OVERRIDE_CONTRADICTION.value: _override_contradiction_summary,
     ReviewItemType.MULTI_TENURE_REVIEW.value: _semantic_review_summary,

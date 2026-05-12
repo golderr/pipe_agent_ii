@@ -163,10 +163,12 @@ def test_semantic_review_item_types_are_declared() -> None:
         ReviewItemType.NEWS_STATUS_UNCORROBORATED.value,
         ReviewItemType.MULTI_TENURE_REVIEW.value,
         ReviewItemType.PROJECT_CANCELLATION_REVIEW.value,
+        ReviewItemType.STATUS_REGRESSION_REVIEW.value,
     } == {
         "news_status_uncorroborated",
         "multi_tenure_review",
         "project_cancellation_review",
+        "status_regression_review",
     }
 
 
@@ -182,4 +184,5 @@ def test_resolution_log_and_developer_alias_indexes_are_declared() -> None:
     developer_alias_index_names = {index.name for index in DeveloperAlias.__table__.indexes}
 
     assert "ix_resolution_log_project_id_created_at" in resolution_index_names
+    assert ResolutionLog.__table__.columns["metadata"].nullable is True
     assert "ix_developer_alias_developer_id" in developer_alias_index_names

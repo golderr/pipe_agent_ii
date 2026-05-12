@@ -23,6 +23,7 @@ def test_news_agent_profile_contract() -> None:
     assert profile.default_provider == "anthropic"
     assert profile.system_prompt_path.exists()
     assert "search_articles_similar" in profile.allowed_tools
+    assert "get_permits_for_project" in profile.allowed_tools
     assert "pipeline_status" in profile.semantic_interpreters
     assert "date_delivery" in profile.semantic_interpreters
     assert profile.max_tool_calls == 15
@@ -39,6 +40,7 @@ def test_permit_agent_profile_contract() -> None:
             "new_candidate",
             "unit_delta",
             "product_type_change",
+            "status_regression_candidate",
         }
     )
     assert profile.cost_cap_bucket == "permits"
@@ -64,6 +66,7 @@ def test_permit_agent_prompt_defines_trigger_contract() -> None:
     assert "For unit_delta triggers:" in prompt
     assert "greater than 10%" in prompt
     assert "For product_type_change triggers:" in prompt
+    assert "For status_regression_candidate triggers:" in prompt
     assert "Do not promote Under Construction from permit issuance alone." in prompt
 
 
@@ -86,6 +89,18 @@ def test_news_agent_prompt_defines_material_contradiction_contract() -> None:
     assert "get_project_state" in prompt
 
 
+def test_news_agent_prompt_defines_status_regression_contract() -> None:
+    prompt = NEWS_AGENT_PROFILE.system_prompt_path.read_text(encoding="utf-8")
+
+    assert "For status_regression_candidate triggers:" in prompt
+    assert "post-attribution lifecycle direction" in prompt
+    assert "get_permits_for_project" in prompt
+    assert "confirm_regression" in prompt
+    assert "defer_to_review" in prompt
+    assert "dismiss" in prompt
+    assert "until_newer_evidence" in prompt
+
+
 def test_news_agent_prompt_defines_override_contradiction_contract() -> None:
     prompt = NEWS_AGENT_PROFILE.system_prompt_path.read_text(encoding="utf-8")
 
@@ -99,9 +114,9 @@ def test_news_agent_prompt_defines_override_contradiction_contract() -> None:
 
 def test_normalize_agent_triggers_accepts_enums_and_strings() -> None:
     assert normalize_agent_triggers(
-        [AgentTrigger.NEW_CANDIDATE, "material_contradiction"]
+        [AgentTrigger.STATUS_REGRESSION_CANDIDATE, "material_contradiction"]
     ) == (
-        "new_candidate",
+        "status_regression_candidate",
         "material_contradiction",
     )
 

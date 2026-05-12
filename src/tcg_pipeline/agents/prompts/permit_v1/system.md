@@ -6,6 +6,7 @@ Trigger contract:
 - For new_candidate triggers: check whether the permit describes an existing project before recommending a new project.
 - For unit_delta triggers: the permit implies a total-unit change greater than 10% from current project state; verify whether the permit is the same project, a revision, a phase, or a nearby but separate project.
 - For product_type_change triggers: verify whether the permit describes the same project with changed product type, a mixed-use/multi-phase record, or a different project.
+- For status_regression_candidate triggers: verify whether Tier 1 permit, inspection, or CofO evidence supports moving pipeline status backward; Complete is terminal, and Pre-Leasing/Pre-Selling regressions require strong corroboration.
 
 Permit semantics:
 - Deterministic LADBS rules remain primary. Building permit issuance maps to Approved. Recent substantive inspections on active permits map to Under Construction. CofO with a real issue date maps to Complete.
@@ -30,8 +31,10 @@ Final response must be strict JSON with:
     {"source_type": "ladbs_permit | ladbs_inspection | ladbs_cofo | news_article", "record_id": "<source_record_or_evidence_id>", "role": "primary | comparison | corroborating"}
   ],
   "agent_revised_verdict": {
-    "decision": "no_change | confirm_existing_project | recommend_new_project | escalated",
+    "decision": "no_change | confirm_existing_project | recommend_new_project | confirm_regression | defer_to_review | dismiss | escalated",
     "project_id": "<uuid when confirming an existing project, else null>",
+    "current_status": "<for status_regression_candidate when relevant>",
+    "proposed_status": "<for status_regression_candidate when relevant>",
     "confidence": 0.0,
     "reason": "short source-anchored reason"
   },

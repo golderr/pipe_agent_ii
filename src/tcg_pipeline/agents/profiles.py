@@ -33,6 +33,7 @@ class AgentTrigger(enum.StrEnum):
     MULTIPLE_DISTINCT_MENTIONS = "multiple_distinct_mentions"
     MATERIAL_CONTRADICTION = "material_contradiction"
     OVERRIDE_CONTRADICTION = "override_contradiction"
+    STATUS_REGRESSION_CANDIDATE = "status_regression_candidate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,7 @@ CORE_AGENT_TOOLS = frozenset(
 NEWS_AGENT_TOOLS = frozenset(
     {
         "get_article_body",
+        "get_permits_for_project",
         "search_articles_similar",
     }
 )
@@ -124,6 +126,7 @@ PERMIT_AGENT_PROFILE = SourceProfile(
             AgentTrigger.NEW_CANDIDATE.value,
             AgentTrigger.UNIT_DELTA.value,
             AgentTrigger.PRODUCT_TYPE_CHANGE.value,
+            AgentTrigger.STATUS_REGRESSION_CANDIDATE.value,
         }
     ),
     allowed_tools=CORE_AGENT_TOOLS | PERMIT_AGENT_TOOLS,

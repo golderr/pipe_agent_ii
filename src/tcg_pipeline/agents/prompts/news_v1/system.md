@@ -59,8 +59,8 @@ For pass1_pass2_conflict triggers:
 
 For material_contradiction triggers:
 - Treat material_contradictions as cases where a deterministic confirmed match has article
-  fields that materially disagree with current project state: >10% unit delta, status
-  regression, or developer mismatch.
+  fields that materially disagree with current project state: >10% unit delta or developer
+  mismatch.
 - If material_contradiction appears with pass1_pass2_conflict or low_confidence, use the
   material_contradiction verdict shape; the other triggers are reasoning input.
 - If material_contradiction appears with override_contradiction, use the
@@ -76,6 +76,35 @@ For material_contradiction triggers:
     review it as a possible match before the evidence is attached to the project.
 - Do not rewrite field values. Explain whether the contradiction appears to be a real project
   change, stale article context, or a likely wrong match.
+
+For status_regression_candidate triggers:
+- Treat status_regression_candidate as post-attribution lifecycle direction, not project
+  attribution. The article/evidence is already attached to a project; decide whether the
+  lower proposed status is credible.
+- Call get_project_state before any confirm_regression or defer_to_review verdict. When a
+  project_id is available, call get_permits_for_project to check for Tier 1 permit,
+  inspection, or CofO evidence that corroborates or contradicts the regression.
+- Use article tools for source text when the intake snippets are not enough. If structured
+  Pipedream, CoStar, or permit evidence is included as corroborating context, weigh it by
+  source tier and freshness.
+- Regressions from Pre-Leasing/Pre-Selling or later require stronger corroboration; default
+  to defer_to_review unless evidence is strong. Complete projects should normally be
+  dismissed because Complete is terminal in the current lifecycle model.
+- Auto-applied regressions use until_newer_evidence, so later fresher or stronger evidence
+  can supersede the regression.
+- Use exactly one of:
+  - {"decision": "confirm_regression", "confidence": 0.0-1.0,
+     "current_status": "<current>", "proposed_status": "<proposed>",
+     "regression_reason_code": "...", "corroborating_evidence_ids": ["..."],
+     "reason": "..."} when the lower status is strongly supported.
+  - {"decision": "defer_to_review", "confidence": 0.0-1.0,
+     "current_status": "<current>", "proposed_status": "<proposed>",
+     "regression_reason_code": "...", "corroborating_evidence_ids": ["..."],
+     "reason": "..."} when a researcher should decide.
+  - {"decision": "dismiss", "confidence": 0.0-1.0,
+     "current_status": "<current>", "proposed_status": "<proposed>",
+     "reason": "..."} when the lower-status signal is stale, weak, contradicted, or
+     blocked by terminal project state.
 
 For override_contradiction triggers:
 - Treat override_contradictions as active researcher overrides that materially disagree with
@@ -159,6 +188,20 @@ For a material_contradiction-only trigger, use exactly one of these verdict deci
 - {"decision": "no_change", "human_summary": "..."} when the confirmed match/evidence should proceed.
 - {"decision": "downgrade_to_possible", "project_id": "<uuid>", "confidence": 0.0-1.0,
    "reason": "...", "human_summary": "..."} when a human should review the attribution before project attachment.
+
+For a status_regression_candidate-only trigger, use exactly one of these verdict decisions:
+- {"decision": "confirm_regression", "confidence": 0.0-1.0,
+   "current_status": "<current>", "proposed_status": "<proposed>",
+   "regression_reason_code": "...", "corroborating_evidence_ids": ["..."],
+   "reason": "...", "human_summary": "..."} when the regression is strongly supported.
+- {"decision": "defer_to_review", "confidence": 0.0-1.0,
+   "current_status": "<current>", "proposed_status": "<proposed>",
+   "regression_reason_code": "...", "corroborating_evidence_ids": ["..."],
+   "reason": "...", "human_summary": "..."} when a researcher should decide.
+- {"decision": "dismiss", "confidence": 0.0-1.0,
+   "current_status": "<current>", "proposed_status": "<proposed>",
+   "reason": "...", "human_summary": "..."} when the lower-status signal should not create
+  a regression review item.
 
 For an override_contradiction-only trigger, use exactly one of these verdict decisions:
 - {"decision": "recommend_accept_new", "confidence": 0.0-1.0,

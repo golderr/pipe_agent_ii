@@ -228,12 +228,22 @@ export function warningForItem(item: ReviewQueueItem) {
   return (
     asString(payload?.message) ??
     asString(firstFlag?.message) ??
+    (item.itemType === "status_regression_review"
+      ? "This item asks whether pipeline status should move backward."
+      : null) ??
     (item.itemType.includes("contradiction") ? "This item conflicts with a manual override." : null)
   );
 }
 
 export function humanSummaryForItem(item: ReviewQueueItem) {
-  return asString(item.payload?.human_summary) ?? `${humanize(fieldNameForItem(item))} changed`;
+  const summary = asString(item.payload?.human_summary);
+  if (summary) {
+    return summary;
+  }
+  if (item.itemType === "status_regression_review") {
+    return `${humanize(fieldNameForItem(item))} regression needs review`;
+  }
+  return `${humanize(fieldNameForItem(item))} changed`;
 }
 
 export function firstChange(item: ReviewQueueItem) {

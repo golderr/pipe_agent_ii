@@ -182,6 +182,20 @@ describe("review payload helpers", () => {
     expect(warningForItem(item)).toBe("This item conflicts with a manual override.");
   });
 
+  it("labels status regression review fallbacks", () => {
+    const item = reviewItem({
+      itemType: "status_regression_review",
+      fieldName: "pipeline_status",
+      payload: {
+        current_value: "Under Construction",
+        proposed_value: "Approved"
+      }
+    });
+
+    expect(humanSummaryForItem(item)).toBe("Pipeline Status regression needs review");
+    expect(warningForItem(item)).toBe("This item asks whether pipeline status should move backward.");
+  });
+
   it("extracts news context and uses article source text", () => {
     const item = reviewItem({
       payload: {
