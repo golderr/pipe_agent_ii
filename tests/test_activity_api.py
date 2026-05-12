@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -53,6 +53,35 @@ def _auth_user() -> AuthenticatedUser:
         role="authenticated",
         claims={},
     )
+
+
+def _ensure_status_regression_review_item_type(postgres_session: Session) -> None:
+    exists = postgres_session.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_enum enum_value
+                JOIN pg_type enum_type
+                  ON enum_type.oid = enum_value.enumtypid
+                WHERE enum_type.typname = 'review_item_type_enum'
+                  AND enum_value.enumlabel = :enum_label
+            )
+            """
+        ),
+        {"enum_label": ReviewItemType.STATUS_REGRESSION_REVIEW.value},
+    ).scalar()
+    if not exists:
+        pytest.skip("Apply the status regression review-item enum migration before this test.")
+
+
+def _ensure_resolution_log_metadata(postgres_session: Session) -> None:
+    inspector = inspect(postgres_session.bind)
+    if not inspector.has_table("resolution_log"):
+        pytest.skip("Apply resolution-log migrations before running regression tests.")
+    column_names = {column["name"] for column in inspector.get_columns("resolution_log")}
+    if "metadata" not in column_names:
+        pytest.skip("Apply the status regression metadata migration before this test.")
 
 
 def _tamper_activity_cursor(cursor: str, **updates: object) -> str:
@@ -1168,9 +1197,10 @@ def test_activity_feed_agent_view_filters_to_agent_rows(postgres_session: Sessio
     assert [event.event_type for event in response.events] == ["agent"]
 
 
-def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
+def test_activity_feed_auto_applied_view_includes_auto_accepted_change_rows(
     postgres_session: Session,
 ) -> None:
+    _ensure_status_regression_review_item_type(postgres_session)
     project = _project(postgres_session, "300 Activity Way")
     _semantic_interpretation(
         postgres_session,
@@ -1185,7 +1215,17 @@ def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
         field_name="pipeline_status",
         payload={},
     )
-    postgres_session.add(review_item)
+    auto_accepted_review_item = ReviewItem(
+        project_id=project.id,
+        item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+        status=ReviewItemStatus.AUTO_ACCEPTED,
+        priority=Priority.HIGH,
+        field_name="pipeline_status",
+        payload={
+            "human_summary": "Agent confirmed the status regression to Approved.",
+        },
+    )
+    postgres_session.add_all([review_item, auto_accepted_review_item])
     postgres_session.flush()
     unlinked_agent = _agent_run(
         postgres_session,
@@ -1224,6 +1264,17 @@ def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
                 change_type=ChangeType.RESEARCHER_CONFIRMED,
                 priority=Priority.HIGH,
             ),
+            ChangeLog(
+                project_id=project.id,
+                review_item_id=auto_accepted_review_item.id,
+                timestamp=datetime(2026, 5, 8, 10, 4, 30, tzinfo=UTC),
+                source="agent.status_regression_candidate",
+                field="pipeline_status",
+                old_value="Under Construction",
+                new_value="Approved",
+                change_type=ChangeType.AUTO_ACCEPTED,
+                priority=Priority.HIGH,
+            ),
             ResolutionLog(
                 project_id=project.id,
                 field="affordable_units",
@@ -1258,10 +1309,68 @@ def test_activity_feed_auto_applied_view_excludes_review_bound_rows(
 
     assert [(event.event_type, event.field) for event in response.events] == [
         ("resolution", "affordable_units"),
+        ("change", "pipeline_status"),
         ("change", "total_units"),
         ("agent", None),
     ]
+    auto_change = response.events[1]
+    assert auto_change.change_type == ChangeType.AUTO_ACCEPTED.value
+    assert auto_change.review_item_id == auto_accepted_review_item.id
+    assert auto_change.review_item_summaries[0].human_summary == (
+        "Agent confirmed the status regression to Approved."
+    )
     assert response.events[-1].id == f"agent:{unlinked_agent.id}"
+
+
+def test_activity_feed_includes_preserved_status_regression_resolution_audit(
+    postgres_session: Session,
+) -> None:
+    _ensure_resolution_log_metadata(postgres_session)
+    project = _project(postgres_session, "325 Regression Activity Way")
+    postgres_session.add(
+        ResolutionLog(
+            project_id=project.id,
+            field="pipeline_status",
+            current_value="Under Construction",
+            resolved_value="Under Construction",
+            evidence_ids=[],
+            rule_applied="forward_only_preserve_current",
+            confidence=StatusConfidence.HIGH,
+            metadata_json={
+                "regression_candidate_count": 1,
+                "regression_audit_rule_applied": "status_regression_candidate_preserve_current",
+                "regression_candidates": [
+                    {
+                        "current_status": "Under Construction",
+                        "proposed_status": "Approved",
+                        "terminal_state_dropped": True,
+                    }
+                ],
+            },
+            created_at=datetime(2026, 5, 8, 10, 5, tzinfo=UTC),
+        )
+    )
+    postgres_session.flush()
+
+    response = list_activity_events(
+        user=_auth_user(),
+        session=postgres_session,
+        project_id=project.id,
+        limit=10,
+    )
+
+    assert [(event.event_type, event.field) for event in response.events] == [
+        ("resolution", "pipeline_status"),
+    ]
+    event = response.events[0]
+    assert event.old_value == "Under Construction"
+    assert event.new_value == "Under Construction"
+    assert event.detail["regression_candidate_count"] == 1
+    assert (
+        event.detail["regression_audit_rule_applied"]
+        == "status_regression_candidate_preserve_current"
+    )
+    assert event.detail["terminal_state_dropped"] is True
 
 
 def test_activity_feed_global_order_uses_stable_tiebreak(

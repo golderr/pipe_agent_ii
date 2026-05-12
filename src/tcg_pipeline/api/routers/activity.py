@@ -10,8 +10,8 @@ from decimal import Decimal
 from typing import Annotated, Any, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, and_, cast, or_, select, text, tuple_
-from sqlalchemy.orm import Session
+from sqlalchemy import String, and_, cast, inspect, or_, select, text, tuple_
+from sqlalchemy.orm import Session, load_only
 
 from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.deps import get_db_session, require_user
@@ -219,7 +219,7 @@ def _activity_candidates(
     if "change" in event_types:
         parts.append(_CHANGE_CANDIDATE_SQL)
     if "resolution" in event_types:
-        parts.append(_RESOLUTION_CANDIDATE_SQL)
+        parts.append(_resolution_candidate_sql(session))
     if "agent" in event_types:
         parts.append(_AGENT_CANDIDATE_SQL)
     if "semantic" in event_types:
@@ -292,6 +292,7 @@ LIMIT :fetch_limit
             ),
             "change_auto_applied": view == "auto_applied",
             "agent_auto_applied": view == "auto_applied",
+            "auto_accepted_change_type": "auto_accepted",
             "parse_ok": NewsExtractionParseStatus.OK.value,
         },
     ).mappings()
@@ -447,7 +448,11 @@ AND (
         AND cl.reviewed_by_user_id::text = CAST(:actor_uuid AS text)
     )
 )
-AND (CAST(:change_auto_applied AS boolean) = false OR cl.review_item_id IS NULL)
+AND (
+    CAST(:change_auto_applied AS boolean) = false
+    OR cl.review_item_id IS NULL
+    OR cl.change_type::text = CAST(:auto_accepted_change_type AS text)
+)
 AND (
     CAST(:from_at AS timestamp with time zone) IS NULL
     OR cl.timestamp >= CAST(:from_at AS timestamp with time zone)
@@ -474,7 +479,10 @@ WHERE (
     OR CAST(:source AS text) = 'resolution_engine'
 )
 AND (CAST(:field AS text) IS NULL OR rl.field = CAST(:field AS text))
-AND rl.current_value IS DISTINCT FROM rl.resolved_value
+AND (
+    rl.current_value IS DISTINCT FROM rl.resolved_value
+    __REGRESSION_METADATA_PREDICATE__
+)
 AND (
     CAST(:from_at AS timestamp with time zone) IS NULL
     OR rl.created_at >= CAST(:from_at AS timestamp with time zone)
@@ -485,6 +493,25 @@ AND (
 )
 {_PROJECT_FILTER_SQL}
 """
+
+
+def _resolution_candidate_sql(session: Session) -> str:
+    metadata_predicate = (
+        "\n    OR COALESCE(rl.metadata ? 'regression_candidates', false)"
+        if _resolution_log_has_metadata_column(session)
+        else ""
+    )
+    return _RESOLUTION_CANDIDATE_SQL.replace(
+        "__REGRESSION_METADATA_PREDICATE__",
+        metadata_predicate,
+    )
+
+
+def _resolution_log_has_metadata_column(session: Session) -> bool:
+    inspector = inspect(session.bind)
+    if not inspector.has_table("resolution_log"):
+        return False
+    return any(column["name"] == "metadata" for column in inspector.get_columns("resolution_log"))
 
 _AGENT_CANDIDATE_SQL = f"""
 SELECT
@@ -1121,8 +1148,26 @@ def _resolution_events_by_ids(
     unique_ids = sorted(set(ids))
     if not unique_ids:
         return {}
+    include_metadata = _resolution_log_has_metadata_column(session)
+    load_columns = [
+        ResolutionLog.id,
+        ResolutionLog.project_id,
+        ResolutionLog.field,
+        ResolutionLog.current_value,
+        ResolutionLog.resolved_value,
+        ResolutionLog.evidence_ids,
+        ResolutionLog.rule_applied,
+        ResolutionLog.confidence,
+        ResolutionLog.created_at,
+    ]
+    if include_metadata:
+        load_columns.append(ResolutionLog.metadata_json)
     rows = (
-        session.execute(select(ResolutionLog).where(ResolutionLog.id.in_(unique_ids)))
+        session.execute(
+            select(ResolutionLog)
+            .options(load_only(*load_columns))
+            .where(ResolutionLog.id.in_(unique_ids))
+        )
         .scalars()
         .all()
     )
@@ -1133,6 +1178,7 @@ def _resolution_events_by_ids(
             row,
             project=projects.get(row.project_id),
             evidence_by_id=evidence_by_id,
+            include_metadata=include_metadata,
         )
         for row in rows
     }
@@ -1143,12 +1189,29 @@ def _resolution_event(
     *,
     project: Project | None,
     evidence_by_id: dict[uuid.UUID, Evidence] | None = None,
+    include_metadata: bool = True,
 ) -> ActivityEventResponse:
     evidence_ids = list(row.evidence_ids or [])
     evidence_summaries = _activity_evidence_summaries(
         row,
         evidence_by_id=evidence_by_id or {},
     )
+    metadata = (
+        row.metadata_json
+        if include_metadata and isinstance(row.metadata_json, dict)
+        else {}
+    )
+    regression_candidates = metadata.get("regression_candidates")
+    regression_detail: dict[str, Any] = {}
+    if isinstance(regression_candidates, list) and regression_candidates:
+        regression_detail["regression_candidate_count"] = len(regression_candidates)
+        audit_rule = metadata.get("regression_audit_rule_applied")
+        if isinstance(audit_rule, str) and audit_rule:
+            regression_detail["regression_audit_rule_applied"] = audit_rule
+        regression_detail["terminal_state_dropped"] = any(
+            isinstance(candidate, dict) and bool(candidate.get("terminal_state_dropped"))
+            for candidate in regression_candidates
+        )
     return ActivityEventResponse(
         id=f"resolution:{row.id}",
         event_type="resolution",
@@ -1175,6 +1238,7 @@ def _resolution_event(
             "evidence_summaries_truncated": (
                 len(evidence_ids) > MAX_ACTIVITY_EVIDENCE_SUMMARIES
             ),
+            **regression_detail,
         },
     )
 

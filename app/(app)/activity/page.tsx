@@ -316,6 +316,13 @@ function DetailRows({ event }: { event: ActivityEvent }) {
       {event.cost_usd !== null ? <DetailRow label="Cost" value={`$${event.cost_usd.toFixed(6)}`} /> : null}
       {detailString(event, "reason_code") ? <DetailRow label="Reason code" value={detailString(event, "reason_code")} /> : null}
       {detailString(event, "confidence") ? <DetailRow label="Confidence" value={detailString(event, "confidence")} /> : null}
+      {detailNumber(event, "regression_candidate_count") !== null ? (
+        <DetailRow label="Regression candidates" value={detailNumber(event, "regression_candidate_count")} />
+      ) : null}
+      {detailString(event, "regression_audit_rule_applied") ? (
+        <DetailRow label="Regression audit" value={detailString(event, "regression_audit_rule_applied")} />
+      ) : null}
+      {detailBoolean(event, "terminal_state_dropped") ? <DetailRow label="Terminal drop" value="Yes" /> : null}
       {evidenceSummaries.length || evidenceCount > 0 ? (
         <DetailRow
           label={evidenceLabel}
