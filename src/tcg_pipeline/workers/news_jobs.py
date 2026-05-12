@@ -775,6 +775,7 @@ def run_news_agent_integrate_job(
                 source_run_id=source_run_id,
                 delta=result.review_items_created + result.review_items_updated,
             )
+        clear_news_integrate_failed_alert(session, article_id=article_id)
         session.commit()
 
 
@@ -1334,6 +1335,9 @@ def _record_news_job_failure(job_id: uuid.UUID, error: Exception) -> None:
             session.rollback()
 
 
+NEWS_INTEGRATE_FAILED_ALERT_KEY = "news_integrate_failed"
+
+
 def mark_news_job_failed(
     session: Session,
     *,
@@ -1347,13 +1351,62 @@ def mark_news_job_failed(
     job.completed_at = datetime.now(UTC)
     job.error_text = str(error)
     job.progress = {"message": "News job failed."}
-    if job.target_payload and isinstance(job.target_payload.get("article_id"), str):
-        article = session.get(NewsArticle, uuid.UUID(job.target_payload["article_id"]))
+    payload = job.target_payload if isinstance(job.target_payload, dict) else {}
+    article_uuid: uuid.UUID | None = None
+    article_id_raw = payload.get("article_id")
+    if isinstance(article_id_raw, str):
+        try:
+            article_uuid = uuid.UUID(article_id_raw)
+        except ValueError:
+            article_uuid = None
+    if article_uuid is not None:
+        article = session.get(NewsArticle, article_uuid)
         if article is not None and article.fetch_status == NewsFetchStatus.PENDING.value:
             article.fetch_status = NewsFetchStatus.FETCH_FAILED.value
             article.fetch_error_text = str(error)
+        # Post-fetch failures inside news_agent_integrate strand the article with
+        # pending references and no agent_runs row, invisible to the daily smoke
+        # report. Raise a kind-scoped alert so the existing news_* alert surface
+        # picks it up; cleared in the success path on retry.
+        if job.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value:
+            raise_system_alert(
+                session,
+                alert_key=NEWS_INTEGRATE_FAILED_ALERT_KEY,
+                severity="warning",
+                message=(
+                    f"news_agent_integrate failed for article {article_uuid}; "
+                    "article references remain pending. Run "
+                    "`tcg-pipeline news reprocess-stranded --article-id "
+                    f"{article_uuid} --apply` to re-enqueue."
+                ),
+                scope={"article_id": str(article_uuid)},
+                detail={
+                    "job_id": str(job_id),
+                    "source_run_id": payload.get("source_run_id"),
+                    "trigger_reasons": payload.get("trigger_reasons"),
+                    "error_text": str(error),
+                },
+            )
     session.flush()
     return job
+
+
+def clear_news_integrate_failed_alert(
+    session: Session,
+    *,
+    article_id: uuid.UUID,
+) -> int:
+    now = datetime.now(UTC)
+    result = session.execute(
+        update(SystemAlert)
+        .where(
+            SystemAlert.alert_key == NEWS_INTEGRATE_FAILED_ALERT_KEY,
+            SystemAlert.cleared_at.is_(None),
+            SystemAlert.scope["article_id"].astext == str(article_id),
+        )
+        .values(cleared_at=now)
+    )
+    return result.rowcount or 0
 
 
 def _record_advanced_fetch_deferred(

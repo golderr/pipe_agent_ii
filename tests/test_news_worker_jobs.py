@@ -1996,3 +1996,133 @@ def _news_source(postgres_session: Session, slug: str) -> NewsSource:
     if source is None:
         pytest.skip(f"Apply latest Phase D migrations before running worker tests: {slug}")
     return source
+
+
+def test_mark_news_agent_integrate_failure_raises_news_integrate_failed_alert(
+    postgres_session: Session,
+) -> None:
+    _ensure_worker_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical=f"https://example.com/integrate-failure-{uuid.uuid4().hex}",
+        url_original=f"https://example.com/integrate-failure-{uuid.uuid4().hex}",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.FETCHED.value,
+        triage_status=NewsTriageStatus.RELEVANT.value,
+        ingest_method=ScrapeJobKind.NEWS_SCRAPE.value,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    job = ScrapeJob(
+        jurisdiction_id=None,
+        kind=ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+        source_name=source.slug,
+        target_payload={
+            "article_id": str(article.id),
+            "source_run_id": str(uuid.uuid4()),
+            "parent_job_id": str(uuid.uuid4()),
+            "trigger_reasons": ["new_candidate", "pass1_pass2_conflict"],
+        },
+        status=ScrapeJobStatus.RUNNING,
+        started_at=datetime.now(UTC),
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+
+    error = RuntimeError("ssl/tls alert bad record mac")
+    news_jobs.mark_news_job_failed(postgres_session, job_id=job.id, error=error)
+    postgres_session.flush()
+
+    alert = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.alert_key == news_jobs.NEWS_INTEGRATE_FAILED_ALERT_KEY,
+            SystemAlert.scope["article_id"].astext == str(article.id),
+            SystemAlert.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert alert.severity == "warning"
+    assert "reprocess-stranded" in alert.message
+    assert str(article.id) in alert.message
+    assert alert.detail is not None
+    assert alert.detail["job_id"] == str(job.id)
+    assert alert.detail["trigger_reasons"] == ["new_candidate", "pass1_pass2_conflict"]
+    assert "ssl/tls alert" in alert.detail["error_text"]
+
+
+def test_mark_news_scrape_failure_does_not_raise_integrate_alert(
+    postgres_session: Session,
+) -> None:
+    _ensure_worker_tables(postgres_session)
+    source = _news_source(postgres_session, "urbanize_la")
+    article = NewsArticle(
+        news_source_id=source.id,
+        url_canonical=f"https://example.com/scrape-failure-{uuid.uuid4().hex}",
+        url_original=f"https://example.com/scrape-failure-{uuid.uuid4().hex}",
+        url_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        fetch_status=NewsFetchStatus.PENDING.value,
+        ingest_method=ScrapeJobKind.NEWS_SCRAPE.value,
+    )
+    postgres_session.add(article)
+    postgres_session.flush()
+    job = ScrapeJob(
+        jurisdiction_id=None,
+        kind=ScrapeJobKind.NEWS_SCRAPE.value,
+        source_name=source.slug,
+        target_payload={"article_id": str(article.id)},
+        status=ScrapeJobStatus.RUNNING,
+        started_at=datetime.now(UTC),
+    )
+    postgres_session.add(job)
+    postgres_session.flush()
+
+    news_jobs.mark_news_job_failed(
+        postgres_session, job_id=job.id, error=RuntimeError("fetch failed")
+    )
+    postgres_session.flush()
+
+    integrate_alerts = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.alert_key == news_jobs.NEWS_INTEGRATE_FAILED_ALERT_KEY,
+            SystemAlert.scope["article_id"].astext == str(article.id),
+        )
+    ).scalars().all()
+    assert integrate_alerts == []
+
+
+def test_clear_news_integrate_failed_alert_sets_cleared_at(
+    postgres_session: Session,
+) -> None:
+    _ensure_worker_tables(postgres_session)
+    article_id = uuid.uuid4()
+    alert = news_jobs.raise_system_alert(
+        postgres_session,
+        alert_key=news_jobs.NEWS_INTEGRATE_FAILED_ALERT_KEY,
+        severity="warning",
+        message="integrate failed",
+        scope={"article_id": str(article_id)},
+        detail={"job_id": str(uuid.uuid4())},
+    )
+    postgres_session.flush()
+    assert alert.cleared_at is None
+
+    cleared_count = news_jobs.clear_news_integrate_failed_alert(
+        postgres_session, article_id=article_id
+    )
+    postgres_session.flush()
+
+    assert cleared_count == 1
+    postgres_session.expire(alert)
+    refreshed = postgres_session.get(SystemAlert, alert.id)
+    assert refreshed is not None
+    assert refreshed.cleared_at is not None
+
+
+def test_clear_news_integrate_failed_alert_no_op_when_no_alert(
+    postgres_session: Session,
+) -> None:
+    _ensure_worker_tables(postgres_session)
+    cleared = news_jobs.clear_news_integrate_failed_alert(
+        postgres_session, article_id=uuid.uuid4()
+    )
+    assert cleared == 0

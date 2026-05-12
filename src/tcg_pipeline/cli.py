@@ -432,6 +432,160 @@ def _smoke_authenticated_user(session, settings):
     )
 
 
+@news_app.command("reprocess-stranded")
+def news_reprocess_stranded(
+    article_id: Annotated[
+        list[uuid.UUID] | None,
+        typer.Option(
+            "--article-id",
+            help=(
+                "Target specific article(s) by UUID. Pass multiple times to scope "
+                "to a list. Defaults to the full sweep within --days."
+            ),
+        ),
+    ] = None,
+    days: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            help="Lookback window in days for the stranded-article sweep.",
+        ),
+    ] = 30,
+    include_no_failed_job: Annotated[
+        bool,
+        typer.Option(
+            "--include-no-failed-job",
+            help=(
+                "Include articles with no tracked failed scrape_job. Off by default "
+                "to avoid auto-reprocessing pre-Pass-2c staging-smoke artifacts."
+            ),
+        ),
+    ] = False,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help=(
+                "Actually enqueue news_agent_integrate jobs for the listed articles. "
+                "Without --apply the command is dry-run and only lists what would be "
+                "reprocessed."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Find and (optionally) re-enqueue news articles stranded after a failed
+    news_agent_integrate or inline integration step.
+
+    A stranded article has triage=relevant, current_extraction_id set, candidate
+    references in match_status='pending', no agent_runs, and no semantic
+    interpretation. This typically follows a transient Supabase/Anthropic error
+    inside the integrator; the article is left invisible to the daily smoke
+    report. Use this command after a `news_integrate_failed` alert lands or as
+    part of a scheduled sweep.
+    """
+    from tcg_pipeline.news.reprocess import (
+        ReprocessOutcome,
+        fetched_since_window,
+        find_stranded_articles,
+        reprocess_stranded_article,
+    )
+
+    settings = get_settings()
+    database_label = (
+        redact_database_url(settings.database_url)
+        if settings.database_url
+        else "missing DATABASE_URL"
+    )
+    typer.echo(f"Reading from {database_label}")
+    typer.echo(f"Mode: {'APPLY (will enqueue)' if apply else 'dry-run'}")
+
+    session_factory = get_session_factory()
+    targeted_ids = list(article_id) if article_id else None
+    fetched_since = None if targeted_ids else fetched_since_window(days=days)
+
+    with session_factory() as session:
+        stranded = find_stranded_articles(
+            session,
+            article_ids=targeted_ids,
+            fetched_since=fetched_since,
+            require_failed_job=not include_no_failed_job,
+        )
+
+    typer.echo(
+        f"Stranded articles found: {len(stranded)} "
+        f"(window: last {days}d, require_failed_job={not include_no_failed_job})"
+    )
+    for art in stranded:
+        typer.echo("")
+        typer.echo(f"  article_id: {art.article_id}")
+        typer.echo(f"    title: {art.title or '(no title)'}")
+        typer.echo(f"    url:   {art.url_canonical or '(no url)'}")
+        typer.echo(
+            f"    fetched_at: {art.fetched_at.isoformat() if art.fetched_at else 'unknown'}"
+        )
+        typer.echo(
+            f"    refs: {art.pending_reference_count}/{art.total_reference_count} pending"
+        )
+        typer.echo(f"    source_run_id: {art.source_run_id or 'unknown'}")
+        typer.echo(
+            f"    last_failed_job: {art.last_failed_job_id or 'none'} "
+            f"({art.last_failed_job_kind or 'n/a'})"
+        )
+        typer.echo(f"    triggers: {', '.join(art.trigger_reasons) or '(none)'}")
+        if art.last_failed_error_text:
+            typer.echo(f"    last_error: {art.last_failed_error_text[:160]}")
+
+    if not apply:
+        typer.echo("")
+        typer.echo(
+            "Dry-run complete. Rerun with --apply to enqueue news_agent_integrate jobs."
+        )
+        return
+
+    if not stranded:
+        typer.echo("No stranded articles to reprocess. Exiting.")
+        return
+
+    typer.echo("")
+    typer.echo("Enqueueing reprocess jobs:")
+    outcomes: list[ReprocessOutcome] = []
+    for art in stranded:
+        outcome = reprocess_stranded_article(
+            session_factory=session_factory,
+            article=art,
+            settings=settings,
+        )
+        outcomes.append(outcome)
+        status_label: str
+        if outcome.skipped_reason is not None:
+            status_label = f"SKIPPED ({outcome.skipped_reason})"
+        elif outcome.reused_existing_job:
+            status_label = "REUSED active job"
+        elif outcome.enqueued:
+            status_label = "ENQUEUED"
+        else:
+            status_label = "DB row created (Redis unavailable)"
+        typer.echo(
+            f"  {art.article_id}: {status_label} | job_id={outcome.job_id} | "
+            f"triggers={','.join(outcome.triggers_used)}"
+        )
+        if outcome.error_text:
+            typer.echo(f"    error: {outcome.error_text}", err=True)
+
+    enqueued_count = sum(1 for o in outcomes if o.enqueued and o.skipped_reason is None)
+    reused_count = sum(1 for o in outcomes if o.reused_existing_job)
+    skipped_count = sum(1 for o in outcomes if o.skipped_reason is not None)
+    typer.echo("")
+    typer.echo(
+        f"Summary: {enqueued_count} enqueued, {reused_count} reused, "
+        f"{skipped_count} skipped, total {len(outcomes)}."
+    )
+    typer.echo(
+        "Monitor recovery with `tcg-pipeline news-agent-smoke-report` "
+        "or re-run this command after the worker has processed the queue."
+    )
+
+
 @app.command()
 def preview_pipedream(
     workbook_path: Path,
