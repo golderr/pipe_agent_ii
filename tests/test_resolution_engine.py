@@ -235,6 +235,82 @@ def test_resolve_project_logs_terminal_status_regression_audit(
     assert candidate["terminal_state_dropped"] is True
 
 
+def test_resolve_project_value_change_with_regression_candidate_persists_metadata(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("evidence"):
+        pytest.skip("Apply the evidence layer migration before running resolution tests.")
+    column_names = {
+        column["name"] for column in inspect(postgres_session.bind).get_columns("resolution_log")
+    }
+    if "metadata" not in column_names:
+        pytest.skip("Apply the status regression metadata migration before running this test.")
+
+    project = Project(
+        canonical_address="910 STATUS WAY LOS ANGELES CA 90012",
+        raw_addresses=["910 Status Way"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    stale_permit = Evidence(
+        project_id=project.id,
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="scheduled_collector",
+        collected_at=datetime(2025, 4, 5, tzinfo=UTC),
+        evidence_date=date(2025, 4, 5),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None}
+        },
+    )
+    cofo = Evidence(
+        project_id=project.id,
+        source_type="ladbs_cofo",
+        source_tier=1,
+        ingest_method="scheduled_collector",
+        collected_at=datetime(2026, 4, 5, tzinfo=UTC),
+        evidence_date=date(2026, 4, 5),
+        extracted_fields={
+            "status_evidence_type": {
+                "value": "certificate_of_occupancy_issued",
+                "confidence": None,
+            }
+        },
+    )
+    postgres_session.add_all([stale_permit, cofo])
+    postgres_session.flush()
+
+    result = resolve_project(
+        project.id,
+        postgres_session,
+        apply=False,
+        write_resolution_log=True,
+    )
+    postgres_session.flush()
+
+    assert "pipeline_status" in result.changed_fields
+    row = postgres_session.execute(
+        select(ResolutionLog).where(
+            ResolutionLog.project_id == project.id,
+            ResolutionLog.field == "pipeline_status",
+        )
+    ).scalar_one()
+    assert row.current_value == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert row.resolved_value == PipelineStatus.COMPLETE.value
+    assert row.rule_applied == "direct_cofo_evidence"
+    assert row.metadata_json["regression_candidate_count"] == 1
+    candidate = row.metadata_json["regression_candidates"][0]
+    assert candidate["current_status"] == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert candidate["proposed_status"] == PipelineStatus.APPROVED.value
+    assert candidate["evidence_ids"] == [str(stale_permit.id)]
+    assert candidate["terminal_state_dropped"] is False
+
+
 def test_resolve_project_ignores_superseded_evidence(
     postgres_session: Session,
 ) -> None:

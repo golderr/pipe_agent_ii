@@ -63,6 +63,8 @@ def resolve_status(
         candidate_observations.setdefault(PipelineStatus.APPROVED, []).extend(
             permit_observations[:1]
         )
+    # CoFO is included for regression enumeration; this early-return path still
+    # owns the actual Complete resolution decision.
     if cofo_observations:
         candidate_observations.setdefault(PipelineStatus.COMPLETE, []).extend(
             cofo_observations[:1]

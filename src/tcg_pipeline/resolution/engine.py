@@ -230,15 +230,21 @@ def resolve_project(
 
         changed_fields.append(field_name)
         if write_resolution_log and field_name in LOGGED_FIELDS:
+            log_kwargs = {
+                "project_id": project.id,
+                "field": field_name,
+                "current_value": normalize_comparable(current_value),
+                "resolved_value": normalize_comparable(resolution.value),
+                "evidence_ids": resolution.evidence_ids or None,
+                "rule_applied": resolution.rule_applied,
+                "confidence": resolution.confidence,
+            }
+            metadata_json = _regression_log_metadata(resolution)
+            if metadata_json is not None:
+                log_kwargs["metadata_json"] = metadata_json
             session.add(
                 ResolutionLog(
-                    project_id=project.id,
-                    field=field_name,
-                    current_value=normalize_comparable(current_value),
-                    resolved_value=normalize_comparable(resolution.value),
-                    evidence_ids=resolution.evidence_ids or None,
-                    rule_applied=resolution.rule_applied,
-                    confidence=resolution.confidence,
+                    **log_kwargs,
                 )
             )
             log_entries_created += 1
@@ -340,6 +346,23 @@ def _log_preserved_status_regression(
         )
     )
     return True
+
+
+def _regression_log_metadata(resolution: FieldResolution) -> dict[str, Any] | None:
+    candidates = resolution.metadata.get("regression_candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    return _json_safe_metadata(
+        {
+            "regression_candidates": candidates,
+            "regression_candidate_count": resolution.metadata.get(
+                "regression_candidate_count"
+            ),
+            "regression_audit_rule_applied": resolution.metadata.get(
+                "regression_audit_rule_applied"
+            ),
+        }
+    )
 
 
 def _regression_candidate_evidence_ids(candidates: list[Any]) -> list[uuid.UUID]:
