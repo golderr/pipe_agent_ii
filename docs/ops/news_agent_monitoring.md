@@ -94,6 +94,10 @@ appear, but no review card is created by design.
 - `status_regression_review_item_count`: number of linked
   `status_regression_review` cards. Use `--min-status-regression-review-items`
   for curated smokes where a regression card is expected.
+- `status_regression_open_count` / `status_regression_auto_accepted_count`:
+  distinct linked regression cards by review status. Use these during
+  `NEWS_REGRESSION_AUTO_APPLY_ENABLED` rollout to distinguish queueing from
+  auto-accepted mutations.
 - `agent_run_total_cost_usd`: sum of `agent_runs.cost_usd` for `news_v1`.
 - `cost_usage_total_usd`: full `news` bucket cost across all capabilities in
   `llm_cost_usage`, including extraction, triage, semantic, retry, embeddings,

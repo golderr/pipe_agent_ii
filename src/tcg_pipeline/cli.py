@@ -959,6 +959,11 @@ def news_agent_smoke_report_command(
         "Status regression review items: "
         f"{report.status_regression_review_item_count}"
     )
+    typer.echo(f"Status regression open items: {report.status_regression_open_count}")
+    typer.echo(
+        "Status regression auto-accepted items: "
+        f"{report.status_regression_auto_accepted_count}"
+    )
     typer.echo(f"Missing review links: {report.missing_review_link_count}")
     typer.echo(f"Agent-run total cost: ${report.agent_run_total_cost_usd}")
     typer.echo(f"News bucket total cost: ${report.cost_usage_total_usd}")

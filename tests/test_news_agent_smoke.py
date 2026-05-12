@@ -28,6 +28,7 @@ from tcg_pipeline.db.models import (
     NewsTriageStatus,
     Priority,
     ReviewItem,
+    ReviewItemStatus,
     ReviewItemType,
     SourceRun,
     SystemAlert,
@@ -173,6 +174,8 @@ def test_news_agent_smoke_report_summarizes_window(
     }
     assert report.status_regression_agent_run_count == 1
     assert report.status_regression_review_item_count == 1
+    assert report.status_regression_open_count == 1
+    assert report.status_regression_auto_accepted_count == 0
     assert report.agent_run_total_cost_usd == Decimal("0.100000")
     assert report.missing_review_link_count == 0
     assert report.runs[1].review_item_type_counts == {
@@ -308,6 +311,8 @@ def test_news_agent_smoke_report_counts_review_item_types(
     assert report.review_item_type_counts == {ReviewItemType.NEW_CANDIDATE.value: 1}
     assert report.status_regression_agent_run_count == 0
     assert report.status_regression_review_item_count == 0
+    assert report.status_regression_open_count == 0
+    assert report.status_regression_auto_accepted_count == 0
     assert report.missing_review_link_count == 0
     assert report.runs[0].review_item_type_counts == {
         ReviewItemType.NEW_CANDIDATE.value: 1,
@@ -437,6 +442,8 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert "Review item types: new_candidate=2, status_regression_review=1" in result.output
     assert "Status regression agent runs: 1" in result.output
     assert "Status regression review items: 1" in result.output
+    assert "Status regression open items: 1" in result.output
+    assert "Status regression auto-accepted items: 0" in result.output
     assert "News bucket total cost: $0.070000" in result.output
     assert "Cost-usage breakdown:" in result.output
     assert "agent.news_v1: $0.070000 (2 calls)" in result.output
@@ -451,6 +458,8 @@ def test_news_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert '"min_status_regression_review_items": 1' in report_json
     assert '"status_regression_agent_run_count": 1' in report_json
     assert '"status_regression_review_item_count": 1' in report_json
+    assert '"status_regression_open_count": 1' in report_json
+    assert '"status_regression_auto_accepted_count": 0' in report_json
     assert '"max_total_cost_usd": "1.00"' in report_json
     assert '"cost_usage_by_capability": [' in report_json
     assert '"semantic_issue_count": 1' in report_json
@@ -487,6 +496,47 @@ def test_news_agent_smoke_report_marks_alert_truncation(
     assert report.alert_count == 50
     assert report.alert_limit == 50
     assert report.alerts_truncated is True
+
+
+def test_news_agent_smoke_report_counts_auto_accepted_status_regressions(
+    postgres_session: Session,
+) -> None:
+    _ensure_status_regression_review_item_type(postgres_session)
+    source = _news_source()
+    now = datetime(2099, 5, 15, 21, tzinfo=UTC)
+    source_run = _source_run(source, run_timestamp=now - timedelta(minutes=30))
+    article = _article(source, fetched_at=now - timedelta(minutes=25))
+    postgres_session.add_all([source, source_run, article])
+    postgres_session.flush()
+    agent_run = _agent_run(
+        source_run=source_run,
+        article=article,
+        triggered_by=["status_regression_candidate"],
+        outcome=AgentRunOutcome.COMPLETED.value,
+        created_at=now - timedelta(minutes=20),
+    )
+    postgres_session.add(agent_run)
+    postgres_session.flush()
+    _link_review_item(
+        postgres_session,
+        source_run=source_run,
+        agent_run=agent_run,
+        item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+        status=ReviewItemStatus.AUTO_ACCEPTED,
+    )
+    postgres_session.flush()
+
+    report = build_news_agent_smoke_report(
+        postgres_session,
+        since=now - timedelta(hours=1),
+        until=now,
+        source_name=source.slug,
+    )
+
+    assert report.status_regression_agent_run_count == 1
+    assert report.status_regression_review_item_count == 1
+    assert report.status_regression_open_count == 0
+    assert report.status_regression_auto_accepted_count == 1
 
 
 def _news_source() -> NewsSource:
@@ -649,10 +699,12 @@ def _link_review_item(
     source_run: SourceRun,
     agent_run: AgentRun,
     item_type: ReviewItemType = ReviewItemType.NEW_CANDIDATE,
+    status: ReviewItemStatus = ReviewItemStatus.OPEN,
 ) -> None:
     review_item = ReviewItem(
         source_run_id=source_run.id,
         item_type=item_type,
+        status=status,
         priority=Priority.MEDIUM,
         payload={"source_article_id": agent_run.intake_record_id},
     )

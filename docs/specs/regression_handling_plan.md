@@ -250,8 +250,8 @@ Slice 6: Monitoring and stabilization.
 - Extend daily news and permit smoke validation with `status_regression_candidate`
   trigger counts, linked `status_regression_review` card counts, and optional
   minimum linked-card validators for curated smokes.
-- Add `status_regression_auto_accepted_count` to news smoke before flipping
-  `NEWS_REGRESSION_AUTO_APPLY_ENABLED=true` in production.
+- Add news-smoke open vs auto-accepted status-regression card counts before
+  flipping `NEWS_REGRESSION_AUTO_APPLY_ENABLED=true` in production.
 - Add regression trigger counts to AGENT.reset review artifacts.
 - Watch duplicate-trigger rates and cost for 3-5 organic cron days before any broad backfill.
 - Ensure AGENT.2 Activity / Audit Log rendering is live for regression-specific agent, review, and resolution audit rows before declaring the regression rollout complete.

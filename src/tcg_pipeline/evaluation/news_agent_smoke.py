@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, distinct, func, or_, select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.agents.profiles import NEWS_AGENT_PROFILE, AgentTrigger
@@ -20,6 +20,7 @@ from tcg_pipeline.db.models import (
     NewsSemanticInterpretation,
     NewsSource,
     ReviewItem,
+    ReviewItemStatus,
     ReviewItemType,
     SourceRun,
     SystemAlert,
@@ -150,6 +151,8 @@ class NewsAgentSmokeReport:
     review_item_type_counts: dict[str, int]
     status_regression_agent_run_count: int
     status_regression_review_item_count: int
+    status_regression_open_count: int
+    status_regression_auto_accepted_count: int
     agent_run_total_cost_usd: Decimal
     missing_review_link_count: int
     cost_usage_total_usd: Decimal
@@ -196,7 +199,12 @@ def build_news_agent_smoke_report(
         until=window_until,
         source_name=source_name,
     )
-    review_link_counts = _review_link_counts(session, agent_run_ids=[run.id for run in agent_runs])
+    agent_run_ids = [run.id for run in agent_runs]
+    review_link_counts = _review_link_counts(session, agent_run_ids=agent_run_ids)
+    status_regression_status_counts = _status_regression_review_status_counts(
+        session,
+        agent_run_ids=agent_run_ids,
+    )
     article_summaries = _article_summaries_by_id(
         session,
         article_ids=[
@@ -262,6 +270,14 @@ def build_news_agent_smoke_report(
         ),
         status_regression_review_item_count=review_item_type_counts.get(
             status_regression_review_type,
+            0,
+        ),
+        status_regression_open_count=status_regression_status_counts.get(
+            ReviewItemStatus.OPEN.value,
+            0,
+        ),
+        status_regression_auto_accepted_count=status_regression_status_counts.get(
+            ReviewItemStatus.AUTO_ACCEPTED.value,
             0,
         ),
         agent_run_total_cost_usd=agent_run_total_cost,
@@ -364,6 +380,10 @@ def news_agent_smoke_report_to_dict(report: NewsAgentSmokeReport) -> dict[str, A
         "review_item_type_counts": report.review_item_type_counts,
         "status_regression_agent_run_count": report.status_regression_agent_run_count,
         "status_regression_review_item_count": report.status_regression_review_item_count,
+        "status_regression_open_count": report.status_regression_open_count,
+        "status_regression_auto_accepted_count": (
+            report.status_regression_auto_accepted_count
+        ),
         "agent_run_total_cost_usd": str(report.agent_run_total_cost_usd),
         "missing_review_link_count": report.missing_review_link_count,
         "cost_usage_total_usd": str(report.cost_usage_total_usd),
@@ -886,6 +906,28 @@ def _review_link_counts(
         item_type = getattr(row.item_type, "value", str(row.item_type))
         counts.setdefault(row.agent_run_id, {})[item_type] = int(row[2])
     return counts
+
+
+def _status_regression_review_status_counts(
+    session: Session,
+    *,
+    agent_run_ids: list[uuid.UUID],
+) -> dict[str, int]:
+    if not agent_run_ids:
+        return {}
+    rows = session.execute(
+        select(
+            ReviewItem.status,
+            func.count(distinct(ReviewItem.id)),
+        )
+        .join(AgentRunReviewItem, AgentRunReviewItem.review_item_id == ReviewItem.id)
+        .where(
+            AgentRunReviewItem.agent_run_id.in_(agent_run_ids),
+            ReviewItem.item_type.cast(String) == ReviewItemType.STATUS_REGRESSION_REVIEW.value,
+        )
+        .group_by(ReviewItem.status)
+    ).all()
+    return {getattr(row.status, "value", str(row.status)): int(row[1]) for row in rows}
 
 
 def _uuid_or_none(value: str) -> uuid.UUID | None:
