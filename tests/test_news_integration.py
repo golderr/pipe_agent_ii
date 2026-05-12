@@ -1680,6 +1680,261 @@ def test_news_integration_routes_material_contradiction_to_agent(
     assert agent_run.triggered_by == ["material_contradiction"]
 
 
+def test_news_integration_routes_status_regression_candidate_to_agent_review(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2135 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Regression Review Tower",
+        pipeline_status=PipelineStatus.COMPLETE,
+        total_units=100,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Regression Review Tower",
+                candidate_address="2135 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_topped_out",
+            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            confidence="high",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "defer_to_review",
+            "confidence": 0.74,
+            "current_status": PipelineStatus.COMPLETE.value,
+            "proposed_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "regression_reason_code": "news_topped_out",
+            "corroborating_evidence_ids": [],
+            "reason": "Article status signal is lower than the terminal project state.",
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert len(client.requests) == 1
+    assert client.requests[0].trigger_reasons == ("status_regression_candidate",)
+    assert client.requests[0].intake.payload["material_contradictions"] == []
+    regression_candidate = client.requests[0].intake.payload[
+        "status_regression_candidates"
+    ][0]
+    assert regression_candidate["current_status"] == PipelineStatus.COMPLETE.value
+    assert regression_candidate["proposed_status"] == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert regression_candidate["semantic_reason_code"] == "news_topped_out"
+
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.extracted_fields["pipeline_status"]["value"] == (
+        PipelineStatus.UNDER_CONSTRUCTION.value
+    )
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.field_name == "pipeline_status"
+    assert review_item.priority == Priority.HIGH
+    assert review_item.payload["origin"] == "agent_status_regression_candidate"
+    assert review_item.payload["current_value"] == PipelineStatus.COMPLETE.value
+    assert review_item.payload["proposed_value"] == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert review_item.payload["agent_recommendation"]["decision"] == "defer_to_review"
+    assert review_item.payload["regression_candidates"][0]["semantic_reason_code"] == (
+        "news_topped_out"
+    )
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["status_regression_candidate"]
+    link = postgres_session.get(AgentRunReviewItem, (agent_run.id, review_item.id))
+    assert link is not None
+
+
+def test_news_integration_status_regression_agent_can_dismiss_without_review_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2136 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Dismiss Regression Tower",
+        pipeline_status=PipelineStatus.COMPLETE,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Dismiss Regression Tower",
+                candidate_address="2136 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_topped_out",
+            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            confidence="high",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "dismiss",
+            "confidence": 0.91,
+            "current_status": PipelineStatus.COMPLETE.value,
+            "proposed_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "reason": "Older construction article is stale against Complete state.",
+        }
+    )
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests[0].trigger_reasons == ("status_regression_candidate",)
+    assert postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one_or_none() is None
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    assert agent_run.agent_revised_verdict["decision"] == "dismiss"
+
+
+def test_news_use_legacy_semantic_true_does_not_emit_status_regression_candidate(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2137 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Legacy Regression Tower",
+        pipeline_status=PipelineStatus.COMPLETE,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Legacy Regression Tower",
+                candidate_address="2137 Regression Boulevard, Los Angeles, CA 90012",
+                candidate_status_signal=PipelineStatus.UNDER_CONSTRUCTION.value,
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(None, stop_reason="max_tokens")
+    client = FakeNewsAgentClient({"decision": "defer_to_review"})
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=True,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests == []
+    assert semantic_client.prompts == []
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.extracted_fields["pipeline_status"]["value"] == (
+        PipelineStatus.UNDER_CONSTRUCTION.value
+    )
+    assert postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one_or_none() is None
+
+
 def test_news_integration_material_contradiction_agent_can_downgrade_to_possible(
     postgres_session: Session,
 ) -> None:
@@ -3009,6 +3264,15 @@ def _ensure_semantic_news_integration_tables(postgres_session: Session) -> None:
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply semantic Pass 2c migrations before running tests: {missing}")
+
+
+def _ensure_resolution_log_metadata(postgres_session: Session) -> None:
+    inspector = inspect(postgres_session.bind)
+    if not inspector.has_table("resolution_log"):
+        pytest.skip("Apply resolution-log migrations before running regression tests.")
+    column_names = {column["name"] for column in inspector.get_columns("resolution_log")}
+    if "metadata" not in column_names:
+        pytest.skip("Apply the status regression metadata migration before running this test.")
 
 
 def _run_semantic_review_fixture(

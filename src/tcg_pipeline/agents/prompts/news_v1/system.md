@@ -59,8 +59,8 @@ For pass1_pass2_conflict triggers:
 
 For material_contradiction triggers:
 - Treat material_contradictions as cases where a deterministic confirmed match has article
-  fields that materially disagree with current project state: >10% unit delta, status
-  regression, or developer mismatch.
+  fields that materially disagree with current project state: >10% unit delta or developer
+  mismatch.
 - If material_contradiction appears with pass1_pass2_conflict or low_confidence, use the
   material_contradiction verdict shape; the other triggers are reasoning input.
 - If material_contradiction appears with override_contradiction, use the

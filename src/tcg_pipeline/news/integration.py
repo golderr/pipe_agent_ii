@@ -106,6 +106,9 @@ AGENT_CONFIRM_EXISTING_PROJECT_DECISION = "confirm_existing_project"
 AGENT_DOWNGRADE_TO_POSSIBLE_DECISION = "downgrade_to_possible"
 AGENT_RECOMMEND_ACCEPT_NEW_DECISION = "recommend_accept_new"
 AGENT_RECOMMEND_KEEP_OVERRIDE_DECISION = "recommend_keep_override"
+AGENT_CONFIRM_REGRESSION_DECISION = "confirm_regression"
+AGENT_DEFER_TO_REVIEW_DECISION = "defer_to_review"
+AGENT_DISMISS_DECISION = "dismiss"
 AGENT_ESCALATED_DECISION = "escalated"
 ACTIVE_REVIEW_STATES = {"open", "staged"}
 REVIEW_PROTECTED_OVERRIDE_MODES = {
@@ -115,6 +118,10 @@ REVIEW_PROTECTED_OVERRIDE_MODES = {
     None,
 }
 MATERIAL_UNIT_DELTA_RATIO = 0.10
+STATUS_REGRESSION_FIELD_NAME = "pipeline_status"
+UNCORROBORATED_NEWS_STATUS_REASON_CODE = (
+    "news_status_uncorroborated_high_quality_permit_jurisdiction"
+)
 REFERENCE_FIELD_TO_PROJECT_FIELD = {
     "candidate_name": "project_name",
     "candidate_address": "canonical_address",
@@ -295,6 +302,20 @@ class _ConfirmedReference:
 
 
 @dataclass(slots=True)
+class _StatusRegressionCandidateGroup:
+    current_status: str
+    proposed_status: str
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    confirmed_references: list[_ConfirmedReference] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _StatusRegressionAgentDecision:
+    group: _StatusRegressionCandidateGroup
+    result: AgentRunResult
+
+
+@dataclass(slots=True)
 class _ProjectIntegrationContext:
     references: list[_ConfirmedReference] = field(default_factory=list)
 
@@ -386,6 +407,8 @@ def run_news_integration_for_article(
             pass3b_result=pass3b_result,
             prior_extraction_id=first_pass.extraction_id if pass3b_triggered else None,
             agent_decisions=agent_decisions,
+            agent_client=agent_client,
+            settings=resolved_settings,
             use_legacy_semantic=resolved_settings.news_use_legacy_semantic,
             semantic_result=semantic_result,
             now=current,
@@ -919,13 +942,6 @@ def _material_contradictions_for_reference(
     if unit_contradiction is not None:
         contradictions.append(unit_contradiction)
 
-    status_contradiction = _material_status_regression(
-        current_value=project.pipeline_status,
-        candidate_value=reference.candidate_status_signal,
-    )
-    if status_contradiction is not None:
-        contradictions.append(status_contradiction)
-
     developer_contradiction = _material_developer_mismatch(
         session,
         current_value=project.developer,
@@ -977,26 +993,6 @@ def _material_unit_delta(
         "delta": delta,
         "delta_ratio": round(delta_ratio, 4),
         "reason": "candidate_unit_total differs from current project state by more than 10%",
-    }
-
-
-def _material_status_regression(
-    *,
-    current_value: PipelineStatus,
-    candidate_value: Any,
-) -> dict[str, Any] | None:
-    candidate_status = _coerce_semantic_pipeline_status(candidate_value)
-    if candidate_status is None:
-        return None
-    current_rank = STATUS_PROGRESS_ORDER.get(current_value)
-    candidate_rank = STATUS_PROGRESS_ORDER.get(candidate_status)
-    if current_rank is None or candidate_rank is None or candidate_rank >= current_rank:
-        return None
-    return {
-        "field": "pipeline_status",
-        "current_value": current_value.value,
-        "candidate_value": candidate_status.value,
-        "reason": "candidate_status_signal regresses current project status",
     }
 
 
@@ -1311,6 +1307,8 @@ def _integrate_current_extraction(
     pass3b_result: NewsExtractionRunResult | None,
     prior_extraction_id: uuid.UUID | None,
     agent_decisions: dict[uuid.UUID, _NewsAgentDecision],
+    agent_client: AgentClient | None,
+    settings: Settings,
     use_legacy_semantic: bool,
     semantic_result: NewsSemanticInterpretationRunResult | None,
     now: datetime,
@@ -1542,6 +1540,9 @@ def _integrate_current_extraction(
             article=article,
             extraction=extraction,
             context=context,
+            agent_client=agent_client,
+            settings=settings,
+            now=now,
         )
 
     source_run.new_matches += stats.confirmed
@@ -1639,6 +1640,19 @@ def _ensure_source_run(
     session.add(source_run)
     session.flush()
     return source_run
+
+
+def _session_factory_for_current_bind(session: Session) -> sessionmaker[Session]:
+    # Bind status-regression agent audit writes to the integration transaction.
+    # The runner's inner Session joins this Connection transaction, so its
+    # commit() flushes without a DB-level COMMIT and can see uncommitted
+    # source_run/evidence rows from this article integration.
+    return sessionmaker(
+        bind=session.connection(),
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
 
 
 def _apply_match_to_reference(
@@ -2388,6 +2402,9 @@ def _integrate_confirmed_project(
     article: NewsArticle,
     extraction: NewsExtraction,
     context: _ProjectIntegrationContext,
+    agent_client: AgentClient | None,
+    settings: Settings,
+    now: datetime,
 ) -> int:
     project = session.get(Project, project_id)
     if project is None:
@@ -2420,7 +2437,27 @@ def _integrate_confirmed_project(
         review_flags=list(resolution_result.review_flags),
     )
     reviewed_fields: set[str] = set()
-    review_count = override_review_count
+    status_regression_decisions = _run_status_regression_agents_for_project(
+        session,
+        project=project,
+        source_run=source_run,
+        article=article,
+        extraction=extraction,
+        context=context,
+        resolution_result=resolution_result,
+        agent_client=agent_client,
+        settings=settings,
+        now=now,
+    )
+    status_regression_review_count = _upsert_agent_status_regression_review_items(
+        session,
+        project=project,
+        source_run=source_run,
+        article=article,
+        extraction=extraction,
+        decisions=status_regression_decisions,
+    )
+    review_count = override_review_count + status_regression_review_count
     if not diff_result.has_reviewable_changes:
         return review_count + _upsert_agent_structural_conflict_review_items(
             session,
@@ -2452,6 +2489,400 @@ def _integrate_confirmed_project(
         excluded_fields=reviewed_fields,
     )
     return review_count
+
+
+def _run_status_regression_agents_for_project(
+    session: Session,
+    *,
+    project: Project,
+    source_run: SourceRun,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    context: _ProjectIntegrationContext,
+    resolution_result,
+    agent_client: AgentClient | None,
+    settings: Settings,
+    now: datetime,
+) -> list[_StatusRegressionAgentDecision]:
+    groups = _status_regression_candidate_groups(
+        project=project,
+        context=context,
+        resolution_result=resolution_result,
+    )
+    if not groups:
+        return []
+
+    client = agent_client
+    if settings.agent_enabled_for_news and client is None:
+        if not settings.agent_allow_live_llm:
+            raise RuntimeError(
+                "AGENT_ALLOW_LIVE_LLM=true is required before news integration "
+                "constructs a live agent LLM client."
+            )
+        client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
+
+    session_factory = _session_factory_for_current_bind(session)
+    decisions: list[_StatusRegressionAgentDecision] = []
+    for group in groups:
+        matcher_results = [
+            _agent_matcher_payload(
+                reference=confirmed.reference,
+                match=confirmed.match,
+            )
+            for confirmed in _unique_confirmed_references(group.confirmed_references)
+        ]
+        result = run_agent_for_intake(
+            IntakeRecord(
+                source_type=NEWS_SOURCE_TYPE,
+                intake_record_id=str(article.id),
+                extraction_id=extraction.id,
+                source_run_id=source_run.id,
+                payload=_status_regression_agent_intake_payload(
+                    article=article,
+                    extraction=extraction,
+                    project=project,
+                    group=group,
+                ),
+            ),
+            matcher_results=matcher_results,
+            trigger_reasons=[AgentTrigger.STATUS_REGRESSION_CANDIDATE],
+            profile=NEWS_AGENT_PROFILE,
+            client=client,
+            settings=settings,
+            session_factory=session_factory,
+            now=now,
+        )
+        decisions.append(_StatusRegressionAgentDecision(group=group, result=result))
+    return decisions
+
+
+def _status_regression_candidate_groups(
+    *,
+    project: Project,
+    context: _ProjectIntegrationContext,
+    resolution_result,
+) -> list[_StatusRegressionCandidateGroup]:
+    status_resolution = resolution_result.field_resolutions.get(STATUS_REGRESSION_FIELD_NAME)
+    if status_resolution is None:
+        return []
+    raw_candidates = status_resolution.metadata.get("regression_candidates")
+    if not isinstance(raw_candidates, list):
+        return []
+
+    confirmed_by_evidence_id: dict[str, _ConfirmedReference] = {
+        str(confirmed.evidence.id): confirmed for confirmed in context.references
+    }
+    groups: dict[tuple[str, str], _StatusRegressionCandidateGroup] = {}
+    for raw_candidate in raw_candidates:
+        if not isinstance(raw_candidate, dict):
+            continue
+        if not _status_regression_candidate_is_news_agent_eligible(raw_candidate):
+            continue
+        evidence_ids = [
+            str(value)
+            for value in raw_candidate.get("evidence_ids") or []
+            if _clean_text(value) is not None
+        ]
+        confirmed_refs = [
+            confirmed_by_evidence_id[evidence_id]
+            for evidence_id in evidence_ids
+            if evidence_id in confirmed_by_evidence_id
+        ]
+        if not confirmed_refs:
+            continue
+        current_status = _clean_text(raw_candidate.get("current_status"))
+        proposed_status = _clean_text(raw_candidate.get("proposed_status"))
+        if current_status is None or proposed_status is None:
+            continue
+        group_key = (current_status, proposed_status)
+        group = groups.setdefault(
+            group_key,
+            _StatusRegressionCandidateGroup(
+                current_status=current_status,
+                proposed_status=proposed_status,
+            ),
+        )
+        group.candidates.append(
+            _status_regression_candidate_payload_for_agent(
+                project=project,
+                raw_candidate=raw_candidate,
+                confirmed_refs=confirmed_refs,
+            )
+        )
+        group.confirmed_references.extend(confirmed_refs)
+    return list(groups.values())
+
+
+def _status_regression_candidate_is_news_agent_eligible(candidate: dict[str, Any]) -> bool:
+    if candidate.get("source_type") != NEWS_SOURCE_TYPE:
+        return False
+    reason_code = _clean_text(candidate.get("semantic_reason_code"))
+    if reason_code is None:
+        return False
+    # Effect 1 owns ambiguous uncorroborated UC signals. Do not re-route that
+    # reason as Effect 2 unless a separate semantic status signal also regresses.
+    if reason_code == UNCORROBORATED_NEWS_STATUS_REASON_CODE:
+        return False
+    return True
+
+
+def _status_regression_candidate_payload_for_agent(
+    *,
+    project: Project,
+    raw_candidate: dict[str, Any],
+    confirmed_refs: list[_ConfirmedReference],
+) -> dict[str, Any]:
+    first = confirmed_refs[0]
+    payload = dict(raw_candidate)
+    payload.update(
+        {
+            "field": STATUS_REGRESSION_FIELD_NAME,
+            "project": {
+                "project_id": str(project.id),
+                "project_name": project.project_name,
+                "canonical_address": project.canonical_address,
+                "current_status": _enum_value(project.pipeline_status),
+            },
+            "source_record_ids": [str(confirmed.reference.id) for confirmed in confirmed_refs],
+            "reference_indexes": [
+                confirmed.reference.reference_index for confirmed in confirmed_refs
+            ],
+            "candidate_name": first.reference.candidate_name,
+            "candidate_address": first.reference.candidate_address,
+            "candidate_city": first.reference.candidate_city,
+        }
+    )
+    return serialize_json(payload)
+
+
+def _status_regression_agent_intake_payload(
+    *,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    project: Project,
+    group: _StatusRegressionCandidateGroup,
+) -> dict[str, Any]:
+    source = article.source
+    first = _unique_confirmed_references(group.confirmed_references)[0]
+    return {
+        "article": {
+            "article_id": str(article.id),
+            "title": article.title,
+            "url": article.url_canonical,
+            "source_slug": source.slug if source is not None else None,
+            "published_at": article.published_at.isoformat() if article.published_at else None,
+        },
+        "extraction": {
+            "extraction_id": str(extraction.id),
+            "prompt_id": extraction.prompt_id,
+            "prompt_version": extraction.prompt_version,
+            "triggered_by": extraction.triggered_by,
+        },
+        "project": _project_candidate_summary(project),
+        "reference": _agent_reference_payload(article=article, reference=first.reference),
+        "references": [
+            _agent_reference_payload(article=article, reference=confirmed.reference)
+            for confirmed in _unique_confirmed_references(group.confirmed_references)
+        ],
+        "matcher": _agent_matcher_payload(reference=first.reference, match=first.match),
+        "status_regression_candidates": serialize_json(group.candidates),
+        "pass1_pass2_conflicts": [],
+        "material_contradictions": [],
+        "override_contradictions": [],
+        "low_confidence_fields": [],
+        "body_access": "Use get_article_body(article_id) if full article text is needed.",
+    }
+
+
+def _upsert_agent_status_regression_review_items(
+    session: Session,
+    *,
+    project: Project,
+    source_run: SourceRun,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    decisions: list[_StatusRegressionAgentDecision],
+) -> int:
+    created_count = 0
+    for decision in decisions:
+        if not _agent_status_regression_requires_review(decision):
+            continue
+        payload = _agent_status_regression_payload(
+            project=project,
+            article=article,
+            extraction=extraction,
+            decision=decision,
+        )
+        first_evidence_id = _first_status_regression_evidence_id(decision.group)
+        item, created = upsert_decision_card_review_item(
+            session,
+            project_id=project.id,
+            source_run_id=source_run.id,
+            item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+            field_name=STATUS_REGRESSION_FIELD_NAME,
+            priority=_agent_status_regression_priority(decision),
+            match_confidence=_max_match_confidence(decision.group.confirmed_references),
+            payload=payload,
+            proposed_value=decision.group.proposed_status,
+            winning_evidence_id=first_evidence_id,
+        )
+        for confirmed in _unique_confirmed_references(decision.group.confirmed_references):
+            confirmed.reference.review_item_id = item.id
+        _link_agent_run_review_item(
+            session,
+            agent_run_id=decision.result.agent_run_id,
+            review_item_id=item.id,
+        )
+        if created:
+            created_count += 1
+    return created_count
+
+
+def _agent_status_regression_requires_review(
+    decision: _StatusRegressionAgentDecision,
+) -> bool:
+    if decision.result.outcome not in {
+        AgentRunOutcome.COMPLETED.value,
+        AgentRunOutcome.ESCALATED.value,
+    }:
+        return False
+    verdict = decision.result.agent_revised_verdict
+    verdict_decision = verdict.get("decision") if isinstance(verdict, dict) else None
+    if verdict_decision == AGENT_DISMISS_DECISION:
+        return False
+    if decision.result.outcome == AgentRunOutcome.ESCALATED.value:
+        return True
+    return verdict_decision in {
+        AGENT_CONFIRM_REGRESSION_DECISION,
+        AGENT_DEFER_TO_REVIEW_DECISION,
+        AGENT_ESCALATED_DECISION,
+    }
+
+
+def _agent_status_regression_payload(
+    *,
+    project: Project,
+    article: NewsArticle,
+    extraction: NewsExtraction,
+    decision: _StatusRegressionAgentDecision,
+) -> dict[str, Any]:
+    group = decision.group
+    confirmed = _unique_confirmed_references(group.confirmed_references)[0]
+    evidence_ids = _status_regression_group_evidence_ids(group)
+    verdict = decision.result.agent_revised_verdict or {}
+    return {
+        "origin": "agent_status_regression_candidate",
+        "agent_origin": "agent_status_regression",
+        "field_name": STATUS_REGRESSION_FIELD_NAME,
+        "source_record_id": str(confirmed.reference.id),
+        "source_record_ids": [
+            str(ref.reference.id)
+            for ref in _unique_confirmed_references(group.confirmed_references)
+        ],
+        "current_value": group.current_status,
+        "proposed_value": group.proposed_status,
+        "current_status": group.current_status,
+        "proposed_status": group.proposed_status,
+        "regression_candidates": serialize_json(group.candidates),
+        "evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
+        "winning_evidence_id": str(evidence_ids[0]) if evidence_ids else None,
+        "article_ids": [str(article.id)],
+        "agent_run_id": str(decision.result.agent_run_id),
+        "agent_outcome": decision.result.outcome,
+        "agent_revised_verdict": serialize_json(verdict),
+        "agent_recommendation": serialize_json(verdict),
+        "reasoning_trace": decision.result.reasoning_trace,
+        "system_recommendation": _agent_status_regression_system_recommendation(verdict),
+        "news_context": _news_context(
+            article=article,
+            extraction=extraction,
+            reference=confirmed.reference,
+            field_name=STATUS_REGRESSION_FIELD_NAME,
+            evidence_id=evidence_ids[0] if evidence_ids else confirmed.evidence.id,
+        ),
+        "match": confirmed.match.candidates_payload(),
+        "mapped_fields": _field_values(_news_extracted_fields(article, confirmed.reference)),
+    }
+
+
+def _agent_status_regression_system_recommendation(verdict: dict[str, Any]) -> dict[str, Any]:
+    decision = verdict.get("decision") if isinstance(verdict, dict) else None
+    if decision == AGENT_CONFIRM_REGRESSION_DECISION:
+        action = "researcher_apply_regression_recommended"
+    elif decision == AGENT_DISMISS_DECISION:
+        action = "researcher_dismiss_regression_recommended"
+    else:
+        action = "researcher_review_required"
+    return {
+        "action": action,
+        "reason": verdict.get("reason") if isinstance(verdict, dict) else None,
+        "confidence": _agent_verdict_confidence(verdict),
+    }
+
+
+def _agent_status_regression_priority(decision: _StatusRegressionAgentDecision) -> Priority:
+    if _max_candidate_int(decision.group.candidates, "rank_delta") >= 2:
+        return Priority.HIGH
+    if _max_candidate_int(decision.group.candidates, "current_rank") >= STATUS_PROGRESS_ORDER[
+        PipelineStatus.PRE_LEASING_PRE_SELLING
+    ]:
+        return Priority.HIGH
+    if any(
+        _int_or_none(candidate.get("source_tier")) == 1
+        for candidate in decision.group.candidates
+    ):
+        return Priority.HIGH
+    confidence = _agent_verdict_confidence(decision.result.agent_revised_verdict)
+    if confidence is not None and confidence >= 0.9:
+        return Priority.HIGH
+    return Priority.MEDIUM
+
+
+def _max_candidate_int(candidates: list[dict[str, Any]], key: str) -> int:
+    values = [_int_or_none(candidate.get(key)) for candidate in candidates]
+    return max((value for value in values if value is not None), default=0)
+
+
+def _status_regression_group_evidence_ids(
+    group: _StatusRegressionCandidateGroup,
+) -> list[uuid.UUID]:
+    seen: set[uuid.UUID] = set()
+    ordered: list[uuid.UUID] = []
+    for confirmed in _unique_confirmed_references(group.confirmed_references):
+        if confirmed.evidence.id in seen:
+            continue
+        seen.add(confirmed.evidence.id)
+        ordered.append(confirmed.evidence.id)
+    return ordered
+
+
+def _first_status_regression_evidence_id(
+    group: _StatusRegressionCandidateGroup,
+) -> uuid.UUID | None:
+    evidence_ids = _status_regression_group_evidence_ids(group)
+    return evidence_ids[0] if evidence_ids else None
+
+
+def _max_match_confidence(references: list[_ConfirmedReference]) -> float | None:
+    values = [
+        confirmed.match.confidence
+        for confirmed in references
+        if confirmed.match.confidence is not None
+    ]
+    return max(values, default=None)
+
+
+def _unique_confirmed_references(
+    references: list[_ConfirmedReference],
+) -> list[_ConfirmedReference]:
+    seen: set[uuid.UUID] = set()
+    unique: list[_ConfirmedReference] = []
+    for confirmed in references:
+        if confirmed.evidence.id in seen:
+            continue
+        seen.add(confirmed.evidence.id)
+        unique.append(confirmed)
+    return unique
 
 
 def _upsert_agent_override_contradiction_review_items(
