@@ -42,6 +42,7 @@ from tcg_pipeline.review.decision_cards import (
     field_name_for_payload,
     proposed_value_for_payload,
 )
+from tcg_pipeline.review.human_summary import human_summary_for_payload
 from tcg_pipeline.review.snippets import render_snippet
 
 router = APIRouter(prefix="/review", tags=["review"])
@@ -214,7 +215,7 @@ def _serialize_review_item(
         match_confidence=review_item.match_confidence,
         field_name=review_item.field_name,
         winning_evidence_id=review_item.winning_evidence_id,
-        payload=review_item.payload,
+        payload=_response_payload_for_review_item(review_item),
         assigned_to=review_item.assigned_to,
         created_at=review_item.created_at.isoformat(),
         resolved_at=review_item.resolved_at.isoformat() if review_item.resolved_at else None,
@@ -225,6 +226,16 @@ def _serialize_review_item(
             evidence_by_id=evidence_by_id or {},
         ),
     )
+
+
+def _response_payload_for_review_item(review_item: ReviewItem) -> dict[str, Any]:
+    payload = dict(review_item.payload) if isinstance(review_item.payload, dict) else {}
+    payload["human_summary"] = human_summary_for_payload(
+        item_type=review_item.item_type,
+        payload=payload,
+        field_name=review_item.field_name,
+    )
+    return payload
 
 
 def _active_decision_for_item(review_item: ReviewItem) -> ReviewDecision | None:

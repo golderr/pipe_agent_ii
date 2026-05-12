@@ -103,40 +103,67 @@ concise, and source-anchored:
 - reasoning_trace: 100-500 characters explaining the decision.
 - evidence_consulted: source records or tool results actually used.
 - tool_calls_summary: every tool call made, with bounded result summary.
-- agent_revised_verdict: one final verdict.
+- agent_revised_verdict: one final verdict, including human_summary.
+
+human_summary must be a one-sentence reviewer-facing blurb, or up to three short
+sentences when needed. Write it in plain English with no UUIDs, internal field names,
+schema terms, or reason codes. Anchor it to the source and relevant date/detail when
+available. Explain why the item is in the review queue and what the reviewer should
+check next. When multiple sources, candidates, or values matter, include a compact
+decision rationale and a concise lean, using up to 2-3 concrete factors when they
+materially help the reviewer decide: address alignment, unit-count proximity,
+product type or rent/sale fit, permit date, inspection absence, article recency, or
+source tier.
+
+Good human_summary examples:
+- "We had this project at Approved; the April 2026 Urbanize article says construction
+  has started, but LADBS inspections have not corroborated it yet, so verify before
+  promoting to Under Construction."
+- "This article could match 123 Main or the 125 Main phase; the address, unit count
+  (85 in the article vs. 83 in TCG), and rental-apartment description point more
+  strongly to 123 Main, while 125 Main is tracked as for-sale."
+
+Bad human_summary examples:
+- "pipeline_status changed because reason_code=news_status_uncorroborated_high_quality_permit_jurisdiction."
+- "Review item 2be01283 needs manual handling."
+- "There are many facts in the article and several possible outcomes; review all
+  evidence carefully."
 
 For a new_candidate trigger, use exactly one of these verdict decisions:
-- {"decision": "no_change"} when the deterministic new-candidate review should proceed.
-- {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
+- {"decision": "no_change", "human_summary": "..."} when the deterministic new-candidate review should proceed.
+- {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0,
+   "human_summary": "..."}
   only when tool evidence supports matching the intake reference to an existing project.
-- {"decision": "escalated", "reason": "..."} when a human should decide.
+- {"decision": "escalated", "reason": "...", "human_summary": "..."} when a human should decide.
 
 For a possible_multi_candidate trigger, use exactly one of these verdict decisions:
-- {"decision": "no_change"} when the deterministic possible-match review should proceed.
-- {"decision": "confirm_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
+- {"decision": "no_change", "human_summary": "..."} when the deterministic possible-match review should proceed.
+- {"decision": "confirm_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0,
+   "human_summary": "..."}
   only when the project_id is one of matcher.candidate_project_ids and tool evidence
   supports choosing that candidate.
-- {"decision": "escalated", "reason": "..."} when a human should decide.
+- {"decision": "escalated", "reason": "...", "human_summary": "..."} when a human should decide.
 
 For a low_confidence-only trigger, use exactly one of these verdict decisions:
-- {"decision": "no_change"} when the deterministic result should proceed.
-- {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0}
+- {"decision": "no_change", "human_summary": "..."} when the deterministic result should proceed.
+- {"decision": "promote_existing_project", "project_id": "<uuid>", "confidence": 0.0-1.0,
+   "human_summary": "..."}
   only when tool evidence supports matching the low-confidence reference to an existing project.
-- {"decision": "escalated", "reason": "..."} when a human should decide.
+- {"decision": "escalated", "reason": "...", "human_summary": "..."} when a human should decide.
 
 For a pass1_pass2_conflict-only trigger, use exactly one of these verdict decisions:
-- {"decision": "no_change"} when the default extraction should proceed.
-- {"decision": "escalated", "reason": "..."} when a human should decide.
+- {"decision": "no_change", "human_summary": "..."} when the default extraction should proceed.
+- {"decision": "escalated", "reason": "...", "human_summary": "..."} when a human should decide.
 
 For a material_contradiction-only trigger, use exactly one of these verdict decisions:
-- {"decision": "no_change"} when the confirmed match/evidence should proceed.
+- {"decision": "no_change", "human_summary": "..."} when the confirmed match/evidence should proceed.
 - {"decision": "downgrade_to_possible", "project_id": "<uuid>", "confidence": 0.0-1.0,
-   "reason": "..."} when a human should review the attribution before project attachment.
+   "reason": "...", "human_summary": "..."} when a human should review the attribution before project attachment.
 
 For an override_contradiction-only trigger, use exactly one of these verdict decisions:
 - {"decision": "recommend_accept_new", "confidence": 0.0-1.0,
-   "reason": "..."} when the new article evidence should be the first proposed alternative.
+   "reason": "...", "human_summary": "..."} when the new article evidence should be the first proposed alternative.
 - {"decision": "recommend_keep_override", "confidence": 0.0-1.0,
-   "reason": "..."} when the active override should be the first proposed alternative.
-- {"decision": "escalated", "reason": "..."} when a human should decide without a strong
+   "reason": "...", "human_summary": "..."} when the active override should be the first proposed alternative.
+- {"decision": "escalated", "reason": "...", "human_summary": "..."} when a human should decide without a strong
   system recommendation.

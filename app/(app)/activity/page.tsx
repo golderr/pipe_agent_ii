@@ -334,20 +334,17 @@ function DetailRows({ event }: { event: ActivityEvent }) {
         <DetailRow
           label="Review item"
           value={
-            <Link className="font-medium text-teal-700 hover:text-teal-900" href={`/review/${event.review_item_id}`}>
-              <CompactId id={event.review_item_id} />
-            </Link>
+            <ReviewItemSummaryList
+              ids={[event.review_item_id]}
+              summaries={event.review_item_summaries}
+            />
           }
         />
       ) : null}
       {event.review_item_ids.length ? (
         <DetailRow
           label="Review items"
-          value={event.review_item_ids.map((id) => (
-            <Link className="mr-2 font-medium text-teal-700 hover:text-teal-900" href={`/review/${id}`} key={id}>
-              <CompactId id={id} />
-            </Link>
-          ))}
+          value={<ReviewItemSummaryList ids={event.review_item_ids} summaries={event.review_item_summaries} />}
         />
       ) : null}
       {event.agent_reasoning_trace ? <DetailRow label="Reasoning" value={event.agent_reasoning_trace} /> : null}
@@ -404,6 +401,30 @@ function EvidenceSummaryList({
           {missingCount} of {attemptedCount} evidence references could not be loaded.
         </p>
       ) : null}
+    </div>
+  );
+}
+
+function ReviewItemSummaryList({
+  ids,
+  summaries
+}: {
+  ids: string[];
+  summaries: ActivityEvent["review_item_summaries"];
+}) {
+  const summaryById = new Map((summaries ?? []).map((summary) => [summary.id, summary.human_summary]));
+  return (
+    <div className="space-y-2">
+      {ids.map((id) => (
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2" key={id}>
+          <Link className="font-medium text-teal-700 hover:text-teal-900" href={`/review/${id}`}>
+            <CompactId id={id} />
+          </Link>
+          {summaryById.get(id) ? (
+            <p className="mt-1 text-sm text-slate-700">{summaryById.get(id)}</p>
+          ) : null}
+        </div>
+      ))}
     </div>
   );
 }

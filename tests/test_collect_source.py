@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -10,7 +11,10 @@ from tcg_pipeline.agents.profiles import PERMIT_AGENT_PROFILE
 from tcg_pipeline.agents.runner import AgentClientResult, AgentRunRequest
 from tcg_pipeline.cli import _resolve_incremental_cursor
 from tcg_pipeline.collectors.base import RawRecord
-from tcg_pipeline.db.collect import persist_collected_records
+from tcg_pipeline.db.collect import (
+    _collect_match_candidate_summaries,
+    persist_collected_records,
+)
 from tcg_pipeline.db.models import (
     AgentRun,
     AgentRunOutcome,
@@ -29,6 +33,7 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
     SourceRun,
 )
+from tcg_pipeline.matching.matcher import MatchResult
 from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
 from tcg_pipeline.settings import Settings
 
@@ -541,20 +546,26 @@ def test_persist_collected_records_keeps_possible_match_review_items_when_new_ca
     postgres_session.add_all(
         [
             Project(
+                id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
                 canonical_address=canonical_address,
                 raw_addresses=["8317 Denise Lane"],
                 market="los_angeles",
                 city="Los Angeles",
                 state="CA",
                 county="Los Angeles",
+                project_name="Denise Lane Apartments",
+                total_units=83,
             ),
             Project(
+                id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
                 canonical_address=canonical_address,
                 raw_addresses=["8317 Denise Lane"],
                 market="los_angeles",
                 city="Los Angeles",
                 state="CA",
                 county="Los Angeles",
+                project_name="Denise Lane Phase II",
+                total_units=40,
             ),
         ]
     )
@@ -568,6 +579,7 @@ def test_persist_collected_records_keeps_possible_match_review_items_when_new_ca
         mapped_fields={
             "permit_issue_date": "2023-05-19",
             "permit_type": "Bldg-Alter/Repair",
+            "total_units": 85,
         },
     )
 
@@ -596,6 +608,42 @@ def test_persist_collected_records_keeps_possible_match_review_items_when_new_ca
     ).scalar_one()
     assert review_item.item_type == ReviewItemType.POSSIBLE_MATCH
     assert review_item.payload["status_suggestion"] is None
+    assert review_item.payload["candidate_summaries"][0]["label"] == "Denise Lane Apartments"
+    assert "leaning toward Denise Lane Apartments" in review_item.payload["human_summary"]
+    assert "unit count (source says 85, TCG has 83)" in review_item.payload["human_summary"]
+
+
+def test_collect_match_candidate_summaries_are_capped(
+    postgres_session: Session,
+) -> None:
+    projects = [
+        Project(
+            canonical_address=f"{8300 + index} CAP LANE LOS ANGELES CA 91304",
+            raw_addresses=[f"{8300 + index} Cap Lane"],
+            market="los_angeles",
+            city="Los Angeles",
+            state="CA",
+            county="Los Angeles",
+            project_name=f"Collect Candidate {index}",
+        )
+        for index in range(12)
+    ]
+    postgres_session.add_all(projects)
+    postgres_session.flush()
+    match_result = MatchResult(
+        project_id=None,
+        match_type="possible_match",
+        confidence=0.65,
+        candidate_project_ids=[project.id for project in projects],
+    )
+
+    summaries = _collect_match_candidate_summaries(postgres_session, match_result)
+
+    assert len(summaries) == 10
+    assert [summary["project_id"] for summary in summaries] == [
+        str(project.id) for project in projects[:10]
+    ]
+    assert summaries[0]["label"] == "Collect Candidate 0"
 
 
 def test_persist_collected_records_matches_existing_project_when_new_candidates_suppressed(

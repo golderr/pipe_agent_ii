@@ -36,6 +36,7 @@ import {
   formatDate,
   formatDateTime,
   formatValue,
+  humanSummaryForItem,
   humanize,
   isStagedByMe,
   isStagedByOther,
@@ -958,6 +959,10 @@ function ReviewItemRow({
               <DecisionBadge item={item} currentUserId={currentUserId} currentUserEmail={currentUserEmail} />
             ) : null}
           </div>
+
+          <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-700">
+            {humanSummaryForItem(item)}
+          </p>
 
           <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
             <ValueBlock label="Current" value={currentValueForItem(item)} />

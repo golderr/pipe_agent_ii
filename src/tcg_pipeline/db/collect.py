@@ -48,6 +48,7 @@ from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
 )
+from tcg_pipeline.review.human_summary import payload_with_human_summary
 from tcg_pipeline.semantic.ladbs import enrich_ladbs_mapped_fields
 from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.source_tiers import get_logical_source_type
@@ -55,6 +56,7 @@ from tcg_pipeline.status_rules import build_status_suggestion
 
 PERMIT_AGENT_UNIT_DELTA_THRESHOLD = 0.10
 PERMIT_AGENT_SOURCE_TYPES = frozenset({"ladbs_permit"})
+MAX_CANDIDATE_SUMMARIES = 10
 
 
 @dataclass(slots=True)
@@ -448,6 +450,30 @@ def _create_unmatched_review_item(
         result.new_candidate_review_items += 1
         source_run.new_candidates += 1
 
+    payload_data = {
+        "match": _serialize_match_result(match_result),
+        "source_record_id": raw_record.source_record_id,
+        "canonical_address": raw_record.canonical_address,
+        "identifiers": _serialize_identifiers(raw_record.identifiers),
+        "mapped_fields": _serialize_payload(raw_record.mapped_fields),
+        "status_suggestion": _serialize_status_suggestion(status_suggestion),
+        "raw_payload": _serialize_payload(raw_record.raw_payload),
+        "source_row_id": raw_record.source_row_id,
+        "source_created_at": serialize_json_value(raw_record.source_created_at),
+        "source_updated_at": serialize_json_value(raw_record.source_updated_at),
+        "source_row_hash": raw_record.source_row_hash,
+    }
+    if item_type == ReviewItemType.POSSIBLE_MATCH:
+        payload_data["candidate_summaries"] = _collect_match_candidate_summaries(
+            session,
+            match_result,
+        )
+
+    payload = payload_with_human_summary(
+        payload_data,
+        item_type=item_type,
+        source_name=raw_record.source_name,
+    )
     session.add(
         ReviewItem(
             project_id=None,
@@ -456,19 +482,7 @@ def _create_unmatched_review_item(
             status=ReviewItemStatus.OPEN,
             priority=priority,
             match_confidence=match_result.confidence,
-            payload={
-                "match": _serialize_match_result(match_result),
-                "source_record_id": raw_record.source_record_id,
-                "canonical_address": raw_record.canonical_address,
-                "identifiers": _serialize_identifiers(raw_record.identifiers),
-                "mapped_fields": _serialize_payload(raw_record.mapped_fields),
-                "status_suggestion": _serialize_status_suggestion(status_suggestion),
-                "raw_payload": _serialize_payload(raw_record.raw_payload),
-                "source_row_id": raw_record.source_row_id,
-                "source_created_at": serialize_json_value(raw_record.source_created_at),
-                "source_updated_at": serialize_json_value(raw_record.source_updated_at),
-                "source_row_hash": raw_record.source_row_hash,
-            },
+            payload=payload,
         )
     )
 
@@ -648,6 +662,7 @@ def _upsert_status_change_review_items(
 ) -> StatusReviewItemUpsertResult:
     base_payload = {
         "match": _serialize_match_result(match_result),
+        "source_name": raw_record.source_name,
         "source_record_id": raw_record.source_record_id,
         "canonical_address": raw_record.canonical_address,
         "mapped_fields": _serialize_payload(raw_record.mapped_fields),
@@ -805,6 +820,51 @@ def _serialize_match_result(match_result: MatchResult) -> dict[str, Any]:
         ),
         "matched_identifier_value": match_result.matched_identifier_value,
     }
+
+
+def _collect_match_candidate_summaries(
+    session: Session,
+    match_result: MatchResult,
+) -> list[dict[str, Any]]:
+    ordered_ids = list(match_result.candidate_project_ids)[:MAX_CANDIDATE_SUMMARIES]
+    if not ordered_ids:
+        return []
+    projects = (
+        session.execute(select(Project).where(Project.id.in_(ordered_ids))).scalars().all()
+    )
+    projects_by_id = {project.id: project for project in projects}
+    summaries: list[dict[str, Any]] = []
+    for project_id in ordered_ids:
+        project = projects_by_id.get(project_id)
+        if project is None:
+            continue
+        summaries.append(
+            {
+                "project_id": str(project.id),
+                "label": project.project_name or project.canonical_address,
+                "project_name": project.project_name,
+                "canonical_address": project.canonical_address,
+                "pipeline_status": _enum_value(project.pipeline_status),
+                "total_units": project.total_units,
+                "rent_or_sale": _enum_value(project.rent_or_sale),
+                "product_type": _enum_value(project.product_type),
+                "score": match_result.confidence,
+                "reasons": [_collect_match_reason(match_result)],
+            }
+        )
+    return summaries
+
+
+def _collect_match_reason(match_result: MatchResult) -> str:
+    if match_result.matched_identifier_type is not None:
+        return "identifier_match"
+    if match_result.match_type == "possible_match":
+        return "exact_address"
+    return match_result.match_type or "possible_match"
+
+
+def _enum_value(value: Any) -> Any:
+    return value.value if isinstance(value, enum.Enum) else value
 
 
 def _serialize_change(change: DetectedChange) -> dict[str, Any]:

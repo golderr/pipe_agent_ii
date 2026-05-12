@@ -43,6 +43,7 @@ from tcg_pipeline.db.models import (
     ReviewItem,
 )
 from tcg_pipeline.review.decision_cards import evidence_ids_for_payload
+from tcg_pipeline.review.human_summary import human_summary_for_payload
 from tcg_pipeline.review.snippets import render_snippet
 
 router = APIRouter(prefix="/activity", tags=["activity"])
@@ -950,13 +951,19 @@ def _change_events_by_ids(
         return {}
     rows = session.execute(select(ChangeLog).where(ChangeLog.id.in_(unique_ids))).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows])
-    evidence_ids_by_change, evidence_by_id = _change_evidence_context(session, rows)
+    evidence_ids_by_change, evidence_by_id, review_items_by_id = _change_evidence_context(
+        session,
+        rows,
+    )
     return {
         row.id: _change_event(
             row,
             project=projects.get(row.project_id),
             evidence_ids=evidence_ids_by_change.get(row.id, []),
             evidence_by_id=evidence_by_id,
+            review_item=review_items_by_id.get(row.review_item_id)
+            if row.review_item_id is not None
+            else None,
         )
         for row in rows
     }
@@ -968,6 +975,7 @@ def _change_event(
     project: Project | None,
     evidence_ids: list[uuid.UUID] | None = None,
     evidence_by_id: dict[uuid.UUID, Evidence] | None = None,
+    review_item: ReviewItem | None = None,
 ) -> ActivityEventResponse:
     resolved_evidence_ids = list(evidence_ids or [])
     evidence_summaries = _activity_evidence_summaries_for_ids(
@@ -1014,6 +1022,10 @@ def _change_event(
         change_type=row.change_type.value,
         priority=row.priority.value,
         review_item_id=row.review_item_id,
+        review_item_summaries=_review_item_summary_payloads(
+            [row.review_item_id] if row.review_item_id is not None else [],
+            review_items_by_id={review_item.id: review_item} if review_item is not None else {},
+        ),
         evidence_summaries=evidence_summaries,
         detail=detail,
     )
@@ -1022,7 +1034,11 @@ def _change_event(
 def _change_evidence_context(
     session: Session,
     rows: list[ChangeLog],
-) -> tuple[dict[uuid.UUID, list[uuid.UUID]], dict[uuid.UUID, Evidence]]:
+) -> tuple[
+    dict[uuid.UUID, list[uuid.UUID]],
+    dict[uuid.UUID, Evidence],
+    dict[uuid.UUID, ReviewItem],
+]:
     review_items_by_id = _review_items_by_id(
         session,
         [row.review_item_id for row in rows if row.review_item_id is not None],
@@ -1034,7 +1050,11 @@ def _change_evidence_context(
         evidence_ids_by_change[row.id] = evidence_ids
         for evidence_id in evidence_ids[:MAX_ACTIVITY_EVIDENCE_SUMMARIES]:
             evidence_ids_to_fetch.add(evidence_id)
-    return evidence_ids_by_change, _evidence_by_ids(session, evidence_ids_to_fetch)
+    return (
+        evidence_ids_by_change,
+        _evidence_by_ids(session, evidence_ids_to_fetch),
+        review_items_by_id,
+    )
 
 
 def _review_items_by_id(
@@ -1050,6 +1070,29 @@ def _review_items_by_id(
         .all()
     )
     return {row.id: row for row in rows}
+
+
+def _review_item_summary_payloads(
+    ids: list[uuid.UUID],
+    *,
+    review_items_by_id: dict[uuid.UUID, ReviewItem],
+) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for review_item_id in ids:
+        review_item = review_items_by_id.get(review_item_id)
+        if review_item is None:
+            continue
+        summaries.append(
+            {
+                "id": review_item.id,
+                "human_summary": human_summary_for_payload(
+                    item_type=review_item.item_type,
+                    payload=review_item.payload if isinstance(review_item.payload, dict) else {},
+                    field_name=review_item.field_name,
+                ),
+            }
+        )
+    return summaries
 
 
 def _evidence_ids_for_change(
@@ -1405,6 +1448,10 @@ def _agent_events_by_ids(
     rows = session.execute(select(AgentRun).where(AgentRun.id.in_(unique_ids))).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows if row.project_id])
     review_item_ids_by_agent = _review_item_ids_by_agent(session, [row.id for row in rows])
+    review_items_by_id = _review_items_by_id(
+        session,
+        [review_item_id for ids in review_item_ids_by_agent.values() for review_item_id in ids],
+    )
     articles = _news_articles_by_id(session, [_news_article_id(row) for row in rows])
     source_names = _news_sources_by_id(
         session,
@@ -1426,6 +1473,10 @@ def _agent_events_by_ids(
             permit_evidence=permit_evidence_by_record.get(row.intake_record_id),
             evidence_refs=evidence_context.refs_by_agent.get(row.id, []),
             evidence_context=evidence_context,
+            review_item_summaries=_review_item_summary_payloads(
+                review_item_ids_by_agent.get(row.id, []),
+                review_items_by_id=review_items_by_id,
+            ),
         )
     return events
 
@@ -1534,13 +1585,19 @@ def _change_events(
     statement = _date_window(statement, ChangeLog.timestamp, from_date=from_date, to_date=to_date)
     rows = session.execute(statement.limit(limit)).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows])
-    evidence_ids_by_change, evidence_by_id = _change_evidence_context(session, rows)
+    evidence_ids_by_change, evidence_by_id, review_items_by_id = _change_evidence_context(
+        session,
+        rows,
+    )
     return [
         _change_event(
             row,
             project=projects.get(row.project_id),
             evidence_ids=evidence_ids_by_change.get(row.id, []),
             evidence_by_id=evidence_by_id,
+            review_item=review_items_by_id.get(row.review_item_id)
+            if row.review_item_id is not None
+            else None,
         )
         for row in rows
     ]
@@ -1637,6 +1694,10 @@ def _agent_events(
     rows = session.execute(statement.limit(limit)).scalars().all()
     projects = _projects_by_id(session, [row.project_id for row in rows if row.project_id])
     review_item_ids_by_agent = _review_item_ids_by_agent(session, [row.id for row in rows])
+    review_items_by_id = _review_items_by_id(
+        session,
+        [review_item_id for ids in review_item_ids_by_agent.values() for review_item_id in ids],
+    )
     articles = _news_articles_by_id(session, [_news_article_id(row) for row in rows])
     source_names = _news_sources_by_id(
         session,
@@ -1659,6 +1720,10 @@ def _agent_events(
                 permit_evidence=permit_evidence_by_record.get(row.intake_record_id),
                 evidence_refs=evidence_context.refs_by_agent.get(row.id, []),
                 evidence_context=evidence_context,
+                review_item_summaries=_review_item_summary_payloads(
+                    review_item_ids_by_agent.get(row.id, []),
+                    review_items_by_id=review_items_by_id,
+                ),
             )
         )
     return events[:limit]
@@ -1674,6 +1739,7 @@ def _agent_event(
     permit_evidence: Evidence | None,
     evidence_refs: list[_AgentEvidenceRef],
     evidence_context: _AgentEvidenceContext,
+    review_item_summaries: list[dict[str, Any]] | None = None,
 ) -> ActivityEventResponse:
     trigger_text = ", ".join(row.triggered_by)
     if row.outcome in AGENT_FAILURE_OUTCOMES:
@@ -1701,6 +1767,7 @@ def _agent_event(
         title=title,
         summary=f"{_source_label(row.outcome)} after {row.tool_calls_count} tool calls",
         review_item_ids=review_item_ids,
+        review_item_summaries=review_item_summaries or [],
         article=article_summary,
         intake_summary=_intake_summary_for_agent_run(
             row,

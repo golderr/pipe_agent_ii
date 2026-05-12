@@ -36,6 +36,7 @@ import {
   formatDateTime,
   formatInputValue,
   formatValue,
+  humanSummaryForItem,
   humanize,
   isStagedByMe,
   isStagedByOther,
@@ -175,6 +176,9 @@ export function ReviewItemDetailClient({
             <h1 className="mt-1 text-xl font-semibold tracking-normal text-slate-950">
               {fieldLabel(fieldName)}
             </h1>
+            <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-700">
+              {humanSummaryForItem(item)}
+            </p>
           </div>
           <div className="flex flex-col gap-2 lg:items-end">
             <div className="flex flex-wrap gap-2 text-xs">

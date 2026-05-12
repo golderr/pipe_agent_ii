@@ -277,6 +277,11 @@ class ActivityEvidenceSummary(BaseModel):
     extracted_value: Any | None
 
 
+class ActivityReviewItemSummary(BaseModel):
+    id: uuid.UUID
+    human_summary: str
+
+
 class ActivityEventResponse(BaseModel):
     id: str
     event_type: str
@@ -295,6 +300,7 @@ class ActivityEventResponse(BaseModel):
     priority: str | None = None
     review_item_id: uuid.UUID | None = None
     review_item_ids: list[uuid.UUID] = Field(default_factory=list)
+    review_item_summaries: list[ActivityReviewItemSummary] = Field(default_factory=list)
     article: ActivityArticleSummary | None = None
     intake_summary: ActivityIntakeSummary | None = Field(
         default=None,

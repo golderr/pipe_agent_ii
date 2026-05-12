@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, object_session
 
 from tcg_pipeline.db.models import Priority, ReviewItem, ReviewItemStatus, ReviewItemType
 from tcg_pipeline.ingesters._common import serialize_json_value
+from tcg_pipeline.review.human_summary import normalize_human_summary, payload_with_human_summary
 
 ACTIVE_REVIEW_STATES = ("open", "staged")
 DECISION_CARD_ITEM_TYPES = {
@@ -48,6 +49,11 @@ def upsert_decision_card_review_item(
         field_name=field_name,
         proposed_value=proposed_value,
         evidence_ids=_evidence_ids_from_payload(payload),
+    )
+    normalized_payload = payload_with_human_summary(
+        normalized_payload,
+        item_type=item_type,
+        field_name=field_name,
     )
     last_integrity_error: IntegrityError | None = None
     for _attempt in range(MAX_UPSERT_ATTEMPTS):
@@ -261,8 +267,14 @@ def _refresh_decision_card(
         _evidence_ids_from_payload(existing_payload),
         _evidence_ids_from_payload(payload),
     )
+    existing_summary = normalize_human_summary(existing_payload.get("human_summary"))
+    incoming_summary = normalize_human_summary(payload.get("human_summary"))
     updated_payload = dict(payload)
     updated_payload["evidence_ids"] = merged_evidence_ids
+    if existing_summary is not None:
+        updated_payload["human_summary"] = existing_summary
+    elif incoming_summary is not None:
+        updated_payload["human_summary"] = incoming_summary
     review_item.priority = priority
     review_item.payload = updated_payload
     if source_run_id is not None:

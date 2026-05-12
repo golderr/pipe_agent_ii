@@ -43,6 +43,7 @@ from tcg_pipeline.matching.differ import (
 from tcg_pipeline.resolution import ProjectResolutionResult, resolve_project
 from tcg_pipeline.resolution.engine import normalize_value_for_project
 from tcg_pipeline.resolution.fields import FieldResolution
+from tcg_pipeline.review.human_summary import payload_with_human_summary
 from tcg_pipeline.source_tiers import get_logical_source_type
 
 DISCOVERY_REVIEW_ITEM_TYPES = {
@@ -1796,6 +1797,22 @@ def _create_follow_up_review_item(
     if not diff_result.has_reviewable_changes:
         return 0
 
+    follow_up_payload = payload_with_human_summary(
+        {
+            "origin": "post_accept_resolution",
+            "source_review_item_id": str(review_item.id),
+            "match": payload.get("match"),
+            "source_record_id": payload.get("source_record_id"),
+            "canonical_address": payload.get("canonical_address") or project.canonical_address,
+            "mapped_fields": payload.get("mapped_fields"),
+            "changes": [_serialize_change(change) for change in diff_result.field_changes],
+            "review_flags": [
+                _serialize_review_flag(review_flag) for review_flag in diff_result.review_flags
+            ],
+            "status_suggestion": _serialize_status_suggestion(diff_result.status_suggestion),
+        },
+        item_type=ReviewItemType.STATUS_CHANGE,
+    )
     session.add(
         ReviewItem(
             project_id=project.id,
@@ -1803,19 +1820,7 @@ def _create_follow_up_review_item(
             item_type=ReviewItemType.STATUS_CHANGE,
             status=ReviewItemStatus.OPEN,
             priority=_review_priority(diff_result),
-            payload={
-                "origin": "post_accept_resolution",
-                "source_review_item_id": str(review_item.id),
-                "match": payload.get("match"),
-                "source_record_id": payload.get("source_record_id"),
-                "canonical_address": payload.get("canonical_address") or project.canonical_address,
-                "mapped_fields": payload.get("mapped_fields"),
-                "changes": [_serialize_change(change) for change in diff_result.field_changes],
-                "review_flags": [
-                    _serialize_review_flag(review_flag) for review_flag in diff_result.review_flags
-                ],
-                "status_suggestion": _serialize_status_suggestion(diff_result.status_suggestion),
-            },
+            payload=follow_up_payload,
         )
     )
     return 1

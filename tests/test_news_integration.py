@@ -39,12 +39,17 @@ from tcg_pipeline.db.models import (
 )
 from tcg_pipeline.db.researcher_overrides import upsert_researcher_overrides
 from tcg_pipeline.db.review_workflow import accept_review_item
-from tcg_pipeline.matching.news_matcher import NewsMatchResult, match_news_reference
+from tcg_pipeline.matching.news_matcher import (
+    NewsMatchCandidate,
+    NewsMatchResult,
+    match_news_reference,
+)
 from tcg_pipeline.matching.normalizer import normalize_address
 from tcg_pipeline.news.extraction import NewsExtractionRunResult
 from tcg_pipeline.news.integration import (
     _ConfirmedReference,
     _field_reference_context,
+    _news_match_candidate_summaries,
     _ProjectIntegrationContext,
     news_article_agent_trigger_reasons,
     run_news_integration_for_article,
@@ -1955,6 +1960,7 @@ def test_news_integration_creates_possible_match_review_item(
         source,
         canonical_address=canonical_address,
         project_name="Possible Match Tower",
+        total_units=83,
     )
     article = _article(source)
     postgres_session.add_all([project, article])
@@ -1966,6 +1972,7 @@ def test_news_integration_creates_possible_match_review_item(
             _reference_payload(
                 candidate_name="Possible Match Tower",
                 candidate_address="2200 Possible Boulevard, Los Angeles, CA 90012",
+                candidate_unit_total=85,
             )
         ],
     )
@@ -1999,6 +2006,21 @@ def test_news_integration_creates_possible_match_review_item(
     assert review_item is not None
     assert review_item.item_type == ReviewItemType.POSSIBLE_MATCH
     assert review_item.payload["candidate_project_ids"] == [str(project.id)]
+    assert len(review_item.payload["candidate_summaries"]) == 1
+    candidate_summary = review_item.payload["candidate_summaries"][0]
+    assert candidate_summary["project_id"] == str(project.id)
+    assert candidate_summary["label"] == "Possible Match Tower"
+    assert candidate_summary["canonical_address"] == canonical_address
+    assert candidate_summary["pipeline_status"] == "Proposed"
+    assert candidate_summary["total_units"] == 83
+    assert candidate_summary["score"] == 0.7
+    assert candidate_summary["reasons"] == [
+        "exact_address",
+        "project_name_fuzzy",
+        "unit_total_within_25pct",
+    ]
+    assert "leaning toward Possible Match Tower" in review_item.payload["human_summary"]
+    assert "unit count (source says 85, TCG has 83)" in review_item.payload["human_summary"]
     agent_run = postgres_session.execute(
         select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
     ).scalar_one()
@@ -2008,6 +2030,45 @@ def test_news_integration_creates_possible_match_review_item(
         (agent_run.id, review_item.id),
     )
     assert link is not None
+
+
+def test_news_match_candidate_summaries_are_capped(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_integration_tables(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    projects = [
+        _project(
+            source,
+            canonical_address=_canonical(f"{2200 + index} Cap Boulevard, Los Angeles, CA 90012"),
+            project_name=f"Candidate {index}",
+        )
+        for index in range(12)
+    ]
+    postgres_session.add_all(projects)
+    postgres_session.flush()
+    match = NewsMatchResult(
+        status=NewsMatchStatus.POSSIBLE,
+        match_type="address_composite",
+        confidence=0.7,
+        candidate_project_ids=[project.id for project in projects],
+        candidates=[
+            NewsMatchCandidate(
+                project_id=project.id,
+                score=0.90 - index * 0.01,
+                reasons=["exact_address"],
+            )
+            for index, project in enumerate(projects)
+        ],
+    )
+
+    summaries = _news_match_candidate_summaries(postgres_session, match)
+
+    assert len(summaries) == 10
+    assert [summary["project_id"] for summary in summaries] == [
+        str(project.id) for project in projects[:10]
+    ]
+    assert summaries[0]["label"] == "Candidate 0"
 
 
 def test_news_possible_match_agent_can_confirm_candidate_project(

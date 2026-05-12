@@ -232,6 +232,10 @@ export function warningForItem(item: ReviewQueueItem) {
   );
 }
 
+export function humanSummaryForItem(item: ReviewQueueItem) {
+  return asString(item.payload?.human_summary) ?? `${humanize(fieldNameForItem(item))} changed`;
+}
+
 export function firstChange(item: ReviewQueueItem) {
   return asRecordArray(item.payload?.changes)[0] ?? null;
 }
@@ -242,6 +246,9 @@ export function flattenPayload(payload: Record<string, unknown> | null): Payload
   }
   const rows: PayloadRow[] = [];
   for (const [key, value] of Object.entries(payload)) {
+    if (key === "human_summary") {
+      continue;
+    }
     appendPayloadRows(rows, key, value, 0);
   }
   return rows;

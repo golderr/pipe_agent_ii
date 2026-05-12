@@ -78,6 +78,7 @@ from tcg_pipeline.review.decision_cards import (
     proposed_value_for_payload,
     upsert_decision_card_review_item,
 )
+from tcg_pipeline.review.human_summary import payload_with_human_summary
 from tcg_pipeline.semantic.jurisdiction import (
     default_jurisdiction_policy,
     load_jurisdiction_policy,
@@ -96,6 +97,7 @@ from tcg_pipeline.settings import Settings, get_settings
 from tcg_pipeline.source_tiers import get_source_tier_for_source_name
 
 NEWS_SOURCE_TYPE = "news_article"
+MAX_CANDIDATE_SUMMARIES = 10
 AGENT_PROMOTED_EXISTING_PROJECT_MATCH = "agent_promoted_existing_project"
 AGENT_CONFIRMED_POSSIBLE_MATCH = "agent_confirmed_possible_match"
 AGENT_DOWNGRADED_CONFIRMED_MATCH = "agent_downgraded_confirmed_match"
@@ -1481,6 +1483,11 @@ def _integrate_current_extraction(
                 match=match,
                 evidence=evidence,
                 item_type=ReviewItemType.POSSIBLE_MATCH,
+                agent_revised_verdict=(
+                    agent_decision.result.agent_revised_verdict
+                    if agent_decision is not None
+                    else None
+                ),
             )
             reference.review_item_id = item.id
             if agent_decision is not None:
@@ -1504,6 +1511,11 @@ def _integrate_current_extraction(
                 match=match,
                 evidence=evidence,
                 item_type=ReviewItemType.NEW_CANDIDATE,
+                agent_revised_verdict=(
+                    agent_decision.result.agent_revised_verdict
+                    if agent_decision is not None
+                    else None
+                ),
             )
             reference.review_item_id = item.id
             if agent_decision is not None:
@@ -2634,6 +2646,70 @@ def _article_source_summary(article: NewsArticle) -> str:
     return title
 
 
+def _news_source_name(article: NewsArticle) -> str | None:
+    source = article.source
+    if source is None:
+        return None
+    return _clean_text(source.name) or _clean_text(source.slug)
+
+
+def _news_match_candidate_summaries(
+    session: Session,
+    match: NewsMatchResult,
+) -> list[dict[str, Any]]:
+    ordered_ids = [candidate.project_id for candidate in match.candidates]
+    if not ordered_ids:
+        ordered_ids = list(match.candidate_project_ids)
+    ordered_ids = ordered_ids[:MAX_CANDIDATE_SUMMARIES]
+    if not ordered_ids:
+        return []
+
+    projects = (
+        session.execute(select(Project).where(Project.id.in_(ordered_ids))).scalars().all()
+    )
+    projects_by_id = {project.id: project for project in projects}
+    candidate_payloads = {
+        candidate.project_id: candidate.as_payload() for candidate in match.candidates
+    }
+    summaries: list[dict[str, Any]] = []
+    for project_id in ordered_ids:
+        project = projects_by_id.get(project_id)
+        if project is None:
+            continue
+        summaries.append(
+            _project_candidate_summary(
+                project,
+                candidate_payload=candidate_payloads.get(project_id),
+            )
+        )
+    return summaries
+
+
+def _project_candidate_summary(
+    project: Project,
+    *,
+    candidate_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate_payload = candidate_payload or {}
+    return {
+        "project_id": str(project.id),
+        "label": project.project_name or project.canonical_address,
+        "project_name": project.project_name,
+        "canonical_address": project.canonical_address,
+        "pipeline_status": _enum_value(project.pipeline_status),
+        "total_units": project.total_units,
+        "rent_or_sale": _enum_value(project.rent_or_sale),
+        "product_type": _enum_value(project.product_type),
+        "score": candidate_payload.get("score"),
+        "reasons": candidate_payload.get("reasons") or [],
+        "project_name_ratio": candidate_payload.get("project_name_ratio"),
+    }
+
+
+def _enum_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
 def _override_source_summary(value: Any) -> str:
     override = value if isinstance(value, dict) else {}
     set_by = _clean_text(override.get("set_by"))
@@ -2846,6 +2922,17 @@ def _upsert_status_change_review_items(
                 if field_context["resolution_winning_evidence_id"] is not None
                 else None
             ),
+            "agent_run_id": (
+                str(field_context["agent_run_id"])
+                if field_context["agent_run_id"] is not None
+                else None
+            ),
+            "agent_revised_verdict": serialize_json(
+                field_context["agent_revised_verdict"] or {}
+            )
+            if field_context["agent_revised_verdict"] is not None
+            else None,
+            "reasoning_trace": field_context["agent_reasoning_trace"],
             "news_context": _news_context(
                 article=article,
                 extraction=extraction,
@@ -2933,6 +3020,12 @@ def _upsert_semantic_review_items(
             semantic_interpretation_row=semantic_interpretation_row,
             proposed_value=proposed_value,
         )
+        payload = payload_with_human_summary(
+            payload,
+            item_type=item_type,
+            field_name=interpretation.field_name,
+            source_name=_news_source_name(article),
+        )
         item, created = _upsert_semantic_review_item(
             session,
             project=project,
@@ -2984,9 +3077,21 @@ def _upsert_semantic_review_item(
             incoming_payload=payload,
         )
         existing.winning_evidence_id = evidence.id
-        existing.payload = _merge_semantic_review_payload(existing.payload, payload)
+        existing.payload = payload_with_human_summary(
+            _merge_semantic_review_payload(existing.payload, payload),
+            item_type=item_type,
+            field_name=field_name,
+            existing_payload=existing.payload if isinstance(existing.payload, dict) else None,
+            source_name=source_run.source_name,
+        )
         existing.updated_at = now
         return existing, False
+    payload = payload_with_human_summary(
+        payload,
+        item_type=item_type,
+        field_name=field_name,
+        source_name=source_run.source_name,
+    )
     item = ReviewItem(
         project_id=project.id,
         source_run_id=source_run.id,
@@ -3225,6 +3330,12 @@ def _field_reference_context(
         "evidence_ids": evidence_ids,
         "winning_evidence_id": winning_evidence_id,
         "agent_run_id": selected.agent_run_id if selected is not None else None,
+        "agent_revised_verdict": (
+            selected.agent_revised_verdict if selected is not None else None
+        ),
+        "agent_reasoning_trace": (
+            selected.agent_reasoning_trace if selected is not None else None
+        ),
         "resolution_winning_evidence_id": resolution_winning_evidence_id,
         "rule_applied": field_resolution.rule_applied if field_resolution is not None else None,
         "resolution_confidence": (
@@ -3243,6 +3354,7 @@ def _upsert_discovery_review_item(
     match: NewsMatchResult,
     evidence: Evidence,
     item_type: ReviewItemType,
+    agent_revised_verdict: dict[str, Any] | None = None,
 ) -> tuple[ReviewItem, bool]:
     existing = _find_existing_discovery_review_item(session, reference=reference)
     payload = _discovery_payload(
@@ -3251,6 +3363,15 @@ def _upsert_discovery_review_item(
         reference=reference,
         match=match,
         evidence=evidence,
+    )
+    if item_type == ReviewItemType.POSSIBLE_MATCH:
+        payload["candidate_summaries"] = _news_match_candidate_summaries(session, match)
+    payload = payload_with_human_summary(
+        payload,
+        item_type=item_type,
+        agent_revised_verdict=agent_revised_verdict,
+        existing_payload=existing.payload if existing is not None else None,
+        source_name=_news_source_name(article),
     )
     if existing is not None:
         existing.source_run_id = source_run.id
@@ -3440,6 +3561,7 @@ def _news_context(
         "prompt_id": extraction.prompt_id,
         "prompt_version": extraction.prompt_version,
         "evidence_id": str(evidence_id) if evidence_id is not None else None,
+        "source_name": _news_source_name(article),
         "article_title": article.title,
         "published_at": article.published_at.isoformat() if article.published_at else None,
         "url": article.url_canonical,

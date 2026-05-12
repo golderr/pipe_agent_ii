@@ -9,6 +9,7 @@ import {
   fieldNameForItem,
   flattenPayload,
   formatDate,
+  humanSummaryForItem,
   isStagedByMe,
   newProjectDataForItem,
   newsContextForItem,
@@ -243,6 +244,36 @@ describe("review payload helpers", () => {
     expect(rows).toContainEqual({ key: "field_25", value: "25" });
     expect(rows).toContainEqual({ key: "match.candidate_project_ids", value: "[\"project-a\"]" });
     expect(rows).toContainEqual({ key: "match.confidence", value: "0.92" });
+  });
+
+  it("reads human summaries and hides them from flattened payload rows", () => {
+    const item = reviewItem({
+      fieldName: "pipeline_status",
+      itemType: "status_change",
+      payload: {
+        human_summary: "Urbanize says construction started; verify LADBS inspections before applying.",
+        field_name: "pipeline_status",
+        proposed_value: "Under Construction"
+      }
+    });
+
+    expect(humanSummaryForItem(item)).toBe(
+      "Urbanize says construction started; verify LADBS inspections before applying."
+    );
+    expect(flattenPayload(item.payload)).not.toContainEqual({
+      key: "human_summary",
+      value: "Urbanize says construction started; verify LADBS inspections before applying."
+    });
+  });
+
+  it("falls back to the title pattern when human summary is absent", () => {
+    const item = reviewItem({
+      fieldName: "pipeline_status",
+      itemType: "status_change",
+      payload: { proposed_value: "Under Construction" }
+    });
+
+    expect(humanSummaryForItem(item)).toBe("Pipeline Status changed");
   });
 
   it("uses staged state for ownership checks and improves actor fallback labels", () => {

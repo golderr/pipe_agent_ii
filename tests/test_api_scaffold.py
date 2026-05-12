@@ -545,6 +545,10 @@ def test_review_queue_serializes_news_context_and_news_evidence_summary() -> Non
     )
 
     assert serialized.payload["news_context"]["extraction_confidence"] == "high"
+    assert serialized.payload["human_summary"] == (
+        'Article "Urbanize reports a project" (2026-04-29) suggests Total Units '
+        "should change from 100 to 140; review before applying."
+    )
     assert len(serialized.evidence_summaries) == 1
     summary = serialized.evidence_summaries[0]
     assert summary.is_winning is True

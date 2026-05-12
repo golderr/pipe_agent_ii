@@ -515,7 +515,12 @@ def test_activity_change_event_includes_review_item_evidence_summaries(
         status=ReviewItemStatus.OPEN,
         priority=Priority.MEDIUM,
         field_name="total_units",
-        payload={"evidence_ids": [str(evidence.id), str(missing_evidence_id)]},
+        payload={
+            "source_name": "Urbanize LA",
+            "current_value": 120,
+            "proposed_value": 155,
+            "evidence_ids": [str(evidence.id), str(missing_evidence_id)],
+        },
     )
     postgres_session.add(review_item)
     postgres_session.flush()
@@ -556,6 +561,12 @@ def test_activity_change_event_includes_review_item_evidence_summaries(
     assert summary.role is None
     assert summary.summary == "total_units: 155"
     assert "Urbanize LA" in summary.detail
+    assert len(event.review_item_summaries) == 1
+    assert event.review_item_summaries[0].id == review_item.id
+    assert event.review_item_summaries[0].human_summary == (
+        "Urbanize LA suggests Total Units should change from 120 to 155; "
+        "review before applying."
+    )
 
 
 def test_activity_change_event_caps_review_item_evidence_summaries(

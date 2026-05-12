@@ -50,6 +50,11 @@ export type ActivityEvidenceSummary = {
   extracted_value: unknown;
 };
 
+export type ActivityReviewItemSummary = {
+  id: string;
+  human_summary: string;
+};
+
 export type ActivityEvent = {
   id: string;
   event_type: "change" | "resolution" | "agent" | "semantic";
@@ -68,6 +73,7 @@ export type ActivityEvent = {
   priority: string | null;
   review_item_id: string | null;
   review_item_ids: string[];
+  review_item_summaries: ActivityReviewItemSummary[];
   article: ActivityArticleSummary | null;
   intake_summary: ActivityIntakeSummary | null;
   article_fetched_at: string | null;
