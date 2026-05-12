@@ -252,7 +252,7 @@ def reprocess_stranded_article(
                 skipped_reason="article_missing",
                 error_text=None,
             )
-        source = article_row.news_source
+        source = article_row.source
         source_name = source.slug if source is not None else "unknown"
         jurisdiction_id = None  # news_articles are not jurisdiction-scoped today.
 
