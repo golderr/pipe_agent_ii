@@ -774,3 +774,25 @@ The priority of the contradiction review item reflects the strength of the contr
 - C.i added `tcg_pipeline.review.contradictions` as the first-class contradiction service. It is invoked during `resolve_project(apply=True)` and exposes a batch `detect_contradictions(project_ids)` entrypoint for direct/deferred evidence ingest and backfill paths. The `detect-contradictions` CLI provides dry-run/apply audits before large resolve/backfill operations. See `docs/specs/data_model_changes.md` for the `ReviewItem` extension.
 - `review_workflow.py` accepts new, keep-old, defer, and custom decisions for contradiction rows. The old `researcher_override_superseded` flag path has been replaced by `override_contradiction` review item emission.
 - UI surfaces the review items as normal queue entries with the `⚠ contradicts your override` warning.
+
+#### 22.11 System-authored regression overrides
+
+The review-protected rule above applies to human/researcher-authored overrides. The
+regression-handling agent may also write a system-authored `pipeline_status`
+override when a `status_regression_candidate` is auto-accepted. These rows are
+distinct from researcher overrides:
+
+- `set_by = agent.status_regression_candidate`
+- `mode = until_newer_evidence`
+- the baseline is the evidence frontier that supported the auto-accepted regression
+- the linked review item and `change_log` row use `auto_accepted` audit markers
+
+System-authored regression overrides are intentionally allowed to yield to newer
+evidence without creating an override-contradiction review item. When a fresher
+status signal wins, the resolver clears the system-authored override and the
+newer evidence-derived status becomes current. The supersession remains
+auditable through `resolution_log.metadata.superseded_override`. This is a
+narrow exception to section 22: it does not apply to inline researcher edits,
+Keep-old decisions, Custom decisions, or any other human-authored override. Those
+remain review-protected and require an explicit contradiction review before they
+can be replaced.

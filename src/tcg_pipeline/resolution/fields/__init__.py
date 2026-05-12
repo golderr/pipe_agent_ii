@@ -9,6 +9,8 @@ from uuid import UUID
 
 from tcg_pipeline.db.models import Evidence, StatusConfidence
 
+SYSTEM_STATUS_REGRESSION_OVERRIDE_ACTOR = "agent.status_regression_candidate"
+
 
 @dataclass(slots=True, frozen=True)
 class FieldObservation:
@@ -136,6 +138,22 @@ def apply_override(
         baseline,
         source_priority=source_priority,
     )
+    if (
+        mode == "until_newer_evidence"
+        and candidate_is_newer
+        and override_payload.get("set_by") == SYSTEM_STATUS_REGRESSION_OVERRIDE_ACTOR
+    ):
+        candidate.metadata = dict(candidate.metadata)
+        candidate.metadata["system_override_superseded"] = True
+        candidate.metadata["superseded_override"] = {
+            "set_by": override_payload.get("set_by"),
+            "set_at": override_payload.get("set_at"),
+            "note": override_payload.get("note"),
+            "mode": mode,
+            "baseline": baseline,
+            "value": normalize_comparable(override_value),
+        }
+        return candidate
 
     return build_resolution(
         field_name,

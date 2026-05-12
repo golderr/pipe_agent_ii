@@ -25,6 +25,8 @@ from tcg_pipeline.db.models import (
     AgentRunOutcome,
     AgentRunReviewItem,
     AgeRestriction,
+    ChangeLog,
+    ChangeType,
     Evidence,
     NewsArticle,
     NewsExtraction,
@@ -37,13 +39,18 @@ from tcg_pipeline.db.models import (
     Priority,
     ProductType,
     Project,
+    ReviewDecision,
+    ReviewDecisionAction,
     ReviewItem,
     ReviewItemStatus,
     ReviewItemType,
     ScrapeTriggerType,
     SourceRun,
 )
-from tcg_pipeline.db.researcher_overrides import active_researcher_overrides_for_project
+from tcg_pipeline.db.researcher_overrides import (
+    active_researcher_overrides_for_project,
+    upsert_researcher_overrides,
+)
 from tcg_pipeline.matching.differ import (
     DetectedChange,
     DiffResult,
@@ -110,6 +117,12 @@ AGENT_CONFIRM_REGRESSION_DECISION = "confirm_regression"
 AGENT_DEFER_TO_REVIEW_DECISION = "defer_to_review"
 AGENT_DISMISS_DECISION = "dismiss"
 AGENT_ESCALATED_DECISION = "escalated"
+AGENT_STATUS_REGRESSION_ACTOR = "agent.status_regression_candidate"
+AGENT_STATUS_REGRESSION_AUTO_ACCEPT_DECISION_TYPE = "auto_accepted"
+STATUS_REGRESSION_AUTO_APPLY_CURRENT_RANK_MAX = STATUS_PROGRESS_ORDER[
+    PipelineStatus.UNDER_CONSTRUCTION
+]
+STATUS_REGRESSION_AUTO_APPLY_CONFIDENCE = 0.90
 ACTIVE_REVIEW_STATES = {"open", "staged"}
 REVIEW_PROTECTED_OVERRIDE_MODES = {
     "review_protected",
@@ -2456,6 +2469,8 @@ def _integrate_confirmed_project(
         article=article,
         extraction=extraction,
         decisions=status_regression_decisions,
+        settings=settings,
+        now=now,
     )
     review_count = override_review_count + status_regression_review_count
     if not diff_result.has_reviewable_changes:
@@ -2702,16 +2717,23 @@ def _upsert_agent_status_regression_review_items(
     article: NewsArticle,
     extraction: NewsExtraction,
     decisions: list[_StatusRegressionAgentDecision],
+    settings: Settings,
+    now: datetime,
 ) -> int:
     created_count = 0
     for decision in decisions:
         if not _agent_status_regression_requires_review(decision):
             continue
+        active_override = _active_status_regression_blocking_override(
+            session,
+            project=project,
+        )
         payload = _agent_status_regression_payload(
             project=project,
             article=article,
             extraction=extraction,
             decision=decision,
+            active_override=active_override,
         )
         first_evidence_id = _first_status_regression_evidence_id(decision.group)
         item, created = upsert_decision_card_review_item(
@@ -2733,6 +2755,18 @@ def _upsert_agent_status_regression_review_items(
             agent_run_id=decision.result.agent_run_id,
             review_item_id=item.id,
         )
+        if _agent_status_regression_auto_apply_eligible(
+            decision,
+            active_override=active_override,
+            settings=settings,
+        ):
+            _auto_accept_status_regression_review_item(
+                session,
+                project=project,
+                review_item=item,
+                decision=decision,
+                now=now,
+            )
         if created:
             created_count += 1
     return created_count
@@ -2759,12 +2793,223 @@ def _agent_status_regression_requires_review(
     }
 
 
+def _agent_status_regression_auto_apply_eligible(
+    decision: _StatusRegressionAgentDecision,
+    *,
+    active_override: dict[str, Any] | None,
+    settings: Settings,
+) -> bool:
+    if not settings.news_regression_auto_apply_enabled:
+        return False
+    if active_override is not None:
+        return False
+    if decision.result.outcome != AgentRunOutcome.COMPLETED.value:
+        return False
+    verdict = decision.result.agent_revised_verdict
+    if not isinstance(verdict, dict):
+        return False
+    if verdict.get("decision") != AGENT_CONFIRM_REGRESSION_DECISION:
+        return False
+    current_status = _coerce_semantic_pipeline_status(
+        verdict.get("current_status") or decision.group.current_status
+    )
+    proposed_status = _coerce_semantic_pipeline_status(
+        verdict.get("proposed_status") or decision.group.proposed_status
+    )
+    if current_status is None or proposed_status is None:
+        return False
+    if current_status.value != decision.group.current_status:
+        return False
+    if proposed_status.value != decision.group.proposed_status:
+        return False
+    current_rank = STATUS_PROGRESS_ORDER.get(current_status)
+    proposed_rank = STATUS_PROGRESS_ORDER.get(proposed_status)
+    if current_rank is None or proposed_rank is None or proposed_rank >= current_rank:
+        return False
+    if current_rank > STATUS_REGRESSION_AUTO_APPLY_CURRENT_RANK_MAX:
+        return False
+    confidence = _agent_verdict_confidence(verdict)
+    if confidence is None:
+        return False
+    return confidence >= STATUS_REGRESSION_AUTO_APPLY_CONFIDENCE
+
+
+def _active_status_regression_blocking_override(
+    session: Session,
+    *,
+    project: Project,
+) -> dict[str, Any] | None:
+    override = active_researcher_overrides_for_project(session, project).get(
+        STATUS_REGRESSION_FIELD_NAME
+    )
+    if not isinstance(override, dict):
+        return None
+    if override.get("set_by") == AGENT_STATUS_REGRESSION_ACTOR:
+        return None
+    return serialize_json(override)
+
+
+def _auto_accept_status_regression_review_item(
+    session: Session,
+    *,
+    project: Project,
+    review_item: ReviewItem,
+    decision: _StatusRegressionAgentDecision,
+    now: datetime,
+) -> None:
+    previous_status = project.pipeline_status
+    baseline = _status_regression_override_baseline(decision.group)
+    field_override = {
+        STATUS_REGRESSION_FIELD_NAME: {
+            "value": decision.group.proposed_status,
+            "set_by": AGENT_STATUS_REGRESSION_ACTOR,
+            "set_at": now.isoformat(),
+            "note": _status_regression_auto_apply_note(decision),
+            "mode": "until_newer_evidence",
+            "baseline": baseline,
+        }
+    }
+    upsert_researcher_overrides(session, project, field_override)
+
+    payload = review_item.payload if isinstance(review_item.payload, dict) else {}
+    review_item.payload = {
+        **payload,
+        "auto_apply": {
+            "applied": True,
+            "actor": AGENT_STATUS_REGRESSION_ACTOR,
+            "decision_type": AGENT_STATUS_REGRESSION_AUTO_ACCEPT_DECISION_TYPE,
+            "baseline": baseline,
+        },
+    }
+    review_item.status = ReviewItemStatus.AUTO_ACCEPTED
+    review_item.state = "committed"
+    review_item.resolved_by = AGENT_STATUS_REGRESSION_ACTOR
+    review_item.resolved_at = now
+    session.add(
+        ReviewDecision(
+            review_item_id=review_item.id,
+            action=ReviewDecisionAction.ACCEPT,
+            actor=AGENT_STATUS_REGRESSION_ACTOR,
+            notes=_status_regression_auto_apply_note(decision),
+            field_overrides=serialize_json(field_override),
+            state="committed",
+            decision_type=AGENT_STATUS_REGRESSION_AUTO_ACCEPT_DECISION_TYPE,
+            staged_at=now,
+            staged_by_email=AGENT_STATUS_REGRESSION_ACTOR,
+            committed_at=now,
+            committed_by_email=AGENT_STATUS_REGRESSION_ACTOR,
+            decision_value=serialize_json(field_override),
+            decision_notes=_status_regression_auto_apply_note(decision),
+        )
+    )
+    session.flush()
+    # The first integration resolve preserves the current status and emits the
+    # regression candidate. After writing the system override, this second
+    # resolve intentionally applies the accepted regression in the same
+    # transaction.
+    resolution_result = resolve_project(
+        project.id,
+        session,
+        apply=True,
+        write_resolution_log=True,
+        skip_contradiction_review_item_ids={review_item.id},
+    )
+    session.flush()
+    if (
+        STATUS_REGRESSION_FIELD_NAME in resolution_result.changed_fields
+        and previous_status != project.pipeline_status
+    ):
+        session.add(
+            ChangeLog(
+                project_id=project.id,
+                review_item_id=review_item.id,
+                timestamp=now,
+                source=AGENT_STATUS_REGRESSION_ACTOR,
+                field=STATUS_REGRESSION_FIELD_NAME,
+                old_value=serialize_json(previous_status),
+                new_value=serialize_json(project.pipeline_status),
+                change_type=ChangeType.AUTO_ACCEPTED,
+                priority=Priority.HIGH,
+                reviewed_by=AGENT_STATUS_REGRESSION_ACTOR,
+                reviewed_by_email=AGENT_STATUS_REGRESSION_ACTOR,
+            )
+        )
+
+
+def _status_regression_auto_apply_note(decision: _StatusRegressionAgentDecision) -> str:
+    verdict = decision.result.agent_revised_verdict or {}
+    reason = verdict.get("reason") if isinstance(verdict, dict) else None
+    if reason:
+        return str(reason)
+    return "Agent confirmed a status regression with high confidence."
+
+
+def _status_regression_override_baseline(
+    group: _StatusRegressionCandidateGroup,
+) -> dict[str, Any] | None:
+    candidate = _status_regression_baseline_candidate(group)
+    if candidate is None:
+        return None
+    return {
+        "evidence_date": candidate.get("evidence_date"),
+        "collected_at": candidate.get("collected_at"),
+        "source_tier": candidate.get("source_tier"),
+        "source_type": candidate.get("source_type"),
+        "evidence_ids": candidate.get("evidence_ids") or [],
+        "rule_applied": "agent_status_regression_candidate",
+    }
+
+
+def _status_regression_baseline_candidate(
+    group: _StatusRegressionCandidateGroup,
+) -> dict[str, Any] | None:
+    candidates = [candidate for candidate in group.candidates if isinstance(candidate, dict)]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda candidate: (
+            _sortable_date(candidate.get("evidence_date")),
+            _sortable_datetime(candidate.get("collected_at")),
+        ),
+    )
+
+
+def _sortable_date(value: Any) -> int:
+    if isinstance(value, date):
+        return value.toordinal()
+    text = _clean_text(value)
+    if text is None:
+        return 0
+    try:
+        return date.fromisoformat(text[:10]).toordinal()
+    except ValueError:
+        return 0
+
+
+def _sortable_datetime(value: Any) -> float:
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return parsed.timestamp()
+    text = _clean_text(value)
+    if text is None:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
 def _agent_status_regression_payload(
     *,
     project: Project,
     article: NewsArticle,
     extraction: NewsExtraction,
     decision: _StatusRegressionAgentDecision,
+    active_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     group = decision.group
     confirmed = _unique_confirmed_references(group.confirmed_references)[0]
@@ -2793,6 +3038,7 @@ def _agent_status_regression_payload(
         "agent_recommendation": serialize_json(verdict),
         "reasoning_trace": decision.result.reasoning_trace,
         "system_recommendation": _agent_status_regression_system_recommendation(verdict),
+        "active_override": serialize_json(active_override) if active_override else None,
         "news_context": _news_context(
             article=article,
             extraction=extraction,
@@ -2835,6 +3081,14 @@ def _agent_status_regression_priority(decision: _StatusRegressionAgentDecision) 
     confidence = _agent_verdict_confidence(decision.result.agent_revised_verdict)
     if confidence is not None and confidence >= 0.9:
         return Priority.HIGH
+    verdict = decision.result.agent_revised_verdict
+    verdict_decision = verdict.get("decision") if isinstance(verdict, dict) else None
+    if (
+        verdict_decision == AGENT_DEFER_TO_REVIEW_DECISION
+        and confidence is not None
+        and confidence < 0.5
+    ):
+        return Priority.LOW
     return Priority.MEDIUM
 
 

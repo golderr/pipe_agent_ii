@@ -10,7 +10,11 @@ from tcg_pipeline.db.models import (
     ProductType,
     Project,
 )
-from tcg_pipeline.resolution.fields import iter_field_observations, sort_observations
+from tcg_pipeline.resolution.fields import (
+    SYSTEM_STATUS_REGRESSION_OVERRIDE_ACTOR,
+    iter_field_observations,
+    sort_observations,
+)
 from tcg_pipeline.resolution.fields.age_restriction import resolve_age_restriction
 from tcg_pipeline.resolution.fields.delivery_year import resolve_delivery_year
 from tcg_pipeline.resolution.fields.developer import resolve_developer
@@ -868,3 +872,50 @@ def test_resolve_status_override_records_newer_candidate_and_keeps_override() ->
     assert resolution.metadata["candidate_value"] == PipelineStatus.UNDER_CONSTRUCTION.value
     assert resolution.metadata["candidate_is_newer_than_baseline"] is True
     assert "override_superseded" not in resolution.metadata
+
+
+def test_resolve_status_system_override_yields_to_newer_evidence() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.APPROVED
+    overrides = {
+        "pipeline_status": {
+            "value": PipelineStatus.APPROVED.value,
+            "set_by": SYSTEM_STATUS_REGRESSION_OVERRIDE_ACTOR,
+            "set_at": "2026-04-30T12:00:00Z",
+            "note": "Agent confirmed a status regression.",
+            "mode": "until_newer_evidence",
+            "baseline": {
+                "evidence_date": "2026-04-30",
+                "collected_at": "2026-04-30T12:00:00+00:00",
+                "source_tier": 2,
+                "source_type": "news_article",
+                "evidence_ids": [],
+                "rule_applied": "agent_status_regression_candidate",
+            },
+        }
+    }
+    inspection_evidence = _build_evidence(
+        source_type="ladbs_inspection",
+        source_tier=1,
+        evidence_date=date(2026, 5, 5),
+        extracted_fields={
+            "status_evidence_type": {
+                "value": "building_inspection_recorded",
+                "confidence": None,
+            },
+        },
+    )
+
+    resolution = resolve_status(
+        [inspection_evidence],
+        project,
+        overrides=overrides,
+    )
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    assert resolution.rule_applied == "highest_status_wins"
+    assert resolution.metadata["system_override_superseded"] is True
+    assert resolution.metadata["superseded_override"]["set_by"] == (
+        SYSTEM_STATUS_REGRESSION_OVERRIDE_ACTOR
+    )
+    assert resolution.metadata["superseded_override"]["value"] == PipelineStatus.APPROVED.value

@@ -88,12 +88,15 @@ services:
       # Render Blueprint must not sync these values. The Render dashboard is
       # source of truth so emergency toggles survive unrelated deploys.
       # Current production intent: news=true, permits=false, live_llm=true,
-      # legacy_pass3=false, legacy_semantic=false.
+      # news_regression_auto_apply=false, legacy_pass3=false,
+      # legacy_semantic=false.
       - key: AGENT_ENABLED_FOR_NEWS
         sync: false
       - key: AGENT_ENABLED_FOR_PERMITS
         sync: false
       - key: AGENT_ALLOW_LIVE_LLM
+        sync: false
+      - key: NEWS_REGRESSION_AUTO_APPLY_ENABLED
         sync: false
       - key: NEWS_USE_LEGACY_PASS3
         sync: false
@@ -172,12 +175,15 @@ services:
       # Render Blueprint must not sync these values. The Render dashboard is
       # source of truth so emergency toggles survive unrelated deploys.
       # Current production intent: news=true, permits=false, live_llm=true,
-      # legacy_pass3=false, legacy_semantic=false.
+      # news_regression_auto_apply=false, legacy_pass3=false,
+      # legacy_semantic=false.
       - key: AGENT_ENABLED_FOR_NEWS
         sync: false
       - key: AGENT_ENABLED_FOR_PERMITS
         sync: false
       - key: AGENT_ALLOW_LIVE_LLM
+        sync: false
+      - key: NEWS_REGRESSION_AUTO_APPLY_ENABLED
         sync: false
       - key: NEWS_USE_LEGACY_PASS3
         sync: false

@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     agent_enabled_for_news: bool = True
     agent_enabled_for_permits: bool = True
     agent_allow_live_llm: bool = False
+    news_regression_auto_apply_enabled: bool = False
     news_use_legacy_pass3: bool = False
     news_use_legacy_semantic: bool = False
     reset_tools_enabled: bool = False

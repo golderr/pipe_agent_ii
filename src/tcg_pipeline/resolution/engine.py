@@ -4,7 +4,7 @@ import enum
 import uuid
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -17,7 +17,10 @@ from tcg_pipeline.db.models import (
     ResolutionLog,
     StatusHistory,
 )
-from tcg_pipeline.db.researcher_overrides import active_researcher_overrides_for_project
+from tcg_pipeline.db.researcher_overrides import (
+    active_researcher_overrides_for_project,
+    clear_researcher_override_fields,
+)
 from tcg_pipeline.matching.differ import ReviewFlag
 from tcg_pipeline.resolution.confidence import compute_overall_confidence
 from tcg_pipeline.resolution.fields import (
@@ -250,6 +253,7 @@ def resolve_project(
             log_entries_created += 1
 
     if apply:
+        _clear_superseded_system_overrides(session, project, field_resolutions)
         previous_status = project.pipeline_status
         for field_name, resolution in field_resolutions.items():
             setattr(project, field_name, resolution.value)
@@ -384,6 +388,26 @@ def _regression_candidate_evidence_ids(candidates: list[Any]) -> list[uuid.UUID]
             evidence_ids.append(evidence_id)
             seen.add(evidence_id)
     return evidence_ids
+
+
+def _clear_superseded_system_overrides(
+    session: Session,
+    project: Project,
+    field_resolutions: dict[str, FieldResolution],
+) -> None:
+    fields = {
+        field_name
+        for field_name, resolution in field_resolutions.items()
+        if resolution.metadata.get("system_override_superseded")
+    }
+    if not fields:
+        return
+    clear_researcher_override_fields(
+        session,
+        project,
+        fields,
+        cleared_at=datetime.now(UTC),
+    )
 
 
 def _json_safe_metadata(value: Any) -> Any:

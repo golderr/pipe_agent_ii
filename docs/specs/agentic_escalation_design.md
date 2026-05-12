@@ -662,6 +662,15 @@ Stage 2: agent owns contradiction reasoning. Two cases:
 
 **Override semantics preserved.** The skip-list mechanism (`skip_contradiction_review_item_ids`) prevents re-detection of the *same* contradiction in the *same* commit transaction. It does not make overrides sticky. New evidence arriving later still flows through normal contradiction detection and produces a new review item — review-protected override semantics per `EVIDENCE_LAYER_DECISIONS.md` §22. See [`ci_contradiction_impact_assessment.md`](ci_contradiction_impact_assessment.md) §I.5.
 
+**System-authored regression override exception (2026-05-12).** High-confidence
+`status_regression_candidate` auto-accepts may write a system-authored
+`pipeline_status` override with actor `agent.status_regression_candidate`.
+These rows are distinct from researcher-authored overrides: they may yield to
+newer evidence without creating an override-contradiction review item, and the
+supersession is recorded in `resolution_log.metadata`. See
+`EVIDENCE_LAYER_DECISIONS.md` §22.11. Researcher-authored overrides keep the
+review-protected semantics described above.
+
 ### 5.5.1 What the impact assessment must enumerate
 
 C.i shipped on 2026-04-27 — extremely recent at time of this design (2026-05-04). Per researcher direction, the rewrite proceeds without a feature flag; the §5.5.0 assessment is the mitigation. The assessment must enumerate, at minimum:

@@ -3,17 +3,21 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from tcg_pipeline.agents.runner import AgentClientResult, AgentRunRequest
+from tcg_pipeline.agents.runner import AgentClientResult, AgentRunRequest, AgentRunResult
+from tcg_pipeline.db.evidence import write_evidence
 from tcg_pipeline.db.models import (
     AgentRun,
     AgentRunOutcome,
     AgentRunReviewItem,
+    ChangeLog,
+    ChangeType,
     Evidence,
     IdentifierType,
     Jurisdiction,
@@ -31,10 +35,15 @@ from tcg_pipeline.db.models import (
     Priority,
     Project,
     ProjectIdentifier,
+    ResearcherOverride,
+    ReviewDecision,
+    ReviewDecisionAction,
     ReviewItem,
+    ReviewItemStatus,
     ReviewItemType,
     SourceRun,
     StatusConfidence,
+    StatusHistory,
     SystemAlert,
 )
 from tcg_pipeline.db.researcher_overrides import upsert_researcher_overrides
@@ -47,14 +56,18 @@ from tcg_pipeline.matching.news_matcher import (
 from tcg_pipeline.matching.normalizer import normalize_address
 from tcg_pipeline.news.extraction import NewsExtractionRunResult
 from tcg_pipeline.news.integration import (
+    _agent_status_regression_auto_apply_eligible,
     _ConfirmedReference,
     _field_reference_context,
     _news_match_candidate_summaries,
     _ProjectIntegrationContext,
+    _StatusRegressionAgentDecision,
+    _StatusRegressionCandidateGroup,
     news_article_agent_trigger_reasons,
     run_news_integration_for_article,
 )
 from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
+from tcg_pipeline.resolution import resolve_project
 from tcg_pipeline.resolution.fields import FieldResolution
 from tcg_pipeline.semantic.news.pass2c import RenderedInterpretPrompt, SemanticLLMResponse
 from tcg_pipeline.settings import Settings, get_settings
@@ -102,6 +115,161 @@ class FakeNewsAgentClient:
             tool_calls_summary=[],
             agent_revised_verdict=self.verdict,
         )
+
+
+def _status_regression_decision_for_auto_apply(
+    verdict: dict[str, object],
+    *,
+    current_status: PipelineStatus = PipelineStatus.UNDER_CONSTRUCTION,
+    proposed_status: PipelineStatus = PipelineStatus.APPROVED,
+) -> _StatusRegressionAgentDecision:
+    return _StatusRegressionAgentDecision(
+        group=_StatusRegressionCandidateGroup(
+            current_status=current_status.value,
+            proposed_status=proposed_status.value,
+            candidates=[],
+            confirmed_references=[],
+        ),
+        result=AgentRunResult(
+            agent_run_id=uuid.uuid4(),
+            outcome=AgentRunOutcome.COMPLETED.value,
+            error_text=None,
+            cost_usd=Decimal("0"),
+            agent_revised_verdict=verdict,
+        ),
+    )
+
+
+def test_status_regression_auto_apply_requires_runtime_gate() -> None:
+    decision = _status_regression_decision_for_auto_apply(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.99,
+            "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+        }
+    )
+
+    assert not _agent_status_regression_auto_apply_eligible(
+        decision,
+        active_override=None,
+        settings=Settings(_env_file=None, news_regression_auto_apply_enabled=False),
+    )
+
+
+def test_status_regression_auto_apply_rejects_verdict_status_mismatch() -> None:
+    decision = _status_regression_decision_for_auto_apply(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.99,
+            "current_status": PipelineStatus.COMPLETE.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+        }
+    )
+
+    assert not _agent_status_regression_auto_apply_eligible(
+        decision,
+        active_override=None,
+        settings=Settings(_env_file=None, news_regression_auto_apply_enabled=True),
+    )
+
+
+def test_status_regression_auto_apply_rejects_terminal_current_status() -> None:
+    decision = _status_regression_decision_for_auto_apply(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.99,
+            "current_status": PipelineStatus.COMPLETE.value,
+            "proposed_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+        },
+        current_status=PipelineStatus.COMPLETE,
+        proposed_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+
+    assert not _agent_status_regression_auto_apply_eligible(
+        decision,
+        active_override=None,
+        settings=Settings(_env_file=None, news_regression_auto_apply_enabled=True),
+    )
+
+
+def test_status_regression_defer_low_confidence_gets_low_priority(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2139 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Low Confidence Regression Tower",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Low Confidence Regression Tower",
+                candidate_address="2139 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_groundbreaking_unverified_low_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.APPROVED.value,
+            confidence="medium",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "defer_to_review",
+            "confidence": 0.3,
+            "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+            "regression_reason_code": (
+                "news_groundbreaking_unverified_low_quality_permit_jurisdiction"
+            ),
+            "corroborating_evidence_ids": [],
+            "reason": "Weak regression signal.",
+        }
+    )
+
+    run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.priority == Priority.LOW
 
 
 class FakeSemanticClient:
@@ -1745,6 +1913,7 @@ def test_news_integration_routes_status_regression_candidate_to_agent_review(
             news_use_legacy_semantic=False,
             news_use_legacy_pass3=False,
             agent_enabled_for_news=True,
+            news_regression_auto_apply_enabled=True,
         ),
         now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
     )
@@ -1851,6 +2020,7 @@ def test_news_integration_status_regression_agent_can_dismiss_without_review_ite
             news_use_legacy_semantic=False,
             news_use_legacy_pass3=False,
             agent_enabled_for_news=True,
+            news_regression_auto_apply_enabled=True,
         ),
         now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
     )
@@ -1935,6 +2105,7 @@ def test_news_integration_status_regression_confirm_recommends_apply(
             news_use_legacy_semantic=False,
             news_use_legacy_pass3=False,
             agent_enabled_for_news=True,
+            news_regression_auto_apply_enabled=True,
         ),
         now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
     )
@@ -1945,16 +2116,429 @@ def test_news_integration_status_regression_confirm_recommends_apply(
             ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
         )
     ).scalar_one()
+    postgres_session.refresh(project)
     assert review_item.payload["agent_recommendation"]["decision"] == "confirm_regression"
     assert review_item.payload["system_recommendation"]["action"] == (
         "researcher_apply_regression_recommended"
     )
+    assert review_item.payload["auto_apply"]["applied"] is True
+    assert review_item.status == ReviewItemStatus.AUTO_ACCEPTED
+    assert review_item.state == "committed"
     assert review_item.priority == Priority.HIGH
+    assert project.pipeline_status == PipelineStatus.APPROVED
     agent_run = postgres_session.execute(
         select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
     ).scalar_one()
     link = postgres_session.get(AgentRunReviewItem, (agent_run.id, review_item.id))
     assert link is not None
+    review_decision = postgres_session.execute(
+        select(ReviewDecision).where(ReviewDecision.review_item_id == review_item.id)
+    ).scalar_one()
+    assert review_decision.action == ReviewDecisionAction.ACCEPT
+    assert review_decision.decision_type == "auto_accepted"
+    assert review_decision.actor == "agent.status_regression_candidate"
+    override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "pipeline_status",
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert override.value == PipelineStatus.APPROVED.value
+    assert override.set_by_label == "agent.status_regression_candidate"
+    assert override.mode == "until_newer_evidence"
+    change_log = postgres_session.execute(
+        select(ChangeLog).where(ChangeLog.review_item_id == review_item.id)
+    ).scalar_one()
+    assert change_log.change_type == ChangeType.AUTO_ACCEPTED
+    assert change_log.source == "agent.status_regression_candidate"
+    assert change_log.reviewed_by == "agent.status_regression_candidate"
+    assert change_log.field == "pipeline_status"
+    assert change_log.old_value == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert change_log.new_value == PipelineStatus.APPROVED.value
+    status_history = postgres_session.execute(
+        select(StatusHistory).where(
+            StatusHistory.project_id == project.id,
+            StatusHistory.status == PipelineStatus.APPROVED,
+        )
+    ).scalar_one()
+    assert status_history.source == "resolution_engine"
+
+
+def test_status_regression_confirm_below_threshold_stays_open(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2134 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Below Threshold Regression Tower",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Below Threshold Regression Tower",
+                candidate_address="2134 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_groundbreaking_unverified_low_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.APPROVED.value,
+            confidence="medium",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.89,
+            "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+            "regression_reason_code": (
+                "news_groundbreaking_unverified_low_quality_permit_jurisdiction"
+            ),
+            "corroborating_evidence_ids": [],
+            "reason": "Not enough confidence for auto-apply.",
+        }
+    )
+
+    run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+            news_regression_auto_apply_enabled=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    postgres_session.refresh(project)
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.status == ReviewItemStatus.OPEN
+    assert review_item.state == "open"
+    assert project.pipeline_status == PipelineStatus.UNDER_CONSTRUCTION
+    assert postgres_session.execute(
+        select(ReviewDecision).where(ReviewDecision.review_item_id == review_item.id)
+    ).scalar_one_or_none() is None
+
+
+def test_terminal_status_regression_confirm_high_confidence_stays_open(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2138 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Terminal Threshold Regression Tower",
+        pipeline_status=PipelineStatus.COMPLETE,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Terminal Threshold Regression Tower",
+                candidate_address="2138 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_topped_out",
+            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            confidence="high",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.99,
+            "current_status": PipelineStatus.COMPLETE.value,
+            "proposed_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "regression_reason_code": "news_topped_out",
+            "corroborating_evidence_ids": [],
+            "reason": "Terminal regressions stay review-only.",
+        }
+    )
+
+    run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+            news_regression_auto_apply_enabled=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    postgres_session.refresh(project)
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.status == ReviewItemStatus.OPEN
+    assert review_item.state == "open"
+    assert project.pipeline_status == PipelineStatus.COMPLETE
+    assert postgres_session.execute(
+        select(ReviewDecision).where(ReviewDecision.review_item_id == review_item.id)
+    ).scalar_one_or_none() is None
+
+
+def test_active_researcher_override_blocks_regression_auto_apply(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2142 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Override Block Regression Tower",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    upsert_researcher_overrides(
+        postgres_session,
+        project,
+        {
+            "pipeline_status": {
+                "value": PipelineStatus.UNDER_CONSTRUCTION.value,
+                "set_by": "reviewer@example.com",
+                "set_at": "2026-04-01T12:00:00+00:00",
+                "mode": "review_protected",
+                "baseline": {
+                    "evidence_date": "2026-04-01",
+                    "collected_at": "2026-04-01T12:00:00+00:00",
+                    "source_tier": 3,
+                    "source_type": "costar",
+                },
+            }
+        },
+    )
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Override Block Regression Tower",
+                candidate_address="2142 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_groundbreaking_unverified_low_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.APPROVED.value,
+            confidence="medium",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.98,
+            "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+            "regression_reason_code": (
+                "news_groundbreaking_unverified_low_quality_permit_jurisdiction"
+            ),
+            "corroborating_evidence_ids": [],
+            "reason": "Would auto-apply except for active researcher override.",
+        }
+    )
+
+    run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+            news_regression_auto_apply_enabled=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    postgres_session.refresh(project)
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.status == ReviewItemStatus.OPEN
+    assert review_item.payload["active_override"]["set_by"] == "reviewer@example.com"
+    assert project.pipeline_status == PipelineStatus.UNDER_CONSTRUCTION
+    assert postgres_session.execute(
+        select(ReviewDecision).where(ReviewDecision.review_item_id == review_item.id)
+    ).scalar_one_or_none() is None
+
+
+def test_system_authored_regression_override_clears_on_fresh_tier1_status(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2143 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="System Override Clearing Tower",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="System Override Clearing Tower",
+                candidate_address="2143 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_groundbreaking_unverified_low_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.APPROVED.value,
+            confidence="medium",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.93,
+            "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+            "regression_reason_code": (
+                "news_groundbreaking_unverified_low_quality_permit_jurisdiction"
+            ),
+            "corroborating_evidence_ids": [],
+            "reason": "Regression is credible for now.",
+        }
+    )
+    run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+            news_regression_auto_apply_enabled=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+    postgres_session.refresh(project)
+    assert project.pipeline_status == PipelineStatus.APPROVED
+    override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "pipeline_status",
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    assert override.set_by_label == "agent.status_regression_candidate"
+
+    write_evidence(
+        postgres_session,
+        project_id=project.id,
+        source_name="ladbs_inspections",
+        source_record_id="fresh-inspection-regression-clear",
+        raw_data={"permit_number": "fresh-inspection-regression-clear"},
+        mapped_fields={
+            "status_evidence_type": "building_inspection_recorded",
+            "status_evidence_date": "2026-05-05",
+        },
+        collected_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
+        ingest_method="test",
+    )
+    resolve_project(project.id, postgres_session, apply=True, write_resolution_log=True)
+    postgres_session.flush()
+    postgres_session.refresh(project)
+    postgres_session.refresh(override)
+
+    assert project.pipeline_status == PipelineStatus.UNDER_CONSTRUCTION
+    assert override.cleared_at is not None
 
 
 def test_news_effect1_uncorroborated_terminal_suppression_does_not_fire_regression_alone(
