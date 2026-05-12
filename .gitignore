@@ -15,6 +15,7 @@ out/
 
 .claude/
 logs/
+backups/
 
 data/output/*
 !data/output/.gitkeep
