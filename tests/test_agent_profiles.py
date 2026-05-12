@@ -83,6 +83,7 @@ def test_news_agent_prompt_defines_material_contradiction_contract() -> None:
 
     assert "For material_contradiction triggers:" in prompt
     assert "material_contradiction verdict shape" in prompt
+    assert "regression, or developer mismatch" in prompt
     assert "the other triggers are reasoning input" in prompt
     assert "downgrade_to_possible is the human-review path" in prompt
     assert "downgrade_to_possible" in prompt
