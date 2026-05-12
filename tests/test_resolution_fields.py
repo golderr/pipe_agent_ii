@@ -669,7 +669,77 @@ def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> 
     resolution = resolve_status([permit_evidence], project)
 
     assert resolution.value == PipelineStatus.COMPLETE
+    assert resolution.rule_applied == "terminal_regression_dropped"
+    assert resolution.metadata["regression_candidate_count"] == 1
+    candidate = resolution.metadata["regression_candidates"][0]
+    assert candidate["current_status"] == PipelineStatus.COMPLETE.value
+    assert candidate["proposed_status"] == PipelineStatus.APPROVED.value
+    assert candidate["current_rank"] == 6
+    assert candidate["proposed_rank"] == 3
+    assert candidate["rank_delta"] == 3
+    assert candidate["evidence_ids"] == [str(permit_evidence.id)]
+    assert candidate["evidence_type"] == "building_permit_issued"
+    assert candidate["terminal_state_dropped"] is True
+
+
+def test_resolve_status_emits_regression_candidate_for_lower_ranked_evidence() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
     assert resolution.rule_applied == "forward_only_preserve_current"
+    assert resolution.metadata["regression_audit_rule_applied"] == (
+        "status_regression_candidate_preserve_current"
+    )
+    assert resolution.metadata["regression_candidate_count"] == 1
+    candidate = resolution.metadata["regression_candidates"][0]
+    assert candidate["current_status"] == PipelineStatus.UNDER_CONSTRUCTION.value
+    assert candidate["proposed_status"] == PipelineStatus.APPROVED.value
+    assert candidate["rank_delta"] == 1
+    assert candidate["terminal_state_dropped"] is False
+
+
+def test_resolve_status_enumerates_lower_ranked_candidate_when_higher_evidence_wins() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 5, 1),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+    inspection_evidence = _build_evidence(
+        source_type="ladbs_inspection",
+        source_tier=1,
+        evidence_date=date(2026, 4, 1),
+        extracted_fields={
+            "status_evidence_type": {
+                "value": "building_inspection_recorded",
+                "confidence": None,
+            },
+        },
+    )
+
+    resolution = resolve_status([permit_evidence, inspection_evidence], project)
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    assert resolution.rule_applied == "highest_status_wins"
+    assert resolution.metadata["regression_candidate_count"] == 1
+    candidate = resolution.metadata["regression_candidates"][0]
+    assert candidate["proposed_status"] == PipelineStatus.APPROVED.value
+    assert candidate["evidence_ids"] == [str(permit_evidence.id)]
 
 
 def test_resolve_status_preserves_current_for_inactive_candidate() -> None:

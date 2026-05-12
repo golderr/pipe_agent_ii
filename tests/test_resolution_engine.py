@@ -173,6 +173,68 @@ def test_resolve_project_keeps_existing_values_when_partial_evidence_arrives(
     assert resolution.field_resolutions["date_delivery"].value == date(2024, 9, 15)
 
 
+def test_resolve_project_logs_terminal_status_regression_audit(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("evidence"):
+        pytest.skip("Apply the evidence layer migration before running resolution tests.")
+    column_names = {
+        column["name"] for column in inspect(postgres_session.bind).get_columns("resolution_log")
+    }
+    if "metadata" not in column_names:
+        pytest.skip("Apply the status regression metadata migration before running this test.")
+
+    project = Project(
+        canonical_address="900 TERMINAL WAY LOS ANGELES CA 90012",
+        raw_addresses=["900 Terminal Way"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.COMPLETE,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    evidence = Evidence(
+        project_id=project.id,
+        source_type="ladbs_permit",
+        source_tier=1,
+        ingest_method="scheduled_collector",
+        collected_at=datetime(2026, 4, 5, tzinfo=UTC),
+        evidence_date=date(2026, 4, 5),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None}
+        },
+    )
+    postgres_session.add(evidence)
+    postgres_session.flush()
+
+    result = resolve_project(
+        project.id,
+        postgres_session,
+        apply=False,
+        write_resolution_log=True,
+    )
+    postgres_session.flush()
+
+    assert "pipeline_status" not in result.changed_fields
+    row = postgres_session.execute(
+        select(ResolutionLog).where(
+            ResolutionLog.project_id == project.id,
+            ResolutionLog.field == "pipeline_status",
+        )
+    ).scalar_one()
+    assert row.current_value == PipelineStatus.COMPLETE.value
+    assert row.resolved_value == PipelineStatus.COMPLETE.value
+    assert row.evidence_ids == [evidence.id]
+    assert row.rule_applied == "terminal_regression_dropped"
+    assert row.metadata_json["regression_candidate_count"] == 1
+    candidate = row.metadata_json["regression_candidates"][0]
+    assert candidate["current_status"] == PipelineStatus.COMPLETE.value
+    assert candidate["proposed_status"] == PipelineStatus.APPROVED.value
+    assert candidate["terminal_state_dropped"] is True
+
+
 def test_resolve_project_ignores_superseded_evidence(
     postgres_session: Session,
 ) -> None:

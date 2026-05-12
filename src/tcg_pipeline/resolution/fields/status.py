@@ -41,24 +41,6 @@ def resolve_status(
     permit_observations = direct_signal_observations.get("building_permit_issued", [])
     inspection_observations = direct_signal_observations.get("building_inspection_recorded", [])
     cofo_observations = direct_signal_observations.get("certificate_of_occupancy_issued", [])
-    if cofo_observations:
-        candidate = build_resolution(
-            "pipeline_status",
-            PipelineStatus.COMPLETE,
-            confidence=StatusConfidence.HIGH,
-            observations=cofo_observations[:1],
-            rule_applied="direct_cofo_evidence",
-            metadata={
-                "evidence_type": "certificate_of_occupancy_issued",
-                "source_type": cofo_observations[0].evidence.source_type,
-            },
-        )
-        return apply_override(
-            "pipeline_status",
-            candidate,
-            overrides,
-            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
-        )
 
     candidate_observations: dict[PipelineStatus, list[FieldObservation]] = {}
     for observation in explicit_observations:
@@ -81,6 +63,29 @@ def resolve_status(
         candidate_observations.setdefault(PipelineStatus.APPROVED, []).extend(
             permit_observations[:1]
         )
+    if cofo_observations:
+        candidate_observations.setdefault(PipelineStatus.COMPLETE, []).extend(
+            cofo_observations[:1]
+        )
+
+    if cofo_observations:
+        regression_metadata = _status_regression_metadata(
+            project.pipeline_status,
+            candidate_observations,
+        )
+        candidate = build_resolution(
+            "pipeline_status",
+            PipelineStatus.COMPLETE,
+            confidence=StatusConfidence.HIGH,
+            observations=cofo_observations[:1],
+            rule_applied="direct_cofo_evidence",
+            metadata={
+                "evidence_type": "certificate_of_occupancy_issued",
+                "source_type": cofo_observations[0].evidence.source_type,
+                **regression_metadata,
+            },
+        )
+        return _apply_status_override(candidate, project=project, overrides=overrides)
 
     if not candidate_observations:
         candidate = build_resolution(
@@ -89,12 +94,12 @@ def resolve_status(
             confidence=StatusConfidence.LOW,
             rule_applied="no_status_evidence",
         )
-        return apply_override(
-            "pipeline_status",
-            candidate,
-            overrides,
-            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
-        )
+        return _apply_status_override(candidate, project=project, overrides=overrides)
+
+    regression_metadata = _status_regression_metadata(
+        project.pipeline_status,
+        candidate_observations,
+    )
 
     chosen_status, chosen_observations = max(
         candidate_observations.items(),
@@ -116,14 +121,10 @@ def resolve_status(
                     f"Evidence suggests {chosen_status.value}, but Stalled/Inactive "
                     "transitions are manual-review only."
                 ),
+                **regression_metadata,
             },
         )
-        return apply_override(
-            "pipeline_status",
-            candidate,
-            overrides,
-            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
-        )
+        return _apply_status_override(candidate, project=project, overrides=overrides)
 
     current_rank = STATUS_PROGRESS_ORDER.get(project.pipeline_status)
     chosen_rank = STATUS_PROGRESS_ORDER.get(chosen_status)
@@ -137,20 +138,20 @@ def resolve_status(
             project.pipeline_status,
             confidence=StatusConfidence.LOW,
             observations=chosen_observations[:1],
-            rule_applied="forward_only_preserve_current",
+            rule_applied=(
+                "terminal_regression_dropped"
+                if _has_terminal_regression_drop(regression_metadata)
+                else "forward_only_preserve_current"
+            ),
             metadata={
                 "candidate_status": chosen_status.value,
                 "evidence_type": _extract_status_evidence_type(chosen_observations),
                 "source_type": _extract_source_type(chosen_observations),
                 "requires_review": False,
+                **regression_metadata,
             },
         )
-        return apply_override(
-            "pipeline_status",
-            candidate,
-            overrides,
-            transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
-        )
+        return _apply_status_override(candidate, project=project, overrides=overrides)
     confidence = _status_confidence(
         chosen_status,
         chosen_observations,
@@ -179,14 +180,10 @@ def resolve_status(
                 if review_required
                 else None
             ),
+            **regression_metadata,
         },
     )
-    return apply_override(
-        "pipeline_status",
-        candidate,
-        overrides,
-        transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
-    )
+    return _apply_status_override(candidate, project=project, overrides=overrides)
 
 
 def _status_signal_observations(
@@ -212,6 +209,102 @@ def _status_signal_observations(
     return observations_by_signal
 
 
+def _apply_status_override(
+    candidate: FieldResolution,
+    *,
+    project: Project,
+    overrides: dict[str, Any] | None,
+) -> FieldResolution:
+    resolution = apply_override(
+        "pipeline_status",
+        candidate,
+        overrides,
+        transform_value=lambda value: _coerce_pipeline_status(value) or project.pipeline_status,
+    )
+    if resolution is candidate:
+        return resolution
+    for key in (
+        "regression_candidates",
+        "regression_candidate_count",
+        "regression_audit_rule_applied",
+    ):
+        if key in candidate.metadata:
+            resolution.metadata[key] = candidate.metadata[key]
+    return resolution
+
+
+def _status_regression_metadata(
+    current_status: PipelineStatus,
+    candidate_observations: dict[PipelineStatus, list[FieldObservation]],
+) -> dict[str, Any]:
+    current_rank = STATUS_PROGRESS_ORDER.get(current_status)
+    if current_rank is None:
+        return {}
+
+    candidates: list[dict[str, Any]] = []
+    for proposed_status, observations in candidate_observations.items():
+        proposed_rank = STATUS_PROGRESS_ORDER.get(proposed_status)
+        if proposed_rank is None or proposed_rank >= current_rank:
+            continue
+        for observation in observations:
+            candidates.append(
+                _status_regression_candidate_payload(
+                    current_status=current_status,
+                    current_rank=current_rank,
+                    proposed_status=proposed_status,
+                    proposed_rank=proposed_rank,
+                    observation=observation,
+                )
+            )
+    if not candidates:
+        return {}
+
+    terminal_drop = current_status == PipelineStatus.COMPLETE
+    return {
+        "regression_candidates": candidates,
+        "regression_candidate_count": len(candidates),
+        "regression_audit_rule_applied": (
+            "terminal_regression_dropped"
+            if terminal_drop
+            else "status_regression_candidate_preserve_current"
+        ),
+    }
+
+
+def _status_regression_candidate_payload(
+    *,
+    current_status: PipelineStatus,
+    current_rank: int,
+    proposed_status: PipelineStatus,
+    proposed_rank: int,
+    observation: FieldObservation,
+) -> dict[str, Any]:
+    return {
+        "current_status": current_status.value,
+        "proposed_status": proposed_status.value,
+        "current_rank": current_rank,
+        "proposed_rank": proposed_rank,
+        "rank_delta": current_rank - proposed_rank,
+        "evidence_ids": [str(observation.evidence.id)],
+        "source_type": observation.evidence.source_type,
+        "source_tier": observation.evidence.source_tier,
+        "evidence_type": _status_evidence_type_for_observation(observation),
+        "evidence_date": observation.effective_date.isoformat(),
+        "collected_at": observation.evidence.collected_at.isoformat(),
+        "semantic_reason_code": _semantic_reason_code_for_observation(observation),
+        "terminal_state_dropped": current_status == PipelineStatus.COMPLETE,
+    }
+
+
+def _has_terminal_regression_drop(metadata: dict[str, Any]) -> bool:
+    candidates = metadata.get("regression_candidates")
+    return (
+        isinstance(candidates, list)
+        and bool(candidates)
+        and all(candidate.get("terminal_state_dropped") is True for candidate in candidates)
+    )
+
+
 def _can_promote_to_under_construction(
     observation: FieldObservation,
     *,
@@ -232,6 +325,30 @@ def _can_promote_to_under_construction(
         and candidate.evidence.source_tier > 1
     }
     return len(matching_non_gov_sources) >= 2
+
+
+def _status_evidence_type_for_observation(observation: FieldObservation) -> str | None:
+    if observation.field_name == "status_evidence_type":
+        value = str(observation.value).strip()
+        return value or None
+    extracted = observation.evidence.extracted_fields or {}
+    payload = extracted.get("status_evidence_type")
+    if not isinstance(payload, dict):
+        return None
+    value = str(payload.get("value") or "").strip()
+    return value or None
+
+
+def _semantic_reason_code_for_observation(observation: FieldObservation) -> str | None:
+    extracted = observation.evidence.extracted_fields or {}
+    field_payload = extracted.get(observation.field_name)
+    if not isinstance(field_payload, dict):
+        return None
+    semantic_payload = field_payload.get("semantic")
+    if not isinstance(semantic_payload, dict):
+        return None
+    value = str(semantic_payload.get("reason_code") or "").strip()
+    return value or None
 
 
 def _semantic_promotes_status_alone(observation: FieldObservation) -> bool:

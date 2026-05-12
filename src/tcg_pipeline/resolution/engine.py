@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import uuid
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import date, datetime
@@ -214,6 +215,17 @@ def resolve_project(
     for field_name, resolution in field_resolutions.items():
         current_value = getattr(project, field_name)
         if normalize_comparable(current_value) == normalize_comparable(resolution.value):
+            if (
+                write_resolution_log
+                and field_name == "pipeline_status"
+                and _log_preserved_status_regression(
+                    session,
+                    project=project,
+                    resolution=resolution,
+                    current_value=current_value,
+                )
+            ):
+                log_entries_created += 1
             continue
 
         changed_fields.append(field_name)
@@ -299,6 +311,75 @@ def normalize_value_for_project(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, date):
         return value.isoformat()
+    return value
+
+
+def _log_preserved_status_regression(
+    session: Session,
+    *,
+    project: Project,
+    resolution: FieldResolution,
+    current_value: Any,
+) -> bool:
+    candidates = resolution.metadata.get("regression_candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return False
+    session.add(
+        ResolutionLog(
+            project_id=project.id,
+            field="pipeline_status",
+            current_value=normalize_comparable(current_value),
+            resolved_value=normalize_comparable(resolution.value),
+            evidence_ids=_regression_candidate_evidence_ids(candidates) or None,
+            rule_applied=str(
+                resolution.metadata.get("regression_audit_rule_applied")
+                or resolution.rule_applied
+            ),
+            confidence=resolution.confidence,
+            metadata_json=_json_safe_metadata(resolution.metadata),
+        )
+    )
+    return True
+
+
+def _regression_candidate_evidence_ids(candidates: list[Any]) -> list[uuid.UUID]:
+    evidence_ids: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        values = candidate.get("evidence_ids")
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            try:
+                evidence_id = uuid.UUID(str(value))
+            except (TypeError, ValueError):
+                continue
+            if evidence_id in seen:
+                continue
+            evidence_ids.append(evidence_id)
+            seen.add(evidence_id)
+    return evidence_ids
+
+
+def _json_safe_metadata(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe_metadata(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_metadata(item) for item in value]
     return value
 
 
