@@ -1869,6 +1869,286 @@ def test_news_integration_status_regression_agent_can_dismiss_without_review_ite
     assert agent_run.agent_revised_verdict["decision"] == "dismiss"
 
 
+def test_news_integration_status_regression_confirm_recommends_apply(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2138 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Confirm Regression Tower",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Confirm Regression Tower",
+                candidate_address="2138 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_groundbreaking_unverified_low_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.APPROVED.value,
+            confidence="medium",
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "confirm_regression",
+            "confidence": 0.93,
+            "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+            "regression_reason_code": (
+                "news_groundbreaking_unverified_low_quality_permit_jurisdiction"
+            ),
+            "corroborating_evidence_ids": [],
+            "reason": "Later article indicates construction has not started.",
+        }
+    )
+
+    run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.payload["agent_recommendation"]["decision"] == "confirm_regression"
+    assert review_item.payload["system_recommendation"]["action"] == (
+        "researcher_apply_regression_recommended"
+    )
+    assert review_item.priority == Priority.HIGH
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one()
+    link = postgres_session.get(AgentRunReviewItem, (agent_run.id, review_item.id))
+    assert link is not None
+
+
+def test_news_effect1_uncorroborated_terminal_suppression_does_not_fire_regression_alone(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2139 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Effect One Suppression Tower",
+        pipeline_status=PipelineStatus.COMPLETE,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Effect One Suppression Tower",
+                candidate_address="2139 Regression Boulevard, Los Angeles, CA 90012",
+            )
+        ],
+    )
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload(
+            reference_id=reference.id,
+            reason_code="news_status_uncorroborated_high_quality_permit_jurisdiction",
+            canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+            confidence="medium",
+            requires_corroboration=True,
+        )
+    )
+    client = FakeNewsAgentClient({"decision": "defer_to_review"})
+
+    result = run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        force_project_id=project.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.confirmed == 1
+    assert client.requests == []
+    evidence = postgres_session.execute(
+        select(Evidence).where(Evidence.source_record_id == str(reference.id))
+    ).scalar_one()
+    assert evidence.raw_data["news_status_review_skipped_terminal_state"] is True
+    assert postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type.in_(
+                [
+                    ReviewItemType.NEWS_STATUS_UNCORROBORATED,
+                    ReviewItemType.STATUS_REGRESSION_REVIEW,
+                ]
+            ),
+        )
+    ).scalars().all() == []
+    assert postgres_session.execute(
+        select(AgentRun).where(AgentRun.intake_extraction_id == extraction.id)
+    ).scalar_one_or_none() is None
+
+
+def test_news_effect1_suppression_does_not_block_independent_regression_signal(
+    postgres_session: Session,
+) -> None:
+    _ensure_semantic_news_integration_tables(postgres_session)
+    _ensure_agent2_tables(postgres_session)
+    _ensure_resolution_log_metadata(postgres_session)
+    source = _news_source(postgres_session, "news_paste_a_link")
+    canonical_address = _canonical("2141 Regression Boulevard, Los Angeles, CA 90012")
+    project = _project(
+        source,
+        canonical_address=canonical_address,
+        project_name="Effect Two Mixed Tower",
+        pipeline_status=PipelineStatus.COMPLETE,
+    )
+    article = _article(source)
+    postgres_session.add_all([project, article])
+    postgres_session.flush()
+    extraction, first_reference = _add_extraction(
+        postgres_session,
+        article=article,
+        references=[
+            _reference_payload(
+                candidate_name="Effect Two Mixed Tower",
+                candidate_address="2141 Regression Boulevard, Los Angeles, CA 90012",
+            ),
+            _reference_payload(
+                candidate_name="Effect Two Mixed Tower",
+                candidate_address="2141 Regression Boulevard, Los Angeles, CA 90012",
+            ),
+        ],
+    )
+    references = (
+        postgres_session.execute(
+            select(NewsProjectReference)
+            .where(NewsProjectReference.extraction_id == extraction.id)
+            .order_by(NewsProjectReference.reference_index.asc())
+        )
+        .scalars()
+        .all()
+    )
+    assert first_reference.id == references[0].id
+    clean_reference = references[1]
+    article.current_extraction_id = extraction.id
+    article.current_extraction_version = 1
+    source_run = _source_run(source)
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    semantic_client = FakeSemanticClient(
+        _semantic_payload_for_interpretations(
+            [
+                _semantic_interpretation_payload(
+                    reference_id=first_reference.id,
+                    reason_code="news_status_uncorroborated_high_quality_permit_jurisdiction",
+                    canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+                    confidence="medium",
+                    requires_corroboration=True,
+                ),
+                _semantic_interpretation_payload(
+                    reference_id=clean_reference.id,
+                    reason_code="news_topped_out",
+                    canonical_value=PipelineStatus.UNDER_CONSTRUCTION.value,
+                    confidence="high",
+                ),
+            ]
+        )
+    )
+    client = FakeNewsAgentClient(
+        {
+            "decision": "defer_to_review",
+            "confidence": 0.71,
+            "current_status": PipelineStatus.COMPLETE.value,
+            "proposed_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "regression_reason_code": "news_topped_out",
+            "corroborating_evidence_ids": [],
+            "reason": "Only the clean semantic signal should route.",
+        }
+    )
+
+    run_news_integration_for_article(
+        article.id,
+        source_run_id=source_run.id,
+        session_factory=_task_session_factory(postgres_session),
+        semantic_client=semantic_client,
+        agent_client=client,
+        settings=Settings(
+            _env_file=None,
+            news_use_legacy_semantic=False,
+            news_use_legacy_pass3=False,
+            agent_enabled_for_news=True,
+        ),
+        now=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+
+    assert len(client.requests) == 1
+    assert client.requests[0].trigger_reasons == ("status_regression_candidate",)
+    candidates = client.requests[0].intake.payload["status_regression_candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["semantic_reason_code"] == "news_topped_out"
+    assert candidates[0]["source_record_ids"] == [str(clean_reference.id)]
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.payload["source_record_ids"] == [str(clean_reference.id)]
+    assert review_item.payload["regression_candidates"][0]["semantic_reason_code"] == (
+        "news_topped_out"
+    )
+
+
 def test_news_use_legacy_semantic_true_does_not_emit_status_regression_candidate(
     postgres_session: Session,
 ) -> None:
@@ -3596,31 +3876,54 @@ def _semantic_payload(
     confidence: str,
     requires_corroboration: bool = False,
 ) -> dict:
+    return _semantic_payload_for_interpretations(
+        [
+            _semantic_interpretation_payload(
+                reference_id=reference_id,
+                reason_code=reason_code,
+                canonical_value=canonical_value,
+                confidence=confidence,
+                requires_corroboration=requires_corroboration,
+            )
+        ]
+    )
+
+
+def _semantic_payload_for_interpretations(interpretations: list[dict]) -> dict:
     return {
-        "interpretations": [
+        "interpretations": interpretations,
+        "diagnostic": {"fixture": True},
+    }
+
+
+def _semantic_interpretation_payload(
+    *,
+    reference_id: uuid.UUID,
+    reason_code: str,
+    canonical_value: str | None,
+    confidence: str,
+    requires_corroboration: bool = False,
+) -> dict:
+    return {
+        "field_name": "pipeline_status",
+        "canonical_value": canonical_value,
+        "confidence": confidence,
+        "reason_code": reason_code,
+        "signal_flags": {},
+        "source_anchors": [
             {
+                "text": "the tower has topped out",
+                "offset_start": 10,
+                "offset_end": 34,
                 "field_name": "pipeline_status",
-                "canonical_value": canonical_value,
-                "confidence": confidence,
-                "reason_code": reason_code,
-                "signal_flags": {},
-                "source_anchors": [
-                    {
-                        "text": "the tower has topped out",
-                        "offset_start": 10,
-                        "offset_end": 34,
-                        "field_name": "pipeline_status",
-                        "metadata": {},
-                    }
-                ],
-                "requires_corroboration": requires_corroboration,
-                "metadata": {
-                    "tense": "past_concurrent",
-                    "reference_id": str(reference_id),
-                },
+                "metadata": {},
             }
         ],
-        "diagnostic": {"fixture": True},
+        "requires_corroboration": requires_corroboration,
+        "metadata": {
+            "tense": "past_concurrent",
+            "reference_id": str(reference_id),
+        },
     }
 
 
