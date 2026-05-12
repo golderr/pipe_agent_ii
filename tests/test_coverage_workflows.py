@@ -20,7 +20,10 @@ from tcg_pipeline.db.models import (
     Jurisdiction,
     Market,
     NewsSource,
+    Priority,
     Project,
+    ReviewItem,
+    ReviewItemType,
     ScrapeJob,
     ScrapeJobKind,
     ScrapeJobStatus,
@@ -355,6 +358,23 @@ def test_process_costar_upload_records_success_audit(
 ) -> None:
     _ensure_coverage_tables(postgres_session)
     jurisdiction = _jurisdiction(postgres_session)
+    project = Project(
+        canonical_address="9801 WEST EXAMPLE BOULEVARD LOS ANGELES CA 90035",
+        raw_addresses=["9801 W Example Blvd"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+    )
+    review_item = ReviewItem(
+        project=project,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        field_name="pipeline_status",
+        priority=Priority.LOW,
+        payload={"human_summary": "CoStar returned review item needs linkage."},
+    )
+    postgres_session.add_all([project, review_item])
+    postgres_session.flush()
 
     def fake_seed_costar_workbooks(
         _session: Session,
@@ -371,7 +391,12 @@ def test_process_costar_upload_records_success_audit(
                 skipped_property_ids=[],
                 duplicate_property_ids=[],
             ),
-            CoStarPersistResult(inserted_projects=1, matched_existing_projects=1),
+            CoStarPersistResult(
+                inserted_projects=1,
+                matched_existing_projects=1,
+                status_regression_review_items=1,
+                status_regression_review_item_ids=[review_item.id],
+            ),
         )
 
     monkeypatch.setattr(coverage_router, "seed_costar_workbooks", fake_seed_costar_workbooks)
@@ -390,6 +415,8 @@ def test_process_costar_upload_records_success_audit(
     assert source_run is not None
     assert source_run.jurisdiction_id == jurisdiction.id
     assert source_run.records_pulled == 2
+    assert source_run.updates_found == 1
+    assert review_item.source_run_id == source_run.id
 
 
 def test_process_costar_upload_preserves_failed_audit(

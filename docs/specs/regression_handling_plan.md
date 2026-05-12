@@ -43,7 +43,7 @@ Proposed changes:
 
 - Add a small candidate shape in the status resolution layer, either as a dataclass converted into `FieldResolution.metadata["regression_candidates"]` or as a field on `ProjectResolutionResult`. It should include `current_status`, `proposed_status`, `current_rank`, `proposed_rank`, `rank_delta`, `evidence_ids`, `source_type`, `evidence_type`, `evidence_date`, and any source semantic reason code available from evidence.
 - Emit one raw regression candidate per lower-ranked observation, not just one candidate from the highest lower-ranked status. This matters because the resolver's "highest status wins" can hide a fresh lower-status evidence row when older UC/Complete evidence still exists.
-- Integrators may merge raw candidates by `(project_id, current_status, proposed_status)` before agent routing, but the merged payload must preserve all candidate evidence IDs, source types, source anchors, and reason codes. This lets Pipedream + news corroboration become one stronger agent request instead of either duplicated runs or lost signal.
+- Integrators may merge raw candidates by `(project_id, current_status, proposed_status)` before routing, but the merged payload must preserve all candidate evidence IDs, source types, source anchors, and reason codes. Each source family still owns its own route: news evidence goes through `news_v1`, LADBS evidence goes through `permit_v1`, and Pipedream/CoStar use direct review items until their profiles exist.
 - Preserve current status in all regression cases until a committed human/system decision creates an override or otherwise authorizes the regression.
 - Add audit logging for preserved regression candidates even when the resolved value equals the current value. The cleanest option is a nullable `metadata` JSONB column on `resolution_log`; without that, the candidate status must be inferred from evidence rows, which is weaker.
 - Complete terminal rule: if current rank is 6 and proposed rank is lower, mark the candidate as terminal-dropped and do not route the agent. Persist a `resolution_log` row with `rule_applied="terminal_regression_dropped"` and candidate metadata.
@@ -58,12 +58,14 @@ News:
 - Do not route regression candidates when Pass 2c is unavailable. The current Pass 2c suppression path correctly prevents raw Pass 2b status from bypassing policy. A parse alert is the visibility mechanism.
 - Legacy flags: if `news_use_legacy_pass3=true`, do not fire `status_regression_candidate`. Legacy Pass 3a is rollback re-extraction, not the agent trigger path. If `news_use_legacy_semantic=true`, regression handling is degraded: without Pass 2c semantic output, do not route semantic regression candidates. Raw legacy evidence can still land, but it should not create the new regression review item until default semantic mode is restored.
 
-Structured collect path:
+Structured source paths:
 
-- In `src/tcg_pipeline/db/collect.py`, after evidence write and `resolve_project`, inspect the status regression candidate metadata. This is the generic hook for LADBS, Pipedream, and future structured sources.
+- In `src/tcg_pipeline/db/collect.py`, after evidence write and `resolve_project`, inspect the status regression candidate metadata for LADBS and future collector-backed structured sources.
 - For LADBS, route through `permit_v1` once `status_regression_candidate` is added to that profile.
+- CoStar upload/seed paths use the same shared review-card helper after their `resolve_project` call. CoStar regressions create direct low-priority `status_regression_review` items with deterministic narrative copy and `agent_recommendation=null`.
+- Pipedream should use the shared direct-review helper once AGENT.5 / the Pipedream sync path updates existing projects. The current seed importer skips existing `tcg_pipedream_id` rows, so Pipedream production activation is deferred rather than pretending coverage exists.
 - Pipedream and CoStar should not use a catch-all source-agnostic agent profile. Until AGENT.4/5 add source profiles, structured Pipedream/CoStar regressions should create direct `status_regression_review` items with `agent_recommendation=null`. That preserves the "any source" guarantee without breaking source-profile cost/audit boundaries.
-- If Pipedream/CoStar evidence merges with news evidence on the same `(project_id, current_status, proposed_status)`, route the combined candidate through `news_v1` and include the structured evidence as corroborating context. Pipedream/CoStar-only candidates use the direct review-item path.
+- Do not route Pipedream/CoStar evidence through `news_v1`. If multiple source families emit candidates in the same resolve pass, each source profile or deterministic path owns its own review/agent action. Pipedream/CoStar candidates use the direct review-item path until AGENT.4/5 add source-specific profiles.
 - `Complete` terminal drops happen here too: evidence remains, no agent run, no review item, audit row only.
 
 Agent result handling:
@@ -142,7 +144,7 @@ Priority:
 
 Auto-apply:
 
-- If decision is `confirm_regression` and confidence meets threshold (`>=0.9` from current rank `<=4`, `>=0.95` from current rank `>=5`), create a `status_regression_review` item in committed/audit state with `status=auto_accepted`, add a committed `ReviewDecision(action=auto_accepted)`, link `agent_run_review_items`, and apply the regression through the existing override/resolution workflow.
+- If `NEWS_REGRESSION_AUTO_APPLY_ENABLED=true` and the agent returns `confirm_regression` with confidence `>=0.9` from current rank `<=4`, create a `status_regression_review` item in committed/audit state with `status=auto_accepted`, add a committed `ReviewDecision`, write a `change_log` row with `change_type=auto_accepted`, link `agent_run_review_items`, and apply the regression through the existing override/resolution workflow. Current ranks `>=5` (`Pre-Leasing/Pre-Selling` and `Complete`) remain review-only at any confidence.
 - Use a system actor such as `agent.status_regression_candidate`.
 - The override should be explicit and auditable, because the resolver's forward-only rule otherwise preserves current status. Recommended mode: `until_newer_evidence` with a baseline tied to the winning/candidate evidence date. The implementation must verify that newer-evidence clearing works for system-authored overrides, not only researcher-authored overrides.
 - If an active researcher override exists on `pipeline_status`, do not auto-apply. Create an open review item with override context instead.
@@ -239,8 +241,9 @@ Slice 4: Review workflow auto-apply.
 Slice 5: Structured source rollout.
 
 - Wire `collect.py` regression candidates for LADBS/permit profile.
-- Add Pipedream/CoStar direct regression review-item creation, unless Slice 0 chose a different route.
-- Add tests for Pipedream and LADBS scenarios.
+- Add CoStar seed/upload direct regression review-item creation.
+- Keep Pipedream direct-review support in the shared helper, but defer production activation until the Pipedream sync/import path updates existing projects.
+- Add tests for CoStar seed, CoStar upload linkage, Pipedream helper behavior, and LADBS scenarios.
 
 Slice 6: Monitoring and stabilization.
 

@@ -4,7 +4,8 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import select
+import pytest
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.agents.profiles import PERMIT_AGENT_PROFILE
@@ -15,6 +16,7 @@ from tcg_pipeline.db.collect import (
     _collect_match_candidate_summaries,
     persist_collected_records,
 )
+from tcg_pipeline.db.evidence import write_evidence
 from tcg_pipeline.db.models import (
     AgentRun,
     AgentRunOutcome,
@@ -25,6 +27,7 @@ from tcg_pipeline.db.models import (
     Evidence,
     IdentifierType,
     PipelineStatus,
+    Priority,
     ProductType,
     Project,
     ProjectIdentifier,
@@ -36,6 +39,15 @@ from tcg_pipeline.db.models import (
 from tcg_pipeline.matching.matcher import MatchResult
 from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROPIC, LLMUsage
 from tcg_pipeline.settings import Settings
+
+
+def _ensure_resolution_log_metadata(postgres_session: Session) -> None:
+    inspector = inspect(postgres_session.bind)
+    if not inspector.has_table("resolution_log"):
+        pytest.skip("Apply resolution-log migrations before running regression tests.")
+    column_names = {column["name"] for column in inspector.get_columns("resolution_log")}
+    if "metadata" not in column_names:
+        pytest.skip("Apply the status regression metadata migration before running this test.")
 
 
 class FakePermitAgentClient:
@@ -1096,6 +1108,214 @@ def test_persist_collected_records_routes_combined_ladbs_triggers_to_one_agent_r
     assert agent_run.triggered_by == ["unit_delta", "product_type_change"]
 
 
+def test_persist_collected_records_routes_ladbs_status_regression_to_agent(
+    postgres_session: Session,
+) -> None:
+    _ensure_resolution_log_metadata(postgres_session)
+    project = Project(
+        canonical_address="9510 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9510 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10010",
+        raw_payload={"pcis_permit": "12010-30000-10010"},
+        canonical_address="9510 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10010"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+        },
+        source_row_hash="status-regression-agent-hash",
+    )
+    client = FakePermitAgentClient(
+        {
+            "decision": "defer_to_review",
+            "confidence": 0.72,
+            "current_status": PipelineStatus.UNDER_CONSTRUCTION.value,
+            "proposed_status": PipelineStatus.APPROVED.value,
+            "reason": "Permit issuance alone may be stale relative to current status.",
+        }
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert result.status_regression_review_items == 1
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.trigger_reasons == ("status_regression_candidate",)
+    assert request.intake.payload["status_regression_candidates"][0]["proposed_status"] == (
+        PipelineStatus.APPROVED.value
+    )
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.priority == Priority.HIGH
+    assert review_item.payload["agent_recommendation"]["decision"] == "defer_to_review"
+
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.profile_name == "permit_v1"
+    assert agent_run.triggered_by == ["status_regression_candidate"]
+    link = postgres_session.get(AgentRunReviewItem, (agent_run.id, review_item.id))
+    assert link is not None
+
+
+def test_persist_collected_records_routes_ladbs_unit_delta_and_regression_to_one_agent_run(
+    postgres_session: Session,
+) -> None:
+    _ensure_resolution_log_metadata(postgres_session)
+    project = Project(
+        canonical_address="9513 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9513 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+        total_units=100,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10011",
+        raw_payload={"pcis_permit": "12010-30000-10011"},
+        canonical_address="9513 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10011"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+            "total_units": 112,
+        },
+        source_row_hash="status-regression-unit-delta-agent-hash",
+    )
+    client = FakePermitAgentClient(
+        {
+            "decision": "no_change",
+            "confidence": 0.78,
+            "reason": "Permit units and lower status do not warrant changing the project.",
+        }
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert result.status_regression_review_items == 1
+    assert len(client.requests) == 1
+    assert client.requests[0].trigger_reasons == (
+        "unit_delta",
+        "status_regression_candidate",
+    )
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.payload["agent_recommendation"]["decision"] == "no_change"
+    assert review_item.payload["system_recommendation"]["action"] == (
+        "keep_current_recommended"
+    )
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.triggered_by == ["unit_delta", "status_regression_candidate"]
+    assert postgres_session.get(AgentRunReviewItem, (agent_run.id, review_item.id)) is not None
+
+
+def test_persist_collected_records_ladbs_status_regression_kill_switch_keeps_review_card(
+    postgres_session: Session,
+) -> None:
+    _ensure_resolution_log_metadata(postgres_session)
+    project = Project(
+        canonical_address="9514 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9514 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="ladbs_permits",
+        source_record_id="12010-30000-10012",
+        raw_payload={"pcis_permit": "12010-30000-10012"},
+        canonical_address="9514 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"permit_number": ["12010-30000-10012"]},
+        mapped_fields={
+            "status_evidence_type": "building_permit_issued",
+            "status_evidence_date": "2026-03-02",
+        },
+        source_row_hash="status-regression-kill-switch-agent-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="ladbs_permits",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        settings=Settings(agent_enabled_for_permits=False),
+    )
+    postgres_session.flush()
+
+    assert result.status_regression_review_items == 1
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.priority == Priority.HIGH
+    assert review_item.payload["agent_outcome"] == AgentRunOutcome.KILLED_BY_SWITCH.value
+    assert review_item.payload["system_recommendation"]["action"] == (
+        "keep_current_recommended"
+    )
+    agent_run = postgres_session.execute(
+        select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
+    ).scalar_one()
+    assert agent_run.outcome == AgentRunOutcome.KILLED_BY_SWITCH.value
+    assert agent_run.triggered_by == ["status_regression_candidate"]
+    assert postgres_session.get(AgentRunReviewItem, (agent_run.id, review_item.id)) is not None
+
+
 def test_persist_collected_records_writes_permit_audit_row_without_live_llm_client(
     postgres_session: Session,
 ) -> None:
@@ -1287,6 +1507,131 @@ def test_persist_collected_records_does_not_route_non_permit_sources_to_permit_a
         select(AgentRun).where(AgentRun.source_run_id == result.source_run_id)
     ).scalar_one_or_none()
     assert agent_run is None
+
+
+def test_persist_collected_records_creates_low_priority_costar_regression_review(
+    postgres_session: Session,
+) -> None:
+    _ensure_resolution_log_metadata(postgres_session)
+    project = Project(
+        canonical_address="9511 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9511 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    write_evidence(
+        postgres_session,
+        project_id=project.id,
+        source_name="ladbs_inspections",
+        source_record_id="support-inspection-costar-regression",
+        raw_data={"inspection": "Frame"},
+        mapped_fields={
+            "status_evidence_type": "building_inspection_recorded",
+            "status_evidence_date": "2026-05-01",
+        },
+        collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        ingest_method="test",
+    )
+
+    raw_record = RawRecord(
+        source_name="costar",
+        source_record_id="costar-status-regression-1",
+        raw_payload={"PropertyID": "costar-status-regression-1"},
+        canonical_address="9511 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        identifiers={"costar_property_id": ["costar-status-regression-1"]},
+        mapped_fields={"pipeline_status": PipelineStatus.APPROVED.value},
+        source_updated_at=datetime(2026, 5, 13, 8, 0, tzinfo=UTC),
+        source_row_hash="costar-status-regression-hash",
+    )
+    client = FakePermitAgentClient()
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="costar",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+        permit_agent_client=client,
+        settings=Settings(agent_enabled_for_permits=True),
+    )
+    postgres_session.flush()
+
+    assert client.requests == []
+    assert result.status_regression_review_items == 1
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.priority == Priority.LOW
+    assert review_item.payload["agent_recommendation"] is None
+    assert review_item.payload["system_recommendation"]["action"] == (
+        "keep_current_recommended"
+    )
+    assert (
+        "CoStar's May 13, 2026 upload lists this project as Approved"
+        in review_item.payload["human_summary"]
+    )
+    assert (
+        "LADBS inspection evidence from May 1, 2026 supports Under Construction"
+        in review_item.payload["human_summary"]
+    )
+
+
+def test_persist_collected_records_pipedream_regression_helper_path_is_forward_compatible(
+    postgres_session: Session,
+) -> None:
+    _ensure_resolution_log_metadata(postgres_session)
+    project = Project(
+        canonical_address="9512 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        raw_addresses=["9512 W Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+
+    raw_record = RawRecord(
+        source_name="pipedream",
+        source_record_id="pipedream-status-regression-1",
+        raw_payload={"project_id": "pipedream-status-regression-1"},
+        canonical_address="9512 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
+        mapped_fields={"pipeline_status": PipelineStatus.APPROVED.value},
+        source_updated_at=datetime(2026, 5, 13, 8, 0, tzinfo=UTC),
+        source_row_hash="pipedream-status-regression-hash",
+    )
+
+    result = persist_collected_records(
+        postgres_session,
+        market="los_angeles",
+        source_name="pipedream",
+        raw_records=[raw_record],
+        create_new_candidates=False,
+    )
+    postgres_session.flush()
+
+    assert result.status_regression_review_items == 1
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.source_run_id == result.source_run_id,
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.priority == Priority.MEDIUM
+    assert review_item.payload["source_type"] == "pipedream"
+    assert review_item.payload["agent_recommendation"] is None
+    assert review_item.payload["candidate_evidence_ids"]
 
 
 def test_persist_collected_records_reviews_resolved_developer_change(

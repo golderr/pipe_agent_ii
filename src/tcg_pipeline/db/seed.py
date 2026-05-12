@@ -29,6 +29,10 @@ from tcg_pipeline.db.models import (
     RentOrSale,
     StatusHistory,
 )
+from tcg_pipeline.db.status_regression_reviews import (
+    status_regression_candidates_for_evidence,
+    upsert_structured_status_regression_review_items,
+)
 from tcg_pipeline.ingesters.costar import (
     COSTAR_SOURCE_NAME,
     CoStarImportResult,
@@ -104,6 +108,8 @@ class CoStarPersistResult:
     inserted_status_history_entries: int = 0
     skipped_existing_status_history_entries: int = 0
     merged_fields: int = 0
+    status_regression_review_items: int = 0
+    status_regression_review_item_ids: list[uuid.UUID] = field(default_factory=list)
     ambiguous_matches: list[AmbiguousCoStarMatch] = field(default_factory=list)
 
     @property
@@ -316,6 +322,7 @@ def persist_costar_import_results(
                 status_history_cache=status_history_cache,
             )
             target_project_id = project_record.project.id
+            target_project = project_record.project
         else:
             existing_project = _load_costar_project(
                 session,
@@ -344,6 +351,7 @@ def persist_costar_import_results(
                 address_map=address_map,
             )
             target_project_id = existing_project.id
+            target_project = existing_project
 
         evidence_result = write_source_record_evidence(
             session,
@@ -354,11 +362,30 @@ def persist_costar_import_results(
         )
         if evidence_result.changed:
             session.flush()
-            resolve_project(
+            resolution_result = resolve_project(
                 target_project_id,
                 session,
                 apply=True,
                 write_resolution_log=True,
+            )
+            status_regression_candidates = status_regression_candidates_for_evidence(
+                resolution_result,
+                source_name=project_record.source_record.source_name,
+                evidence_id=evidence_result.evidence.id if evidence_result.evidence else None,
+            )
+            status_regression_result = upsert_structured_status_regression_review_items(
+                session,
+                project=target_project,
+                source_name=project_record.source_record.source_name,
+                source_record_id=project_record.source_record.source_record_id,
+                mapped_fields=project_record.source_record.mapped_fields,
+                candidates=status_regression_candidates,
+            )
+            persist_result.status_regression_review_items += (
+                status_regression_result.created_count
+            )
+            persist_result.status_regression_review_item_ids.extend(
+                status_regression_result.review_item_ids
             )
 
     session.flush()

@@ -32,6 +32,11 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
     SourceRun,
 )
+from tcg_pipeline.db.status_regression_reviews import (
+    status_regression_candidates_for_evidence,
+    update_status_regression_review_items_with_agent_result,
+    upsert_structured_status_regression_review_items,
+)
 from tcg_pipeline.ingesters._common import serialize_json_value
 from tcg_pipeline.matching.differ import (
     DetectedChange,
@@ -80,6 +85,7 @@ class CollectPersistResult:
     dismissed_discovery_records_skipped: int = 0
     status_change_review_items: int = 0
     possible_match_review_items: int = 0
+    status_regression_review_items: int = 0
 
 
 class SourceRecordUpsertOutcome(enum.StrEnum):
@@ -274,12 +280,34 @@ def persist_collected_records(
             status_review_item_ids = status_review_items.review_item_ids
             result.status_change_review_items += status_review_items.created_count
             session.flush()
-        resolved_permit_agent_client = _run_permit_agent_for_record(
+        status_regression_candidates = status_regression_candidates_for_evidence(
+            resolution_result,
+            source_name=raw_record.source_name,
+            evidence_id=evidence_result.evidence.id if evidence_result.evidence else None,
+        )
+        status_regression_items = upsert_structured_status_regression_review_items(
+            session,
+            project=project,
+            source_run_id=source_run.id,
+            source_name=raw_record.source_name,
+            source_record_id=raw_record.source_record_id,
+            mapped_fields=raw_record.mapped_fields,
+            match_payload=_serialize_match_result(match_result),
+            match_confidence=match_result.confidence,
+            candidates=status_regression_candidates,
+        )
+        if status_regression_items.review_item_ids:
+            status_review_item_ids.extend(status_regression_items.review_item_ids)
+            result.status_regression_review_items += status_regression_items.created_count
+            source_run.updates_found += status_regression_items.created_count
+            session.flush()
+        permit_agent_outcome = _run_permit_agent_for_record(
             raw_record=raw_record,
             match_result=match_result,
             triggers=_permit_agent_triggers_for_matched_record(
                 previous_snapshot=previous_snapshot,
                 raw_record=raw_record,
+                status_regression_candidates=status_regression_candidates,
             ),
             source_run=source_run,
             project_id=project.id,
@@ -289,7 +317,14 @@ def persist_collected_records(
             session_factory=permit_agent_session_factory,
             client=resolved_permit_agent_client,
             now=run_started_at,
-        ).client
+            status_regression_candidates=status_regression_candidates,
+        )
+        resolved_permit_agent_client = permit_agent_outcome.client
+        update_status_regression_review_items_with_agent_result(
+            session,
+            review_item_ids=status_regression_items.review_item_ids,
+            agent_result=permit_agent_outcome.result,
+        )
 
     source_run.duration_seconds = max(int((datetime.now(UTC) - run_started_at).total_seconds()), 0)
     return result
@@ -500,6 +535,7 @@ def _run_permit_agent_for_record(
     project_id: uuid.UUID | None = None,
     evidence_id: uuid.UUID | None = None,
     review_item_ids: list[uuid.UUID] | None = None,
+    status_regression_candidates: list[dict[str, Any]] | None = None,
 ) -> PermitAgentRunOutcome:
     if not triggers:
         return PermitAgentRunOutcome(client=client)
@@ -520,6 +556,7 @@ def _run_permit_agent_for_record(
                 raw_record,
                 match_result=match_result,
                 evidence_id=evidence_id,
+                status_regression_candidates=status_regression_candidates,
             ),
         ),
         matcher_results=[_serialize_match_result(match_result)],
@@ -556,6 +593,7 @@ def _permit_agent_triggers_for_matched_record(
     *,
     previous_snapshot: ProjectDiffSnapshot,
     raw_record: RawRecord,
+    status_regression_candidates: list[dict[str, Any]] | None = None,
 ) -> tuple[AgentTrigger, ...]:
     if not _is_permit_agent_source(raw_record):
         return ()
@@ -573,6 +611,8 @@ def _permit_agent_triggers_for_matched_record(
         and new_product_type != previous_snapshot.product_type
     ):
         triggers.append(AgentTrigger.PRODUCT_TYPE_CHANGE)
+    if status_regression_candidates:
+        triggers.append(AgentTrigger.STATUS_REGRESSION_CANDIDATE)
     return tuple(triggers)
 
 
@@ -612,6 +652,7 @@ def _permit_agent_intake_payload(
     *,
     match_result: MatchResult,
     evidence_id: uuid.UUID | None,
+    status_regression_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "source_name": raw_record.source_name,
@@ -630,6 +671,9 @@ def _permit_agent_intake_payload(
         "source_row_hash": raw_record.source_row_hash,
         "evidence_id": str(evidence_id) if evidence_id is not None else None,
         "match": _serialize_match_result(match_result),
+        "status_regression_candidates": _serialize_payload(
+            {"items": status_regression_candidates or []}
+        )["items"],
     }
 
 

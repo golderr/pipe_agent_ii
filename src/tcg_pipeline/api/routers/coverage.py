@@ -51,6 +51,9 @@ from tcg_pipeline.db.models import (
     SystemAlert,
 )
 from tcg_pipeline.db.seed import CoStarPersistResult, seed_costar_workbooks
+from tcg_pipeline.db.status_regression_reviews import (
+    link_status_regression_review_items_to_source_run,
+)
 from tcg_pipeline.ingesters.costar import COSTAR_SOURCE_NAME, CoStarImportResult
 from tcg_pipeline.market_config import SourceConfig, get_market_config
 from tcg_pipeline.settings import Settings
@@ -611,6 +614,7 @@ def _record_costar_source_run(
         initiated_by_user_id=user.user_id,
         finished_at=datetime.now(UTC),
         records_pulled=import_result.imported_count,
+        updates_found=persist_result.status_regression_review_items,
         rows_inserted=persist_result.inserted_projects,
         rows_updated=persist_result.matched_existing_projects,
         rows_unchanged=0,
@@ -618,6 +622,11 @@ def _record_costar_source_run(
     )
     session.add(source_run)
     session.flush()
+    link_status_regression_review_items_to_source_run(
+        session,
+        review_item_ids=persist_result.status_regression_review_item_ids,
+        source_run_id=source_run.id,
+    )
     return source_run
 
 

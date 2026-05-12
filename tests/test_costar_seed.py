@@ -6,17 +6,22 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from tcg_pipeline.cli import app
+from tcg_pipeline.db.evidence import write_evidence
 from tcg_pipeline.db.models import (
     Evidence,
     IdentifierType,
+    PipelineStatus,
+    Priority,
     Project,
     ProjectIdentifier,
     ProjectSourceRecord,
+    ReviewItem,
+    ReviewItemType,
 )
 from tcg_pipeline.db.seed import (
     ingest_costar_workbooks,
@@ -26,6 +31,15 @@ from tcg_pipeline.db.seed import (
 )
 
 runner = CliRunner()
+
+
+def _ensure_resolution_log_metadata(postgres_session: Session) -> None:
+    inspector = inspect(postgres_session.bind)
+    if not inspector.has_table("resolution_log"):
+        pytest.skip("Apply resolution-log migrations before running regression tests.")
+    column_names = {column["name"] for column in inspector.get_columns("resolution_log")}
+    if "metadata" not in column_names:
+        pytest.skip("Apply the status regression metadata migration before running this test.")
 
 
 def test_persist_costar_import_result_merges_into_existing_project_by_apn(
@@ -205,6 +219,97 @@ def test_persist_costar_import_result_falls_back_to_address_match(
     assert persist_result.matched_existing_projects == 1
     assert persist_result.matched_by_address == 1
     assert persist_result.inserted_identifiers == 1
+
+
+def test_persist_costar_import_result_creates_low_priority_regression_review(
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    _ensure_resolution_log_metadata(postgres_session)
+    project = Project(
+        canonical_address="9913 SOUTH EXAMPLE AVENUE LOS ANGELES CA 90057",
+        raw_addresses=["9913 S Example Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        ProjectIdentifier(
+            project_id=project.id,
+            identifier_type=IdentifierType.COSTAR_PROPERTY_ID,
+            value="CST-REGRESSION-1",
+            source="costar",
+            is_primary=True,
+        )
+    )
+    write_evidence(
+        postgres_session,
+        project_id=project.id,
+        source_name="ladbs_inspections",
+        source_record_id="support-inspection-costar-seed-regression",
+        raw_data={"inspection": "Frame"},
+        mapped_fields={
+            "status_evidence_type": "building_inspection_recorded",
+            "status_evidence_date": "2026-05-01",
+        },
+        collected_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        ingest_method="test",
+    )
+    postgres_session.flush()
+
+    costar_path = _build_costar_workbook(
+        tmp_path / "costar_status_regression.xlsx",
+        headers=[
+            "PropertyID",
+            "Property Address",
+            "City",
+            "State",
+            "Zip",
+            "County Name",
+            "Constr Status",
+        ],
+        rows=[
+            {
+                "PropertyID": "CST-REGRESSION-1",
+                "Property Address": "9913 S Example Ave",
+                "City": "Los Angeles",
+                "State": "CA",
+                "Zip": "90057",
+                "County Name": "Los Angeles",
+                "Constr Status": "Final Planning",
+            }
+        ],
+    )
+
+    costar_import_result = ingest_costar_workbooks([costar_path], market="los_angeles")
+    persist_result = persist_costar_import_result(postgres_session, costar_import_result)
+    postgres_session.flush()
+
+    assert persist_result.status_regression_review_items == 1
+    assert len(persist_result.status_regression_review_item_ids) == 1
+    review_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_REGRESSION_REVIEW,
+        )
+    ).scalar_one()
+    assert review_item.id == persist_result.status_regression_review_item_ids[0]
+    assert review_item.source_run_id is None
+    assert review_item.priority == Priority.LOW
+    assert review_item.payload["agent_recommendation"] is None
+    assert review_item.payload["system_recommendation"]["action"] == (
+        "keep_current_recommended"
+    )
+    assert "CoStar's" in review_item.payload["human_summary"]
+    assert "lists this project as Approved" in review_item.payload["human_summary"]
+    assert (
+        "LADBS inspection evidence from May 1, 2026 supports Under Construction"
+        in review_item.payload["human_summary"]
+    )
 
 
 def test_persist_costar_import_result_is_idempotent_for_existing_property_id(
