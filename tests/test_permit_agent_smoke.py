@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
@@ -28,6 +29,26 @@ from tcg_pipeline.news.llm import DEFAULT_EXTRACTION_MODEL, LLM_PROVIDER_ANTHROP
 from tcg_pipeline.settings import Settings
 
 runner = CliRunner()
+
+
+def _ensure_status_regression_review_item_type(postgres_session: Session) -> None:
+    exists = postgres_session.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_enum enum_value
+                JOIN pg_type enum_type
+                  ON enum_type.oid = enum_value.enumtypid
+                WHERE enum_type.typname = 'review_item_type_enum'
+                  AND enum_value.enumlabel = :enum_label
+            )
+            """
+        ),
+        {"enum_label": ReviewItemType.STATUS_REGRESSION_REVIEW.value},
+    ).scalar()
+    if not exists:
+        pytest.skip("Apply the status regression review-item enum migration before this test.")
 
 
 def test_permit_agent_smoke_report_summarizes_latest_source_run(
@@ -84,6 +105,9 @@ def test_permit_agent_smoke_report_summarizes_latest_source_run(
         "product_type_change": 1,
         "unit_delta": 1,
     }
+    assert report.review_item_type_counts == {ReviewItemType.NEW_CANDIDATE.value: 2}
+    assert report.status_regression_agent_run_count == 0
+    assert report.status_regression_review_item_count == 0
     assert report.total_cost_usd == Decimal("0.250000")
     assert report.missing_review_link_count == 0
     assert validate_permit_agent_smoke_report(
@@ -132,6 +156,7 @@ def test_permit_agent_smoke_validation_reports_missing_expectations(
         required_triggers=("unit_delta",),
         required_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
         allowed_outcomes=(AgentRunOutcome.KILLED_BY_SWITCH.value,),
+        min_status_regression_review_items=1,
         min_total_cost_usd=Decimal("0.30"),
         max_total_cost_usd=Decimal("0.10"),
     )
@@ -142,6 +167,7 @@ def test_permit_agent_smoke_validation_reports_missing_expectations(
         "Missing required trigger(s): unit_delta.",
         "Missing required outcome(s): killed_by_switch.",
         "Unexpected outcome(s): completed.",
+        "Expected at least 1 linked status regression review item(s); found 0.",
         "Expected total cost >= $0.30; found $0.250000.",
         "Expected total cost <= $0.10; found $0.250000.",
         "1 permit agent run(s) have no linked review item.",
@@ -166,6 +192,63 @@ def test_permit_agent_smoke_report_rejects_non_ladbs_source_run(
             postgres_session,
             source_run_id=source_run.id,
         )
+
+
+def test_permit_agent_smoke_report_counts_status_regression_links(
+    postgres_session: Session,
+) -> None:
+    _ensure_status_regression_review_item_type(postgres_session)
+    source_run = SourceRun(
+        market="los_angeles",
+        source_name="ladbs_permits",
+        collection_mode="preview",
+        run_timestamp=datetime(2026, 5, 10, tzinfo=UTC),
+        records_pulled=1,
+    )
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    agent_run = _agent_run(
+        source_run=source_run,
+        intake_record_id="regression-permit",
+        triggered_by=["status_regression_candidate"],
+        outcome=AgentRunOutcome.COMPLETED.value,
+        cost_usd=Decimal("0.050000"),
+    )
+    postgres_session.add(agent_run)
+    postgres_session.flush()
+    _link_review_item(
+        postgres_session,
+        source_run=source_run,
+        agent_run=agent_run,
+        item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+    )
+    postgres_session.flush()
+
+    report = build_permit_agent_smoke_report(
+        postgres_session,
+        source_run_id=source_run.id,
+    )
+
+    assert report.trigger_counts == {"status_regression_candidate": 1}
+    assert report.review_item_type_counts == {
+        ReviewItemType.STATUS_REGRESSION_REVIEW.value: 1,
+    }
+    assert report.status_regression_agent_run_count == 1
+    assert report.status_regression_review_item_count == 1
+    assert report.runs[0].review_item_type_counts == {
+        ReviewItemType.STATUS_REGRESSION_REVIEW.value: 1,
+    }
+    assert report.runs[0].status_regression_review_item_count == 1
+    assert (
+        validate_permit_agent_smoke_report(
+            report,
+            min_agent_runs=1,
+            required_triggers=("status_regression_candidate",),
+            required_outcomes=(AgentRunOutcome.COMPLETED.value,),
+            min_status_regression_review_items=1,
+        )
+        == []
+    )
 
 
 def test_permit_agent_smoke_cli_prints_validation_and_failed_run_details(
@@ -247,12 +330,95 @@ def test_permit_agent_smoke_cli_prints_validation_and_failed_run_details(
     assert result.exit_code == 0, result.output
     assert "Outcomes: completed=1, escalated=1, failed_timeout=1" in result.output
     assert "Triggers: new_candidate=1, product_type_change=1, unit_delta=1" in result.output
+    assert "Review item types: new_candidate=3" in result.output
+    assert "Status regression agent runs: 0" in result.output
+    assert "Status regression review items: 0" in result.output
     assert "Failure runs:" in result.output
     assert "failed_timeout (timeout-permit): wallclock exceeded 300s" in result.output
     assert "escalated (escalated-permit)" not in result.output
     report_json = output_path.read_text(encoding="utf-8")
     assert '"allowed_outcomes": [' in report_json
+    assert '"min_status_regression_review_items": 0' in report_json
+    assert '"status_regression_agent_run_count": 0' in report_json
+    assert '"status_regression_review_item_count": 0' in report_json
     assert '"max_total_cost_usd": "1.00"' in report_json
+    assert '"failures": []' in report_json
+
+
+def test_permit_agent_smoke_cli_validates_status_regression_review_items(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+    tmp_path,
+) -> None:
+    _ensure_status_regression_review_item_type(postgres_session)
+    source_run = SourceRun(
+        market="los_angeles",
+        source_name="ladbs_permits",
+        collection_mode="preview",
+        run_timestamp=datetime(2026, 5, 10, tzinfo=UTC),
+        records_pulled=1,
+    )
+    postgres_session.add(source_run)
+    postgres_session.flush()
+    regression_run = _agent_run(
+        source_run=source_run,
+        intake_record_id="regression-permit",
+        triggered_by=["status_regression_candidate"],
+        outcome=AgentRunOutcome.COMPLETED.value,
+        cost_usd=Decimal("0.050000"),
+    )
+    postgres_session.add(regression_run)
+    postgres_session.flush()
+    _link_review_item(
+        postgres_session,
+        source_run=source_run,
+        agent_run=regression_run,
+        item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+    )
+    postgres_session.flush()
+
+    @contextmanager
+    def fake_session_factory():
+        yield postgres_session
+
+    monkeypatch.setattr(cli_module, "get_session_factory", lambda: fake_session_factory)
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        lambda: Settings(database_url="postgresql://user:password@example.com/tcg"),
+    )
+    output_path = tmp_path / "permit_regression_smoke.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "permit-agent-smoke-report",
+            "--source-run-id",
+            str(source_run.id),
+            "--require-triggers",
+            "status_regression_candidate",
+            "--require-outcomes",
+            "completed",
+            "--allow-outcomes",
+            "completed",
+            "--min-status-regression-review-items",
+            "1",
+            "--max-total-cost-usd",
+            "1.00",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Triggers: status_regression_candidate=1" in result.output
+    assert "Review item types: status_regression_review=1" in result.output
+    assert "Status regression agent runs: 1" in result.output
+    assert "Status regression review items: 1" in result.output
+    report_json = output_path.read_text(encoding="utf-8")
+    assert '"min_status_regression_review_items": 1' in report_json
+    assert '"status_regression_agent_run_count": 1' in report_json
+    assert '"status_regression_review_item_count": 1' in report_json
     assert '"failures": []' in report_json
 
 
@@ -302,10 +468,11 @@ def _link_review_item(
     *,
     source_run: SourceRun,
     agent_run: AgentRun,
+    item_type: ReviewItemType = ReviewItemType.NEW_CANDIDATE,
 ) -> None:
     review_item = ReviewItem(
         source_run_id=source_run.id,
-        item_type=ReviewItemType.NEW_CANDIDATE,
+        item_type=item_type,
         priority=Priority.MEDIUM,
         payload={"source_record_id": agent_run.intake_record_id},
     )
