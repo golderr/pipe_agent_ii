@@ -1331,7 +1331,10 @@ def test_scheduled_news_scrape_enqueues_agent_integration_job(
     assert refreshed_job.progress["integration_queued_count"] == 1
     assert refreshed_job.progress["integration_review_item_count"] == 0
     child_job = postgres_session.execute(
-        select(ScrapeJob).where(ScrapeJob.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value)
+        select(ScrapeJob).where(
+            ScrapeJob.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+            ScrapeJob.target_payload["parent_job_id"].astext == str(job.id),
+        )
     ).scalar_one()
     assert enqueued == [(child_job.id, ScrapeJobKind.NEWS_AGENT_INTEGRATE.value)]
     assert child_job.source_run_id == refreshed_job.source_run_id
@@ -1452,7 +1455,10 @@ def test_scheduled_news_scrape_records_enqueue_failure_without_inline_fallback(
     assert refreshed_job.status == ScrapeJobStatus.COMPLETED
     assert refreshed_job.progress["integration_queued_count"] == 0
     child_job = postgres_session.execute(
-        select(ScrapeJob).where(ScrapeJob.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value)
+        select(ScrapeJob).where(
+            ScrapeJob.kind == ScrapeJobKind.NEWS_AGENT_INTEGRATE.value,
+            ScrapeJob.target_payload["parent_job_id"].astext == str(job.id),
+        )
     ).scalar_one()
     assert child_job.status == ScrapeJobStatus.QUEUED
     assert child_job.progress["queue_backend"] == "unavailable"

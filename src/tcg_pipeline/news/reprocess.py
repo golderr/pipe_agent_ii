@@ -3,7 +3,7 @@
 A stranded article is one that completed Pass 0/1/2a/2b cleanly (triage relevant,
 ``current_extraction_id`` set, candidate references created) but never finished
 Pass 2c, matching, agent, or integrator. Stranding typically follows a transient
-provider error (Supabase SSL, Anthropic 5xx) inside ``news_agent_integrate`` —
+provider error (Supabase SSL, Anthropic 5xx) inside ``news_agent_integrate`` -
 or, before the 2026-05-08 worker-model split, inside an inline integration step
 of ``news_paste_a_link``. The article is left with pending ``news_project_references``
 and no ``agent_runs``; the daily smoke report has no signal for this state.
@@ -31,6 +31,7 @@ from tcg_pipeline.db.models import (
     NewsSemanticInterpretation,
     ScrapeJob,
     ScrapeJobKind,
+    ScrapeJobStatus,
 )
 from tcg_pipeline.settings import Settings
 
@@ -159,6 +160,7 @@ def _recovery_context_for_article(
     job = session.execute(
         select(ScrapeJob)
         .where(ScrapeJob.target_payload["article_id"].astext == str(article_id))
+        .where(ScrapeJob.status == ScrapeJobStatus.FAILED)
         .where(
             ScrapeJob.kind.in_(
                 [
@@ -299,8 +301,10 @@ def reprocess_stranded_article(
         reused_existing_job=reused,
         job_id=job_id,
         triggers_used=article.trigger_reasons,
-        skipped_reason=None if ok else "redis_unavailable",
-        error_text=None,
+        skipped_reason=None,
+        error_text=None
+        if ok
+        else "News-agent integration row was created, but Redis enqueue failed.",
     )
 
 

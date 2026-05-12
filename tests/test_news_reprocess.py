@@ -60,6 +60,7 @@ def _make_stranded_setup(
     *,
     with_failed_integrate_job: bool = True,
     with_paste_a_link_job: bool = False,
+    integrate_job_status: ScrapeJobStatus = ScrapeJobStatus.FAILED,
     pending_ref_count: int = 1,
     extra_matched_ref_count: int = 0,
     triggers: tuple[str, ...] = ("new_candidate",),
@@ -144,10 +145,17 @@ def _make_stranded_setup(
                 "parent_job_id": str(uuid.uuid4()),
                 "trigger_reasons": list(triggers),
             },
-            status=ScrapeJobStatus.FAILED,
-            error_text="(psycopg.OperationalError) test ssl error",
+            status=integrate_job_status,
+            error_text=(
+                "(psycopg.OperationalError) test ssl error"
+                if integrate_job_status == ScrapeJobStatus.FAILED
+                else None
+            ),
             queued_at=datetime.now(UTC) - timedelta(minutes=5),
-            completed_at=datetime.now(UTC) - timedelta(minutes=1),
+            completed_at=datetime.now(UTC) - timedelta(minutes=1)
+            if integrate_job_status
+            in {ScrapeJobStatus.FAILED, ScrapeJobStatus.COMPLETED}
+            else None,
         )
         session.add(failed_job)
         session.flush()
@@ -220,6 +228,28 @@ def test_find_stranded_articles_require_failed_job_excludes_orphans(
     assert relaxed[0].last_failed_job_id is None
     assert relaxed[0].trigger_reasons == (REPROCESS_TRIGGER_SENTINEL,)
     assert relaxed[0].source_run_id is None
+
+
+def test_find_stranded_articles_require_failed_job_ignores_completed_jobs(
+    postgres_session: Session,
+) -> None:
+    _ensure_news_reprocess_tables(postgres_session)
+    article_id, _job, _src = _make_stranded_setup(
+        postgres_session,
+        with_failed_integrate_job=True,
+        integrate_job_status=ScrapeJobStatus.COMPLETED,
+    )
+
+    assert find_stranded_articles(postgres_session, article_ids=[article_id]) == []
+
+    relaxed = find_stranded_articles(
+        postgres_session,
+        article_ids=[article_id],
+        require_failed_job=False,
+    )
+    assert len(relaxed) == 1
+    assert relaxed[0].last_failed_job_id is None
+    assert relaxed[0].trigger_reasons == (REPROCESS_TRIGGER_SENTINEL,)
 
 
 def test_find_stranded_articles_excludes_when_semantic_interpretation_exists(
