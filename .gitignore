@@ -26,3 +26,6 @@ data/seed/**
 !data/seed/**/.gitkeep
 
 alembic/versions/*.pyc
+
+# Local annotation tooling (one-off HTML doc-review files)
+tools/annotate/
