@@ -132,10 +132,13 @@ def test_default_tool_registry_includes_permit_profile_tools() -> None:
         "search_projects",
     ]
     spec_by_name = {spec["name"]: spec for spec in specs}
-    assert spec_by_name["get_articles_about_parcel_or_address"]["input_schema"]["anyOf"] == [
-        {"required": ["parcel_id"]},
-        {"required": ["address"]},
+    article_context_schema = spec_by_name["get_articles_about_parcel_or_address"][
+        "input_schema"
     ]
+    assert article_context_schema["required"] == []
+    assert "anyOf" not in article_context_schema
+    assert "parcel_id" in article_context_schema["properties"]
+    assert "address" in article_context_schema["properties"]
     assert spec_by_name["get_permits_for_parcel"]["input_schema"]["required"] == [
         "parcel_id"
     ]

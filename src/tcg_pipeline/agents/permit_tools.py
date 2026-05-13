@@ -335,7 +335,9 @@ GET_ARTICLES_ABOUT_PARCEL_OR_ADDRESS_TOOL = AgentTool(
                 "description": "Maximum article references to return. Defaults to 10.",
             },
         },
-        "anyOf": [{"required": ["parcel_id"]}, {"required": ["address"]}],
+        # Anthropic tool schemas reject top-level anyOf/oneOf/allOf. The handler
+        # enforces that callers provide at least one of parcel_id or address.
+        "required": [],
         "additionalProperties": False,
     },
     output_token_budget=GET_ARTICLES_ABOUT_PARCEL_OR_ADDRESS_OUTPUT_TOKEN_BUDGET,
