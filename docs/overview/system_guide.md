@@ -43,7 +43,7 @@ Three principles, all visible in the audit trail:
 - **Phases A–C** (validated data, read-only frontend, write path, review queue) — **shipped**
 - **Phase D** (scheduled news ingestion) — Urbanize LA running in production behind kill switches; first-cron observation signed off 2026-05-12 (two scheduled crons clean, infrastructure-level fixes shipped for stranded-article visibility and a Supabase pooler SSL-drop issue)
 - **AGENT sprint** — News Research Agent live on production traffic; Permit Research Agent staged behind kill switches; semantic interpretation layer cut over; status-regression handling slices 1–5 shipped, slice 6 monitoring code shipped with operational verification deferred to the first AGENT.reset cycle
-- **What's next** — cut over the Permit Research Agent (flip `AGENT_ENABLED_FOR_PERMITS=true`; per-profile live-LLM kill switches `AGENT.gates` shipped 2026-05-13 so news and permit incidents can be killed independently), then `AGENT.reset` (the controlled production database rebuild that establishes the post-stabilization baseline), then Santa Monica
+- **What's next** — `AGENT.reset` (the controlled production database rebuild that establishes the post-stabilization baseline). Permit cutover completed 2026-05-13 with a clean 25-row LADBS smoke ($0.063/agent run); `AGENT.gates` per-profile kill switches shipped 2026-05-13 so news and permit incidents can be killed independently. Then Santa Monica
 
 LA has roughly 1,360 active projects in the database, ingestion across six LADBS Socrata feeds plus Urbanize LA news, the full review/audit workflow live, and a researcher reading the queue every day.
 
@@ -426,10 +426,9 @@ Three layers plus a spot-check sampler:
 
 ### The immediate sequence
 
-1. Cut over the Permit Research Agent (enable `AGENT_ENABLED_FOR_PERMITS=true` on API + worker; observe permit telemetry for a window before declaring it clean). Per-profile live-LLM kill switches `AGENT.gates` shipped 2026-05-13 so a news incident can no longer take permits down with it
-2. Run `AGENT.reset` — controlled production database rebuild (truncate data tables, preserve config, reseed CoStar + Pipedream, replay collectors, re-resolve, re-enable news cron, run a bounded Urbanize backfill, rerun the Pipedream coverage compare as the inaugural eval baseline). Expected to run iteratively across multiple stabilization cycles. The first cycle also completes the remaining slice-6 operational verification (Activity / Audit Log rendering for regression rows)
-3. Cross-cutting **UI.QA** pass before Santa Monica goes live — UI patterns lock in once a second market is live
-4. Phase H — Santa Monica market
+1. Run `AGENT.reset` — controlled production database rebuild (truncate data tables, preserve config, reseed CoStar + Pipedream, replay collectors, re-resolve, re-enable news cron, run a bounded Urbanize backfill, rerun the Pipedream coverage compare as the inaugural eval baseline). Expected to run iteratively across multiple stabilization cycles. The first cycle also completes the remaining slice-6 operational verification (Activity / Audit Log rendering for regression rows). Permit cutover completed 2026-05-13 (clean 25-row LADBS smoke at $0.063/agent run)
+2. Cross-cutting **UI.QA** pass before Santa Monica goes live — UI patterns lock in once a second market is live
+3. Phase H — Santa Monica market
 
 After Phase H: Phase I (generalization template + third market), Phase J (admin console), Phase G (exports), Phase F (additional LA collectors), AGENT.4 / AGENT.5 / AGENT.6 (CoStar / Pipedream / Pre-Leasing agents), AGENT.7 (Pass 2c cost optimization).
 
