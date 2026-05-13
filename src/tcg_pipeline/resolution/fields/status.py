@@ -12,6 +12,9 @@ from tcg_pipeline.resolution.fields import (
     infer_confidence,
     iter_field_observations,
 )
+from tcg_pipeline.resolution.regression_filters import (
+    is_benign_ladbs_additive_paperwork,
+)
 
 STATUS_PROGRESS_ORDER = {
     PipelineStatus.CONCEPTUAL: 0,
@@ -244,11 +247,28 @@ def _status_regression_metadata(
         return {}
 
     candidates: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
     for proposed_status, observations in candidate_observations.items():
         proposed_rank = STATUS_PROGRESS_ORDER.get(proposed_status)
         if proposed_rank is None or proposed_rank >= current_rank:
             continue
         for observation in observations:
+            if is_benign_ladbs_additive_paperwork(observation.evidence):
+                # LADBS additive paperwork (issued permit, plan-check progress,
+                # CofO issued/pending) on an already-higher-status project is
+                # noise, not regression. Record in audit metadata so the
+                # suppression is visible without polluting the review queue.
+                suppressed.append(
+                    _status_regression_candidate_payload(
+                        current_status=current_status,
+                        current_rank=current_rank,
+                        proposed_status=proposed_status,
+                        proposed_rank=proposed_rank,
+                        observation=observation,
+                    )
+                    | {"suppression_reason": "ladbs_additive_paperwork"}
+                )
+                continue
             candidates.append(
                 _status_regression_candidate_payload(
                     current_status=current_status,
@@ -258,11 +278,11 @@ def _status_regression_metadata(
                     observation=observation,
                 )
             )
-    if not candidates:
+    if not candidates and not suppressed:
         return {}
 
     terminal_drop = current_status == PipelineStatus.COMPLETE
-    return {
+    metadata: dict[str, Any] = {
         "regression_candidates": candidates,
         "regression_candidate_count": len(candidates),
         "regression_audit_rule_applied": (
@@ -271,6 +291,10 @@ def _status_regression_metadata(
             else "status_regression_candidate_preserve_current"
         ),
     }
+    if suppressed:
+        metadata["suppressed_regression_candidates"] = suppressed
+        metadata["suppressed_regression_candidate_count"] = len(suppressed)
+    return metadata
 
 
 def _status_regression_candidate_payload(

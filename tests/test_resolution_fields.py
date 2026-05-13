@@ -41,6 +41,7 @@ def _build_evidence(
     evidence_date: date,
     extracted_fields: dict[str, dict[str, object]],
     collected_at: datetime | None = None,
+    raw_data: dict[str, object] | None = None,
 ) -> Evidence:
     return Evidence(
         id=uuid.uuid4(),
@@ -51,6 +52,7 @@ def _build_evidence(
         or datetime.combine(evidence_date, datetime.min.time(), tzinfo=UTC),
         evidence_date=evidence_date,
         extracted_fields=extracted_fields,
+        raw_data=raw_data,
     )
 
 
@@ -659,6 +661,9 @@ def test_resolve_delivery_year_for_complete_prefers_non_future_explicit_evidence
 
 
 def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> None:
+    # Use a cancelled-status permit so the regression candidate path is exercised.
+    # Issued/in-force permits on Complete projects are suppressed by
+    # regression_filters.is_benign_ladbs_additive_paperwork.
     project = _build_project()
     project.pipeline_status = PipelineStatus.COMPLETE
     permit_evidence = _build_evidence(
@@ -668,6 +673,7 @@ def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> 
         extracted_fields={
             "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
         },
+        raw_data={"status_desc": "Cancelled"},
     )
 
     resolution = resolve_status([permit_evidence], project)
@@ -687,6 +693,9 @@ def test_resolve_status_does_not_regress_from_more_advanced_current_status() -> 
 
 
 def test_resolve_status_emits_regression_candidate_for_lower_ranked_evidence() -> None:
+    # A cancelled permit IS a genuine regression signal. The companion
+    # test_resolve_status_suppresses_benign_ladbs_additive_paperwork below
+    # asserts the inverse — an Issued permit gets suppressed.
     project = _build_project()
     project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
     permit_evidence = _build_evidence(
@@ -696,6 +705,7 @@ def test_resolve_status_emits_regression_candidate_for_lower_ranked_evidence() -
         extracted_fields={
             "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
         },
+        raw_data={"status_desc": "Cancelled"},
     )
 
     resolution = resolve_status([permit_evidence], project)
@@ -714,6 +724,9 @@ def test_resolve_status_emits_regression_candidate_for_lower_ranked_evidence() -
 
 
 def test_resolve_status_enumerates_lower_ranked_candidate_when_higher_evidence_wins() -> None:
+    # Cancelled permit on a UC project (with inspection evidence supporting UC)
+    # still emits a regression candidate — the higher-ranked inspection wins
+    # for the chosen status but the cancellation is a real lifecycle signal.
     project = _build_project()
     project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
     permit_evidence = _build_evidence(
@@ -723,6 +736,7 @@ def test_resolve_status_enumerates_lower_ranked_candidate_when_higher_evidence_w
         extracted_fields={
             "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
         },
+        raw_data={"status_desc": "Cancelled"},
     )
     inspection_evidence = _build_evidence(
         source_type="ladbs_inspection",
@@ -919,3 +933,122 @@ def test_resolve_status_system_override_yields_to_newer_evidence() -> None:
         SYSTEM_STATUS_REGRESSION_OVERRIDE_ACTOR
     )
     assert resolution.metadata["superseded_override"]["value"] == PipelineStatus.APPROVED.value
+
+
+def test_resolve_status_suppresses_benign_ladbs_additive_paperwork() -> None:
+    """A new Issued LADBS permit on an already-UC project is additive
+    paperwork, not a regression — no candidate emitted."""
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={"status_desc": "Issued"},
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    # No active regression candidates — suppression worked.
+    assert resolution.metadata.get("regression_candidate_count", 0) == 0
+    # But the suppression is recorded in audit metadata so the trail isn't lost.
+    suppressed = resolution.metadata.get("suppressed_regression_candidates", [])
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppression_reason"] == "ladbs_additive_paperwork"
+    assert suppressed[0]["proposed_status"] == PipelineStatus.APPROVED.value
+
+
+def test_resolve_status_suppresses_benign_ladbs_paperwork_on_complete_project() -> None:
+    """An Issued permit on a Complete project — still suppressed (additive)
+    even though the resolver normally flags Complete-regressions as
+    terminal-dropped."""
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.COMPLETE
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={"status_desc": "Issued"},
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.value == PipelineStatus.COMPLETE
+    assert resolution.metadata.get("regression_candidate_count", 0) == 0
+    suppressed = resolution.metadata.get("suppressed_regression_candidates", [])
+    assert len(suppressed) == 1
+
+
+def test_resolve_status_suppresses_cofo_pending_paperwork() -> None:
+    """CofO Pending is also additive — work is winding down but the project
+    hasn't moved backwards."""
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={"status_desc": "CofO Pending"},
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.metadata.get("regression_candidate_count", 0) == 0
+
+
+def test_resolve_status_does_not_suppress_news_regression_signals() -> None:
+    """The LADBS additive-paperwork filter is scoped to LADBS source family.
+    News regressions still emit candidates as before."""
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "pipeline_status": {"value": PipelineStatus.APPROVED.value, "confidence": None},
+        },
+        raw_data={"status_desc": "Issued"},  # status_desc has no effect for news evidence
+    )
+
+    resolution = resolve_status([news_evidence], project)
+
+    # News regression IS emitted regardless of any raw_data status_desc value.
+    assert resolution.metadata.get("regression_candidate_count", 0) >= 1
+
+
+def test_resolve_status_unknown_ladbs_status_desc_treated_as_additive() -> None:
+    """Fail-additive sentinel: unknown status_desc values are treated as
+    additive (no candidate emitted) on the assumption that we'd rather miss
+    a regression than spam the queue. The system_alert side-effect is tested
+    separately in the resolution.regression_filters unit suite where a
+    session is available."""
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={"status_desc": "Something New And Unrecognized"},
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    # Unknown values fail-additive — no regression candidate.
+    assert resolution.metadata.get("regression_candidate_count", 0) == 0
+    suppressed = resolution.metadata.get("suppressed_regression_candidates", [])
+    assert len(suppressed) == 1
+
