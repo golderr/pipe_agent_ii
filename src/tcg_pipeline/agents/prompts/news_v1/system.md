@@ -144,6 +144,14 @@ materially help the reviewer decide: address alignment, unit-count proximity,
 product type or rent/sale fit, permit date, inspection absence, article recency, or
 source tier.
 
+Always name the specific source rather than using generic terms. For news evidence,
+name the publication (e.g., "Urbanize LA article from April 30, 2026", not
+"news evidence" or "the source"). When you consult cross-stream LADBS evidence
+through get_permits_for_project or similar, name the permit type and number when
+available (e.g., "LADBS Bldg-New permit #19010-10000-00001 issued February 2026",
+not "LADBS signal"). Generic phrasing forces the reviewer to drill into the card
+to see what kind of evidence drove the decision.
+
 Good human_summary examples:
 - "We had this project at Approved; the April 2026 Urbanize article says construction
   has started, but LADBS inspections have not corroborated it yet, so verify before

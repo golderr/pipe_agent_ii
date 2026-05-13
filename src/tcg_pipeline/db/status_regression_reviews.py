@@ -290,10 +290,10 @@ def _structured_status_regression_summary(
 ) -> str:
     source_label = _source_label(source_name)
     candidate_date = _candidate_display_date(candidates)
-    source_phrase = (
-        f"{source_label}'s {candidate_date} upload"
-        if source_label == "CoStar" and candidate_date
-        else f"{source_label} {candidate_date} signal".strip()
+    source_phrase = _structured_source_phrase(
+        source_label=source_label,
+        candidate_date=candidate_date,
+        candidates=candidates,
     )
     support_sentence = _status_support_sentence(
         support_rows,
@@ -305,6 +305,46 @@ def _structured_status_regression_summary(
         f"Recommendation: keep {current_status.value} unless {source_label} reflects "
         "a verified pause, correction, or mapping issue."
     )
+
+
+def _structured_source_phrase(
+    *,
+    source_label: str,
+    candidate_date: str,
+    candidates: list[dict[str, Any]],
+) -> str:
+    """Build a source-specific phrase for the narrative. Names the LADBS permit
+    type + number when available (e.g., 'LADBS Bldg-New permit #19010-10000-00001
+    from May 13, 2026') so reviewers can tell at a glance what kind of evidence
+    triggered the regression card. Falls back to the prior generic phrasing
+    when the source-specific fields aren't populated."""
+    primary = candidates[0] if candidates else {}
+    if source_label == "LADBS":
+        permit_type = _text(primary.get("permit_type"))
+        permit_number = _text(primary.get("permit_number"))
+        status_desc = _text(primary.get("status_desc"))
+        descriptor_parts: list[str] = ["LADBS"]
+        if permit_type is not None:
+            descriptor_parts.append(f"{permit_type} permit")
+        else:
+            descriptor_parts.append("permit")
+        if permit_number is not None:
+            descriptor_parts.append(f"#{permit_number}")
+        if status_desc is not None:
+            descriptor_parts.append(f"(status: {status_desc})")
+        if candidate_date:
+            descriptor_parts.append(f"from {candidate_date}")
+        return " ".join(descriptor_parts)
+    if source_label == "CoStar" and candidate_date:
+        return f"CoStar upload from {candidate_date}"
+    return f"{source_label} {candidate_date} signal".strip()
+
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _structured_status_regression_priority(

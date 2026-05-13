@@ -36,9 +36,23 @@ Final response must be strict JSON with:
     "current_status": "<for status_regression_candidate when relevant>",
     "proposed_status": "<for status_regression_candidate when relevant>",
     "confidence": 0.0,
-    "reason": "short source-anchored reason"
+    "reason": "short source-anchored reason",
+    "human_summary": "one-sentence reviewer-facing blurb"
   },
   "error_text": null
 }
+
+human_summary must be a one-sentence reviewer-facing blurb (up to three short sentences when needed). Write it in plain English with no UUIDs, internal field names, or schema terms. Anchor it to the specific LADBS evidence: name the permit type (Bldg-New, Bldg-Alter/Repair, etc.) and the permit number when available, plus the issue/inspection/CofO date relevant to your decision. Examples:
+
+Good:
+- "LADBS Bldg-New permit #19010-10000-00001 issued March 2026 is additive paperwork on top of the existing inspection-supported UC status; recommending dismiss."
+- "LADBS Cancelled permit #19010-12345-00002 from May 2026 suggests the project was abandoned; recommend regress from UC to Approved after researcher confirms."
+- "Inspection activity on LADBS permit #19010-10000-00003 in April 2026 corroborates the existing project; confirm the match."
+
+Bad (generic phrasing the reviewer can't act on without drilling in):
+- "LADBS signal suggests the project may have regressed."
+- "Permit activity recorded; review."
+
+When cross-stream news evidence is consulted via get_articles_about_parcel_or_address, also name the publication (e.g., "Urbanize LA article from April 30, 2026") rather than "news evidence".
 
 If evidence is insufficient, return outcome escalated and decision escalated. Do not invent project IDs, permit numbers, APNs, evidence IDs, or facts not present in the intake or tool results.

@@ -1052,3 +1052,58 @@ def test_resolve_status_unknown_ladbs_status_desc_treated_as_additive() -> None:
     suppressed = resolution.metadata.get("suppressed_regression_candidates", [])
     assert len(suppressed) == 1
 
+
+
+def test_regression_candidate_payload_includes_permit_descriptor_fields() -> None:
+    """The regression-candidate payload carries permit_type / permit_number /
+    status_desc when the underlying LADBS evidence has them, so downstream
+    narrative templates can name the specific permit instead of saying
+    'LADBS signal'."""
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={
+            "status_desc": "Cancelled",
+            "permit_type": "Bldg-New",
+            "permit_nbr": "19010-10000-00001",
+        },
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    candidates = resolution.metadata.get("regression_candidates", [])
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["permit_type"] == "Bldg-New"
+    assert candidate["permit_number"] == "19010-10000-00001"
+    assert candidate["status_desc"] == "Cancelled"
+
+
+def test_regression_candidate_payload_omits_descriptor_fields_for_non_ladbs() -> None:
+    """News evidence shouldn't get LADBS descriptor fields injected into its
+    candidate payload."""
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "pipeline_status": {"value": PipelineStatus.APPROVED.value, "confidence": None},
+        },
+        raw_data={"permit_type": "should-be-ignored"},
+    )
+
+    resolution = resolve_status([news_evidence], project)
+
+    candidates = resolution.metadata.get("regression_candidates", [])
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert "permit_type" not in candidate
+    assert "permit_number" not in candidate

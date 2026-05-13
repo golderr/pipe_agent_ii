@@ -1127,7 +1127,13 @@ def test_persist_collected_records_routes_ladbs_status_regression_to_agent(
     raw_record = RawRecord(
         source_name="ladbs_permits",
         source_record_id="12010-30000-10010",
-        raw_payload={"pcis_permit": "12010-30000-10010"},
+        # status_desc=Cancelled is a genuine regression signal — required so
+        # UX.regression-suppression doesn't treat this as benign additive paperwork.
+        raw_payload={
+            "pcis_permit": "12010-30000-10010",
+            "permit_type": "Bldg-New",
+            "status_desc": "Cancelled",
+        },
         canonical_address="9510 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
         identifiers={"permit_number": ["12010-30000-10010"]},
         mapped_fields={
@@ -1203,7 +1209,14 @@ def test_persist_collected_records_routes_ladbs_unit_delta_and_regression_to_one
     raw_record = RawRecord(
         source_name="ladbs_permits",
         source_record_id="12010-30000-10011",
-        raw_payload={"pcis_permit": "12010-30000-10011"},
+        # status_desc=Cancelled is required so UX.regression-suppression doesn't
+        # treat this as benign additive paperwork; the unit_delta trigger still
+        # fires regardless.
+        raw_payload={
+            "pcis_permit": "12010-30000-10011",
+            "permit_type": "Bldg-New",
+            "status_desc": "Cancelled",
+        },
         canonical_address="9513 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
         identifiers={"permit_number": ["12010-30000-10011"]},
         mapped_fields={
@@ -1275,7 +1288,14 @@ def test_persist_collected_records_ladbs_status_regression_kill_switch_keeps_rev
     raw_record = RawRecord(
         source_name="ladbs_permits",
         source_record_id="12010-30000-10012",
-        raw_payload={"pcis_permit": "12010-30000-10012"},
+        # status_desc=Cancelled is required so UX.regression-suppression doesn't
+        # treat this as benign additive paperwork. The kill-switch path is the
+        # focus of this test.
+        raw_payload={
+            "pcis_permit": "12010-30000-10012",
+            "permit_type": "Bldg-New",
+            "status_desc": "Cancelled",
+        },
         canonical_address="9514 WEST EXAMPLE AVENUE LOS ANGELES CA 90035",
         identifiers={"permit_number": ["12010-30000-10012"]},
         mapped_fields={
@@ -1576,8 +1596,10 @@ def test_persist_collected_records_creates_low_priority_costar_regression_review
     assert review_item.payload["system_recommendation"]["action"] == (
         "keep_current_recommended"
     )
+    # UX.narrative-detail: CoStar phrase is now "CoStar upload from <date>"
+    # instead of "CoStar's <date> upload" — slightly different phrasing.
     assert (
-        "CoStar's May 13, 2026 upload lists this project as Approved"
+        "CoStar upload from May 13, 2026 lists this project as Approved"
         in review_item.payload["human_summary"]
     )
     assert (

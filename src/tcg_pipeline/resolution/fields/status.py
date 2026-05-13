@@ -305,7 +305,7 @@ def _status_regression_candidate_payload(
     proposed_rank: int,
     observation: FieldObservation,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "current_status": current_status.value,
         "proposed_status": proposed_status.value,
         "current_rank": current_rank,
@@ -320,6 +320,33 @@ def _status_regression_candidate_payload(
         "semantic_reason_code": _semantic_reason_code_for_observation(observation),
         "terminal_state_dropped": current_status == PipelineStatus.COMPLETE,
     }
+    payload.update(_source_descriptor_fields(observation.evidence))
+    return payload
+
+
+def _source_descriptor_fields(evidence: Evidence) -> dict[str, Any]:
+    """Extract source-specific descriptor fields from an Evidence row for use
+    in regression-candidate payloads and downstream narrative generation. The
+    narrative templates name specific permit types / numbers / source slugs
+    instead of generic phrases like "LADBS signal" — this helper pulls the
+    raw fields out of the evidence's raw_data so the templates don't need DB
+    access at narrative-generation time."""
+    raw = evidence.raw_data if isinstance(evidence.raw_data, dict) else {}
+    descriptor: dict[str, Any] = {}
+    if evidence.source_type in {"ladbs_permit", "ladbs_permit_activity"}:
+        permit_type = raw.get("permit_type")
+        permit_number = raw.get("permit_nbr") or raw.get("permit") or raw.get("permit_number")
+        permit_subtype = raw.get("permit_sub_type")
+        status_desc = raw.get("status_desc")
+        if isinstance(permit_type, str):
+            descriptor["permit_type"] = permit_type
+        if isinstance(permit_subtype, str):
+            descriptor["permit_sub_type"] = permit_subtype
+        if permit_number is not None:
+            descriptor["permit_number"] = str(permit_number)
+        if isinstance(status_desc, str):
+            descriptor["status_desc"] = status_desc
+    return descriptor
 
 
 def _has_terminal_regression_drop(metadata: dict[str, Any]) -> bool:
