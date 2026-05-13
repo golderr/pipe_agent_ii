@@ -41,7 +41,7 @@ Three principles, all visible in the audit trail:
 ### Where we are today
 
 - **Phases A–C** (validated data, read-only frontend, write path, review queue) — **shipped**
-- **Phase D** (scheduled news ingestion) — Urbanize LA running in production behind kill switches; first-cron observation in progress
+- **Phase D** (scheduled news ingestion) — Urbanize LA running in production behind kill switches; first-cron observation signed off 2026-05-12 (two scheduled crons clean, infrastructure-level fixes shipped for stranded-article visibility and a Supabase pooler SSL-drop issue)
 - **AGENT sprint** — News Research Agent live on production traffic; Permit Research Agent staged behind kill switches; semantic interpretation layer cut over; ~12 of 15 sub-steps done
 - **What's next** — finish status-regression handling, cut over the Permit Research Agent, then `AGENT.reset` (the controlled production database rebuild that establishes the post-stabilization baseline), then Santa Monica
 

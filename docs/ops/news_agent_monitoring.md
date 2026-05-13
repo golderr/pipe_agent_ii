@@ -146,6 +146,75 @@ appear, but no review card is created by design.
   auto-apply without fallback review items, so review links are not required
   unless `--require-review-links` is passed.
 
+## Recovering Stranded Articles
+
+A "stranded" article is one that completed Pass 0/1/2a/2b cleanly but did not
+finish Pass 2c, matching, agent, or integrator — typically because a transient
+provider error (Supabase pooler SSL drop, Anthropic 5xx) crashed the
+`news_agent_integrate` worker job. The article is left with `triage=relevant`,
+`current_extraction_id` set, candidate references in `match_status='pending'`,
+no `agent_runs`, and no semantic interpretation. Without explicit recovery the
+article sits silently broken — the daily smoke report did not surface this
+state before the visibility fix (D.6, 2026-05-12).
+
+### Detection
+
+A failed `news_agent_integrate` job now raises a `news_integrate_failed`
+system_alert scoped by `article_id`. The alert surfaces in the smoke report's
+`alerts` section because of the existing `news_*` alert clause. Look for:
+
+```
+warning news_integrate_failed: news_agent_integrate failed for article <id>;
+  article references remain pending. Run `tcg-pipeline news reprocess-stranded
+  --article-id <id> --apply` to re-enqueue.
+```
+
+The alert message includes the exact recovery command. The alert is cleared
+automatically the next time an integrate job for the same article completes
+successfully.
+
+To audit independently of the alert (e.g., for historical stranded articles
+that predate the alert wiring):
+
+```powershell
+tcg-pipeline news reprocess-stranded --days 30
+```
+
+This is the default dry-run mode and prints any stranded articles plus the
+recovery context (source_run_id, original triggers, last failed job error).
+
+### Recovery
+
+```powershell
+tcg-pipeline news reprocess-stranded --apply
+```
+
+Apply mode enqueues a fresh `news_agent_integrate` job per stranded article,
+reusing the original `trigger_reasons` from the failed job's payload where
+available. Use `--article-id <uuid>` (repeatable) to target specific articles.
+Use `--include-no-failed-job` to also reprocess articles with the structural
+stranded signature but no tracked failed `scrape_jobs` row — by default these
+are excluded because they are typically pre-Pass-2c historical staging-smoke
+artifacts that predate the full pipeline.
+
+Local shells cannot reach Render's private Redis, so `--apply` from a workstation
+will create QUEUED `scrape_jobs` rows that never get picked up. Run apply mode
+from inside the Render worker network: dashboard one-off shell or
+`POST /v1/services/{worker_service_id}/jobs` with `startCommand`
+`tcg-pipeline news reprocess-stranded --apply`.
+
+### Repeat Failures
+
+If the same article hits `news_integrate_failed` three or more times in a row,
+the failure is not transient — there is a deterministic interaction between
+that article's shape and the integrator. Historically (2026-05-12) this
+surfaced as a Supabase pooler SSL drop during a long agent loop with many
+triggers; the fix was TCP keepalives on the engine ([commit
+332a967](https://github.com/golderr/pipe_agent_ii/commit/332a967)). Future
+repeat-failure patterns warrant similar root-cause investigation rather than
+indefinite retry. The alert detail captures `job_id`, `source_run_id`, and the
+original `trigger_reasons` to support that investigation.
+
 ## Window Semantics
 
 The report filters source runs by `source_runs.run_timestamp` and agent runs by
