@@ -4,7 +4,7 @@
 >
 > **Maintenance:** Update this file whenever the agent roster changes, a new source goes live, a resolution rule changes, a kill switch is added, or the AGENT sprint advances a step. See the maintenance note at the bottom.
 >
-> **Last updated:** 2026-05-12
+> **Last updated:** 2026-05-13
 
 ---
 
@@ -42,8 +42,8 @@ Three principles, all visible in the audit trail:
 
 - **Phases A–C** (validated data, read-only frontend, write path, review queue) — **shipped**
 - **Phase D** (scheduled news ingestion) — Urbanize LA running in production behind kill switches; first-cron observation signed off 2026-05-12 (two scheduled crons clean, infrastructure-level fixes shipped for stranded-article visibility and a Supabase pooler SSL-drop issue)
-- **AGENT sprint** — News Research Agent live on production traffic; Permit Research Agent staged behind kill switches; semantic interpretation layer cut over; ~12 of 15 sub-steps done
-- **What's next** — finish status-regression handling, cut over the Permit Research Agent, then `AGENT.reset` (the controlled production database rebuild that establishes the post-stabilization baseline), then Santa Monica
+- **AGENT sprint** — News Research Agent live on production traffic; Permit Research Agent staged behind kill switches; semantic interpretation layer cut over; status-regression handling slices 1–5 shipped, slice 6 monitoring code shipped with operational verification deferred to the first AGENT.reset cycle
+- **What's next** — ship per-profile live-LLM kill switches (`AGENT.gates`), cut over the Permit Research Agent (flip `AGENT_ENABLED_FOR_PERMITS=true`), then `AGENT.reset` (the controlled production database rebuild that establishes the post-stabilization baseline), then Santa Monica
 
 LA has roughly 1,360 active projects in the database, ingestion across six LADBS Socrata feeds plus Urbanize LA news, the full review/audit workflow live, and a researcher reading the queue every day.
 
@@ -205,7 +205,7 @@ Most evidence flows through the deterministic path. An LLM **research agent** is
 | **Likelihood Scoring Agent** | Status-driven base rate plus signal adjustments; clamps to [0.02, 0.98] | Live |
 | **Confidence Rollup Agent** | Field-level confidence → project-level confidence with reasoning JSON | Live |
 | **Contradiction Detection Agent** | When newer evidence disagrees with an active researcher override, raises an `override_contradiction` review card with proposed alternatives | Live |
-| **Regression Detection Agent** | New. Emits a `status_regression_candidate` for each lower-ranked status observation. Routes to the News Research Agent (for news evidence) or Permit Research Agent (for LADBS evidence); Pipedream / CoStar regressions create direct review cards until their reasoning agents ship | Live (rolling out — Slice 5 in progress) |
+| **Regression Detection Agent** | New. Emits a `status_regression_candidate` for each lower-ranked status observation. Routes to the News Research Agent (for news evidence) or Permit Research Agent (for LADBS evidence); Pipedream / CoStar regressions create direct review cards until their reasoning agents ship | Live (slices 1–5 shipped; slice 6 monitoring code shipped, operational Activity/Audit verification deferred to first AGENT.reset cycle) |
 
 #### Permit reasoning agent
 
@@ -305,7 +305,8 @@ Until May 2026, regression candidates (lower-status observations on a higher-sta
 - **Slice 1–2** (shipped): the Status Progression Agent emits one raw regression candidate per lower-ranked observation, even when older higher-ranked evidence still wins.
 - **Slice 3** (shipped): news regression candidates route through the News Research Agent with the new `status_regression_candidate` trigger — separated from the broader `material_contradiction` trigger.
 - **Slice 4** (shipped, behind `NEWS_REGRESSION_AUTO_APPLY_ENABLED`): the agent can auto-accept high-confidence (≥0.90) regressions on early-stage projects (current rank ≤4 = Under Construction or earlier). Pre-Leasing/Complete remain review-only at any confidence. Auto-accepts use a system-authored `until_newer_evidence` override that yields cleanly to fresher Tier 1 evidence, unlike researcher-authored overrides which require explicit review.
-- **Slice 5** (in progress): structured-source routing — LADBS regressions through the Permit Research Agent, Pipedream/CoStar regressions as direct review cards until their agents ship.
+- **Slice 5** (shipped): structured-source routing — LADBS regressions route through the Permit Research Agent via shared structured-source review helpers; CoStar seed/upload create low-priority direct cards; Pipedream direct-review behavior is designed in the helper but production activation is deferred until AGENT.5 / Pipedream sync updates existing projects.
+- **Slice 6** (code/runbook shipped, op verification pending first reset): smoke validators report `status_regression_candidate` counts, linked-card counts, open-vs-auto-accepted splits, and duplicate project/status-pair counts; a `--max-status-regression-duplicate-projects` ceiling replaces manual cross-day comparison; the `AGENT.reset` runbook (`docs/ops/agent_reset_runbook.md`) defines the per-cycle regression artifact checklist. The remaining slice-6 item — verifying Activity / Audit Log rendering against live reset artifacts — is intentionally deferred to the first AGENT.reset cycle.
 
 ### 4.7 Cost, safety, kill switches
 
@@ -408,7 +409,7 @@ Three layers plus a spot-check sampler:
 - Agent foundation: source-agnostic runner, source profiles, `agent_runs` audit, cost-cap accounting, kill switches, A/B harness, article chunk embeddings
 - News Research Agent live for `new_candidate`, `possible_multi_candidate`, `low_confidence`, `pass1_pass2_conflict`, `material_contradiction`, `override_contradiction`, `status_regression_candidate` triggers
 - Permit Research Agent code complete, controlled smoke passed
-- Status regression handling Slices 1–4 shipped; Slice 5 in progress
+- Status regression handling Slices 1–5 shipped; Slice 6 monitoring code/runbook shipped with Activity/Audit operational verification deferred to first AGENT.reset cycle
 - Activity / Audit Log with semantic, agent, resolution, and change sources
 - Coverage Comparison Agent code complete
 - `reset-user-actions` CLI for stabilization cycles
@@ -425,9 +426,9 @@ Three layers plus a spot-check sampler:
 
 ### The immediate sequence
 
-1. Finish status-regression handling Slices 5–6 (structured-source routing + monitoring)
-2. Cut over the Permit Research Agent (enable `AGENT_ENABLED_FOR_PERMITS=true` after a clean news observation window)
-3. Run `AGENT.reset` — controlled production database rebuild (truncate data tables, preserve config, reseed CoStar + Pipedream, replay collectors, re-resolve, re-enable news cron, run a bounded Urbanize backfill, rerun the Pipedream coverage compare as the inaugural eval baseline). Expected to run iteratively across multiple stabilization cycles
+1. Ship per-profile live-LLM kill switches (`AGENT.gates`) so a news incident no longer requires killing permit LLM calls (or vice versa)
+2. Cut over the Permit Research Agent (enable `AGENT_ENABLED_FOR_PERMITS=true` after `AGENT.gates` deploys; observe permit telemetry for a window before declaring it clean)
+3. Run `AGENT.reset` — controlled production database rebuild (truncate data tables, preserve config, reseed CoStar + Pipedream, replay collectors, re-resolve, re-enable news cron, run a bounded Urbanize backfill, rerun the Pipedream coverage compare as the inaugural eval baseline). Expected to run iteratively across multiple stabilization cycles. The first cycle also completes the remaining slice-6 operational verification (Activity / Audit Log rendering for regression rows)
 4. Cross-cutting **UI.QA** pass before Santa Monica goes live — UI patterns lock in once a second market is live
 5. Phase H — Santa Monica market
 
