@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     agent_enabled_for_news: bool = True
     agent_enabled_for_permits: bool = True
     agent_allow_live_llm: bool = False
+    # Per-profile live-LLM kill switches. Default to None so deployments that
+    # set only the global flag keep working unchanged; when set, they override
+    # the global for that profile only. See live_llm_allowed_for() below.
+    agent_allow_live_llm_news: bool | None = None
+    agent_allow_live_llm_permits: bool | None = None
     news_regression_auto_apply_enabled: bool = False
     news_use_legacy_pass3: bool = False
     news_use_legacy_semantic: bool = False
@@ -122,6 +127,21 @@ class Settings(BaseSettings):
                 "from Supabase into .env."
             )
         return normalize_database_url(self.database_url)
+
+    def live_llm_allowed_for(self, profile_name: str) -> bool:
+        """Resolve whether live LLM calls are allowed for the given agent profile.
+
+        Returns the per-profile override when set; otherwise the global
+        ``agent_allow_live_llm`` value. Profile names not explicitly mapped
+        fall through to the global setting.
+        """
+        per_profile: bool | None = {
+            "news_v1": self.agent_allow_live_llm_news,
+            "permit_v1": self.agent_allow_live_llm_permits,
+        }.get(profile_name)
+        if per_profile is not None:
+            return per_profile
+        return self.agent_allow_live_llm
 
 
 @lru_cache(maxsize=1)

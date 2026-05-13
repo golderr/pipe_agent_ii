@@ -301,7 +301,8 @@ def test_run_agent_for_intake_writes_no_live_client_audit_row(
     assert agent_run.outcome == AgentRunOutcome.KILLED_BY_SWITCH.value
     assert agent_run.cost_usd == Decimal("0.000000")
     assert agent_run.error_text == (
-        "agent_allow_live_llm=false; no AgentClient was provided for profile news_v1"
+        "agent_allow_live_llm gate is off for profile news_v1; "
+        "no AgentClient was provided"
     )
 
 

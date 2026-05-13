@@ -1361,7 +1361,8 @@ def test_persist_collected_records_writes_permit_audit_row_without_live_llm_clie
     ).scalar_one()
     assert agent_run.outcome == AgentRunOutcome.KILLED_BY_SWITCH.value
     assert agent_run.error_text == (
-        "agent_allow_live_llm=false; no AgentClient was provided for profile permit_v1"
+        "agent_allow_live_llm gate is off for profile permit_v1; "
+        "no AgentClient was provided"
     )
     assert agent_run.triggered_by == ["unit_delta"]
     assert agent_run.project_id == project.id

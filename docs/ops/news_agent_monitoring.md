@@ -146,6 +146,43 @@ appear, but no review card is created by design.
   auto-apply without fallback review items, so review links are not required
   unless `--require-review-links` is passed.
 
+## Live-LLM Kill Switches
+
+Three Render dashboard env vars gate live LLM calls. The global
+`AGENT_ALLOW_LIVE_LLM` is the universal off switch. Two per-profile switches
+optionally override the global for one agent type without affecting the other.
+
+| Env var | Type | Effect |
+|---|---|---|
+| `AGENT_ALLOW_LIVE_LLM` | `bool` (default `false`) | Global. When `true`, agent profiles can make live Anthropic calls unless a per-profile override blocks them. |
+| `AGENT_ALLOW_LIVE_LLM_NEWS` | `bool` or unset | When set, overrides the global for the `news_v1` profile only. Unset → falls back to the global. |
+| `AGENT_ALLOW_LIVE_LLM_PERMITS` | `bool` or unset | When set, overrides the global for the `permit_v1` profile only. Unset → falls back to the global. |
+
+The resolver is `Settings.live_llm_allowed_for(profile_name)` in
+[settings.py](../../src/tcg_pipeline/settings.py). All gating call sites read
+through this helper, so the per-profile override is consistent across the
+agent runner, news integration, and permit collection paths.
+
+**When to set a per-profile override.** During steady-state production both
+per-profile vars should be unset and the global is the single source of truth.
+Set a per-profile override only during an incident where you need to kill one
+profile's LLM calls without affecting the other. Examples:
+
+- News incident: cost spike, output-quality regression, model misbehaving on
+  Urbanize articles. Set `AGENT_ALLOW_LIVE_LLM_NEWS=false`, leave
+  `AGENT_ALLOW_LIVE_LLM_PERMITS` unset (or `true`). Permit agent keeps running.
+- Permit incident: same shape, set `AGENT_ALLOW_LIVE_LLM_PERMITS=false` and
+  leave news running.
+- Total kill: set `AGENT_ALLOW_LIVE_LLM=false`. Per-profile vars become
+  irrelevant unless one is explicitly set to `true` to keep that one profile
+  alive.
+
+**Audit signal when a gate blocks a call.** The agent runner writes an
+`agent_runs` row with `outcome=killed_by_switch` and
+`error_text="agent_allow_live_llm gate is off for profile <name>; no
+AgentClient was provided"`. The news/permit smoke reports surface these via
+`outcome_counts`. Investigate any unexpected `killed_by_switch` count.
+
 ## Recovering Stranded Articles
 
 A "stranded" article is one that completed Pass 0/1/2a/2b cleanly but did not

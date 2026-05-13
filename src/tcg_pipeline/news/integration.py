@@ -782,10 +782,12 @@ def _run_news_agents_for_first_pass(
         return {}
     client = agent_client
     if settings.agent_enabled_for_news and client is None:
-        if not settings.agent_allow_live_llm:
+        if not settings.live_llm_allowed_for(NEWS_AGENT_PROFILE.name):
             raise RuntimeError(
-                "AGENT_ALLOW_LIVE_LLM=true is required before news integration "
-                "constructs a live agent LLM client."
+                "live LLM gate is off for profile news_v1; news integration "
+                "cannot construct a live agent LLM client. Set "
+                "AGENT_ALLOW_LIVE_LLM_NEWS=true (or AGENT_ALLOW_LIVE_LLM=true "
+                "globally) to enable."
             )
         client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
 
@@ -2529,10 +2531,12 @@ def _run_status_regression_agents_for_project(
 
     client = agent_client
     if settings.agent_enabled_for_news and client is None:
-        if not settings.agent_allow_live_llm:
+        if not settings.live_llm_allowed_for(NEWS_AGENT_PROFILE.name):
             raise RuntimeError(
-                "AGENT_ALLOW_LIVE_LLM=true is required before news integration "
-                "constructs a live agent LLM client."
+                "live LLM gate is off for profile news_v1; news integration "
+                "cannot construct a live agent LLM client. Set "
+                "AGENT_ALLOW_LIVE_LLM_NEWS=true (or AGENT_ALLOW_LIVE_LLM=true "
+                "globally) to enable."
             )
         client = build_anthropic_agent_client(settings=settings, profile=NEWS_AGENT_PROFILE)
 

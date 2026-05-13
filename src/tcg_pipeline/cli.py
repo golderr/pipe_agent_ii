@@ -305,6 +305,7 @@ def news_paste_link_smoke(
         "Agent flags: "
         f"AGENT_ENABLED_FOR_NEWS={settings.agent_enabled_for_news} | "
         f"AGENT_ALLOW_LIVE_LLM={settings.agent_allow_live_llm} | "
+        f"news_live_llm_resolved={settings.live_llm_allowed_for('news_v1')} | "
         f"NEWS_USE_LEGACY_PASS3={settings.news_use_legacy_pass3} | "
         f"NEWS_USE_LEGACY_SEMANTIC={settings.news_use_legacy_semantic}"
     )

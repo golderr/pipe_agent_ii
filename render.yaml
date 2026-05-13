@@ -89,12 +89,19 @@ services:
       # source of truth so emergency toggles survive unrelated deploys.
       # Current production intent: news=true, permits=false, live_llm=true,
       # news_regression_auto_apply=false, legacy_pass3=false,
-      # legacy_semantic=false.
+      # legacy_semantic=false. The two per-profile live-LLM gates default to
+      # unset and fall back to AGENT_ALLOW_LIVE_LLM; set them explicitly only
+      # when an incident requires killing one profile's LLM calls without
+      # affecting the other.
       - key: AGENT_ENABLED_FOR_NEWS
         sync: false
       - key: AGENT_ENABLED_FOR_PERMITS
         sync: false
       - key: AGENT_ALLOW_LIVE_LLM
+        sync: false
+      - key: AGENT_ALLOW_LIVE_LLM_NEWS
+        sync: false
+      - key: AGENT_ALLOW_LIVE_LLM_PERMITS
         sync: false
       - key: NEWS_REGRESSION_AUTO_APPLY_ENABLED
         sync: false
@@ -176,12 +183,19 @@ services:
       # source of truth so emergency toggles survive unrelated deploys.
       # Current production intent: news=true, permits=false, live_llm=true,
       # news_regression_auto_apply=false, legacy_pass3=false,
-      # legacy_semantic=false.
+      # legacy_semantic=false. The two per-profile live-LLM gates default to
+      # unset and fall back to AGENT_ALLOW_LIVE_LLM; set them explicitly only
+      # when an incident requires killing one profile's LLM calls without
+      # affecting the other.
       - key: AGENT_ENABLED_FOR_NEWS
         sync: false
       - key: AGENT_ENABLED_FOR_PERMITS
         sync: false
       - key: AGENT_ALLOW_LIVE_LLM
+        sync: false
+      - key: AGENT_ALLOW_LIVE_LLM_NEWS
+        sync: false
+      - key: AGENT_ALLOW_LIVE_LLM_PERMITS
         sync: false
       - key: NEWS_REGRESSION_AUTO_APPLY_ENABLED
         sync: false

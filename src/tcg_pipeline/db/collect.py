@@ -541,7 +541,7 @@ def _run_permit_agent_for_record(
         return PermitAgentRunOutcome(client=client)
     resolved_client = client
     if settings.agent_enabled_for_permits and resolved_client is None:
-        if settings.agent_allow_live_llm:
+        if settings.live_llm_allowed_for(PERMIT_AGENT_PROFILE.name):
             resolved_client = build_anthropic_agent_client(
                 settings=settings,
                 profile=PERMIT_AGENT_PROFILE,

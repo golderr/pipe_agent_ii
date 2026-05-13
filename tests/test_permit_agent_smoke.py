@@ -563,7 +563,10 @@ def _agent_run(
     now = (source_run.run_timestamp or datetime.now(UTC)) + timedelta(minutes=1)
     resolved_error_text = error_text
     if resolved_error_text is None and outcome == AgentRunOutcome.KILLED_BY_SWITCH.value:
-        resolved_error_text = "agent_allow_live_llm=false"
+        resolved_error_text = (
+            "agent_allow_live_llm gate is off for profile permit_v1; "
+            "no AgentClient was provided"
+        )
     return AgentRun(
         intake_source_type=PERMIT_AGENT_PROFILE.intake_source_type,
         intake_record_id=intake_record_id,

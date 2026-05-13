@@ -741,7 +741,10 @@ def _agent_run(
 ) -> AgentRun:
     resolved_error_text = error_text
     if resolved_error_text is None and outcome == AgentRunOutcome.KILLED_BY_SWITCH.value:
-        resolved_error_text = "agent_allow_live_llm=false"
+        resolved_error_text = (
+            "agent_allow_live_llm gate is off for profile news_v1; "
+            "no AgentClient was provided"
+        )
     return AgentRun(
         intake_source_type=NEWS_AGENT_PROFILE.intake_source_type,
         intake_record_id=str(article.id),
