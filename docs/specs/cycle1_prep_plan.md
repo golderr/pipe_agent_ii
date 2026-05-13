@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13
+> **Last updated:** 2026-05-13 (Phase 1 complete — items 1, 4, 2 shipped)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -11,14 +11,14 @@
 
 Six pre-cycle-1 items must land before `AGENT.reset` cycle 1 begins:
 
-| # | Item | Roadmap row | Effort |
-|---|---|---|---|
-| 1 | Resolver-level suppression of benign LADBS follow-on permits | `UX.regression-suppression` | ~half day |
-| 2 | Card source-detail rendering for permit + CoStar regression cards | `UX.card-source-detail` | ~half day |
-| 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | ~2-3 days |
-| 4 | Narrative descriptiveness (name permit types + news sources) | `UX.narrative-detail` | ~half day |
-| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | ~1.5-2 weeks |
-| 6 | Building height / stories as a Project field | `UX.building-height` | ~2-3 days |
+| # | Item | Roadmap row | Status | Commit |
+|---|---|---|---|---|
+| 1 | Resolver-level suppression of benign LADBS follow-on permits | `UX.regression-suppression` | ✅ Shipped 2026-05-13 | `e4c37c4` |
+| 2 | Card source-detail rendering for permit + CoStar regression cards | `UX.card-source-detail` | ✅ Shipped 2026-05-13 | `93e8648` |
+| 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | 🔜 Phase 3 (~2-3 days) | — |
+| 4 | Narrative descriptiveness (name permit types + news sources) | `UX.narrative-detail` | ✅ Shipped 2026-05-13 | `c111433` |
+| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | 🔜 Phase 4 (~1.5-2 weeks) | — |
+| 6 | Building height / stories as a Project field (canonical name `elevation`) | `UX.building-height` | 🔜 Phase 2 next (~2-3 days) | — |
 
 **Total:** ~2.5-3 weeks at single-threaded execution; ~2 weeks if independent backends + frontends can overlap.
 
