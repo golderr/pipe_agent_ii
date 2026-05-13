@@ -1228,6 +1228,7 @@ function EvidenceSummaryRow({ row }: { row: ReviewEvidenceSummary }) {
               {formatValue(row.highlights[0].passage)}
             </p>
           ) : null}
+          <SourceFieldsInline fields={row.sourceFields} />
           <p className="mt-0.5 text-slate-500">
             {humanize(row.sourceType)}
             {row.evidenceDate ? ` - ${formatDate(row.evidenceDate)}` : ""}
@@ -1236,6 +1237,31 @@ function EvidenceSummaryRow({ row }: { row: ReviewEvidenceSummary }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Renders the source-type-specific structured fields populated by
+ * SnippetPayload.source_fields. Useful for permit + CoStar regression cards
+ * where reviewers want to see permit_number / permit_type / status_desc /
+ * costar_property_id / upload_date at a glance without parsing the prose
+ * summary. Skips rendering for empty or null field maps. */
+function SourceFieldsInline({ fields }: { fields: Record<string, unknown> }) {
+  const entries = Object.entries(fields).filter(
+    ([, value]) => value !== null && value !== undefined && value !== ""
+  );
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <p className="mt-1 break-words text-slate-600">
+      {entries.map(([key, value], index) => (
+        <span key={key}>
+          {index > 0 ? " · " : ""}
+          <span className="text-slate-400">{humanize(key)}:</span>{" "}
+          <span className="font-medium text-slate-700">{String(value)}</span>
+        </span>
+      ))}
+    </p>
   );
 }
 

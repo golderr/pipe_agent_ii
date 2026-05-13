@@ -32,6 +32,12 @@ class SnippetPayload(BaseModel):
     detail: str
     fields: SnippetFields
     source_metadata: SnippetSourceMetadata
+    # Source-type-specific structured fields surfaced on review cards so the
+    # reviewer can scan permit number / type / status / CoStar property ID /
+    # upload date / etc. without parsing the prose summary. Populated per
+    # source family (see render_ladbs_permit_snippet, render_costar_snippet).
+    # Empty dict for source types that don't define structured fields yet.
+    source_fields: dict[str, Any] = Field(default_factory=dict)
     external_link: str | None = None
     highlights: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -58,17 +64,33 @@ def render_ladbs_permit_snippet(
     status = _text(
         _first_extracted_value(evidence, "status_desc", "latest_status", "permit_status")
     )
+    # Pull structured permit fields directly from raw_data for the source-fields
+    # subheader. Reviewer can scan permit_type and status_desc on the card
+    # without parsing the prose summary.
+    raw_status = _text(_raw_value(evidence, "status_desc"))
+    permit_type = _text(_raw_value(evidence, "permit_type"))
+    permit_sub_type = _text(_raw_value(evidence, "permit_sub_type"))
+    work_desc = _text(_raw_value(evidence, "work_desc"))
     summary = _join_parts(f"PCIS {record_id}", evidence_type, _labeled("permit status", status))
     detail = _join_parts(
         f"Permit PCIS {record_id}",
+        _labeled("type", permit_type),
         _labeled("issued", issue_date),
-        _labeled("current status", status),
+        _labeled("current status", status or raw_status),
     )
     return _payload(
         evidence,
         field_name,
         summary=summary,
         detail=detail,
+        source_fields={
+            "permit_number": record_id,
+            "permit_type": permit_type,
+            "permit_sub_type": permit_sub_type,
+            "status_desc": status or raw_status,
+            "issue_date": issue_date,
+            "work_desc": work_desc,
+        },
     )
 
 
@@ -117,13 +139,31 @@ def render_costar_snippet(
     field_name: str | None = None,
 ) -> SnippetPayload:
     value = _field_value(evidence, field_name)
+    raw_data = _mapping(evidence.raw_data)
+    costar_property_id = _text(
+        _first_value(raw_data, "costar_property_id", "Property ID", "property_id")
+    )
+    upload_date = _text(
+        _first_value(raw_data, "upload_date", "uploaded_at", "as_of_date")
+    ) or _text(evidence.collected_at)
     summary = _field_summary(field_name, value, fallback="CoStar evidence")
     detail = _join_parts(
         "CoStar",
-        _labeled("record", evidence.source_record_id),
+        _labeled("Property ID", costar_property_id or evidence.source_record_id),
+        _labeled("uploaded", upload_date),
         summary if field_name else None,
     )
-    return _payload(evidence, field_name, summary=summary, detail=detail)
+    return _payload(
+        evidence,
+        field_name,
+        summary=summary,
+        detail=detail,
+        source_fields={
+            "costar_property_id": costar_property_id or evidence.source_record_id,
+            "upload_date": upload_date,
+            "source_field": field_name,
+        },
+    )
 
 
 def render_pipedream_snippet(
@@ -262,6 +302,7 @@ def _payload(
     detail: str,
     external_link: str | None = None,
     highlights: list[dict[str, Any]] | None = None,
+    source_fields: dict[str, Any] | None = None,
 ) -> SnippetPayload:
     return SnippetPayload(
         summary=summary,
@@ -280,6 +321,11 @@ def _payload(
             collected_at=evidence.collected_at,
             evidence_date=evidence.evidence_date,
         ),
+        source_fields={
+            key: serialize_json(value)
+            for key, value in (source_fields or {}).items()
+            if value not in (None, "")
+        },
         external_link=external_link,
         highlights=highlights or [],
     )

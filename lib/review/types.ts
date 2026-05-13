@@ -44,6 +44,11 @@ export type ReviewEvidenceSummary = {
   collectedAt: string;
   summary: string;
   detail: string;
+  /** Source-type-specific structured fields (permit_number/type/status for
+   * ladbs_permit, costar_property_id/upload_date for costar, etc.). Populated
+   * by the backend SnippetPayload.source_fields. May be empty for source
+   * types that don't define structured fields yet. */
+  sourceFields: Record<string, unknown>;
   externalLink: string | null;
   highlights: Array<Record<string, unknown>>;
   extractedValue: unknown;

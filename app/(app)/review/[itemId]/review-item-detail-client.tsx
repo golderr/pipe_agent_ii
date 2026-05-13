@@ -508,6 +508,7 @@ function EvidenceDetailRow({ row }: { row: ReviewEvidenceSummary }) {
         <div className="min-w-0">
           <p className="break-words font-medium text-slate-950">{row.summary}</p>
           {row.detail ? <p className="mt-1 break-words text-xs text-slate-500">{row.detail}</p> : null}
+          <SourceFieldsInline fields={row.sourceFields} />
           {row.highlights.length ? (
             <div className="mt-2 space-y-1">
               {row.highlights.slice(0, 2).map((highlight, index) => (
@@ -545,6 +546,30 @@ function EvidenceDetailRow({ row }: { row: ReviewEvidenceSummary }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Renders the source-type-specific structured fields populated by
+ * SnippetPayload.source_fields. Used for permit + CoStar evidence cards so
+ * reviewers can scan permit_number / permit_type / status_desc /
+ * costar_property_id / upload_date inline without parsing the prose detail. */
+function SourceFieldsInline({ fields }: { fields: Record<string, unknown> }) {
+  const entries = Object.entries(fields).filter(
+    ([, value]) => value !== null && value !== undefined && value !== ""
+  );
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <p className="mt-1 break-words text-xs text-slate-600">
+      {entries.map(([key, value], index) => (
+        <span key={key}>
+          {index > 0 ? " · " : ""}
+          <span className="text-slate-400">{humanize(key)}:</span>{" "}
+          <span className="font-medium text-slate-700">{String(value)}</span>
+        </span>
+      ))}
+    </p>
   );
 }
 

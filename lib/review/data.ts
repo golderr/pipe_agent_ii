@@ -70,6 +70,7 @@ type ReviewEvidenceSummaryApi = {
   collected_at: string;
   summary: string;
   detail: string;
+  source_fields?: Record<string, unknown> | null;
   external_link: string | null;
   highlights: Array<Record<string, unknown>>;
   extracted_value: unknown;
@@ -428,6 +429,7 @@ function mapReviewItem(item: ReviewQueueItemApi): ReviewQueueItem {
       collectedAt: evidence.collected_at,
       summary: evidence.summary,
       detail: evidence.detail,
+      sourceFields: evidence.source_fields ?? {},
       externalLink: evidence.external_link,
       highlights: evidence.highlights ?? [],
       extractedValue: evidence.extracted_value

@@ -183,6 +183,10 @@ class ReviewEvidenceSummary(BaseModel):
     collected_at: str
     summary: str
     detail: str
+    # Source-type-specific structured fields surfaced on review cards. Empty
+    # dict for source types that don't define structured fields. See
+    # SnippetPayload.source_fields in review/snippets.py.
+    source_fields: dict[str, Any] = {}
     external_link: str | None
     highlights: list[dict[str, Any]]
     extracted_value: Any | None

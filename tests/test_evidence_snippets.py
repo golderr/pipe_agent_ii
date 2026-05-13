@@ -303,3 +303,87 @@ def _evidence(
         raw_data_hash=str(uuid.uuid4()),
         extracted_fields=extracted_fields,
     )
+
+
+def test_ladbs_permit_snippet_surfaces_source_fields() -> None:
+    """UX.card-source-detail: SnippetPayload.source_fields carries permit_number,
+    permit_type, status_desc, etc. so the frontend can render a labeled inline
+    list on the review card without parsing the prose summary."""
+    evidence = _evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        source_record_id="11010-10000-02451",
+        evidence_date=date(2026, 3, 15),
+        raw_data={
+            "pcis_permit": "11010-10000-02451",
+            "permit_type": "Bldg-New",
+            "permit_sub_type": "Apartment",
+            "status_desc": "Issued",
+        },
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    snippet = render_snippet(evidence, field_name="pipeline_status")
+
+    assert snippet.source_fields["permit_number"] == "11010-10000-02451"
+    assert snippet.source_fields["permit_type"] == "Bldg-New"
+    assert snippet.source_fields["permit_sub_type"] == "Apartment"
+    assert snippet.source_fields["status_desc"] == "Issued"
+
+
+def test_costar_snippet_surfaces_source_fields() -> None:
+    """UX.card-source-detail: CoStar snippets carry costar_property_id and
+    upload_date in source_fields."""
+    evidence = _evidence(
+        source_type="costar",
+        source_tier=3,
+        source_record_id="costar-row-7",
+        evidence_date=date(2026, 5, 1),
+        raw_data={"costar_property_id": "1234567"},
+        extracted_fields={"total_units": {"value": 140, "confidence": None}},
+    )
+
+    snippet = render_snippet(evidence, field_name="total_units")
+
+    assert snippet.source_fields["costar_property_id"] == "1234567"
+    assert "upload_date" in snippet.source_fields
+
+
+def test_source_fields_omits_null_or_empty_values() -> None:
+    """LADBS evidence missing permit_type / status_desc shouldn't pollute the
+    source_fields dict with nulls — frontend renders entries straight."""
+    evidence = _evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        source_record_id="11010-10000-02452",
+        evidence_date=date(2026, 3, 15),
+        raw_data={"pcis_permit": "11010-10000-02452"},
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    snippet = render_snippet(evidence, field_name="pipeline_status")
+
+    # permit_number is present, other LADBS-specific fields are absent
+    assert snippet.source_fields.get("permit_number") == "11010-10000-02452"
+    assert "permit_type" not in snippet.source_fields
+    assert "status_desc" not in snippet.source_fields
+
+
+def test_generic_snippet_source_fields_empty() -> None:
+    """Source types without a tailored renderer have source_fields = {} by default."""
+    evidence = _evidence(
+        source_type="news_article",
+        source_tier=2,
+        source_record_id="article-1",
+        evidence_date=date(2026, 5, 1),
+        raw_data={"source_name": "Urbanize LA"},
+        extracted_fields={"pipeline_status": {"value": "Under Construction", "confidence": "high"}},
+    )
+
+    snippet = render_snippet(evidence, field_name="pipeline_status")
+
+    assert snippet.source_fields == {}

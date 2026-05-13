@@ -334,6 +334,7 @@ describe("review payload helpers", () => {
           collectedAt: "2026-04-02T00:00:00Z",
           summary: "Permit evidence",
           detail: "Permit detail",
+          sourceFields: {},
           externalLink: null,
           highlights: [],
           extractedValue: "Approved"
@@ -349,6 +350,7 @@ describe("review payload helpers", () => {
           collectedAt: "2026-03-02T00:00:00Z",
           summary: "CoStar evidence",
           detail: "CoStar detail",
+          sourceFields: {},
           externalLink: null,
           highlights: [],
           extractedValue: "Pending"
