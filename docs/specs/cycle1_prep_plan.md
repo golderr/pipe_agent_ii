@@ -161,32 +161,29 @@ Phase 4 — Dedup table (days 10-19)
 
 ---
 
-## 6. Item 6 — UX.building-height
+## 6. Item 6 — UX.building-height (canonical field name: `elevation`)
 
-**Goal:** add `building_height_stories` (and optional `building_height_feet`) as Project fields so the dedup table's column has real data on day one.
+**Goal:** add `elevation` (integer, number of stories) as a Project field so the dedup table's column has real data on day one. **Naming decision (per Q3 resolution):** match Pipedream's existing `Elevation` column terminology — researchers already think of this field as "elevation" of the building in stories. Add a docstring/comment to disambiguate from ground elevation. Drop the originally-proposed `building_height_feet` from scope (not present in any source today).
 
 **Files to touch:**
-- New Alembic migration: `alembic/versions/2026_05_14_xxxx_add_building_height_to_projects.py`
+- New Alembic migration: `alembic/versions/2026_05_14_xxxx_add_elevation_to_projects.py`
 - `src/tcg_pipeline/db/models.py` — Project model
-- `src/tcg_pipeline/db/models.py` — NewsProjectReference (add `candidate_building_height_stories`)
+- `src/tcg_pipeline/db/models.py` — NewsProjectReference (add `candidate_elevation`)
 - News extraction prompt schema: `src/tcg_pipeline/agents/prompts/news_v1/extract_v2.json` (or equivalent — locate exact path)
 - News integrator: include the new field when writing evidence rows
-- `src/tcg_pipeline/ingesters/costar.py` — map CoStar's stories column
-- `src/tcg_pipeline/ingesters/pipedream.py` — map Pipedream's stories column
+- `src/tcg_pipeline/ingesters/costar.py` — map CoStar's `Number Of Stories` column
+- `src/tcg_pipeline/ingesters/pipedream.py` — map Pipedream's `Elevation` column (DataStorage col 48)
 - `src/tcg_pipeline/source_adapters/ladbs.py` — map `stories_proposed` from LADBS Socrata
-- New: `src/tcg_pipeline/resolution/fields/building_height.py` — resolver
+- New: `src/tcg_pipeline/resolution/fields/elevation.py` — resolver
 - `src/tcg_pipeline/resolution/engine.py` — wire the new resolver in
-- Frontend project detail Snapshot: add the field to the Snapshot panel
+- Frontend project detail Snapshot: add the field to the Snapshot panel labelled "Elevation (stories)"
 - Migration verification + tests
 
 **Sub-tasks:**
 
-- [ ] **Confirm field names.** Use `building_height_stories` (integer, nullable) and `building_height_feet` (integer, nullable). Stories is the primary signal (more commonly available across sources); feet is supplementary.
-- [ ] **Identify source field names.** Pull a sample of CoStar / Pipedream / LADBS rows to confirm:
-  - CoStar export column: probably `Number Of Stories` or similar — verify against an actual workbook
-  - Pipedream workbook column: similar
-  - LADBS Socrata field: `stories_proposed` (verify in Socrata docs)
-- [ ] **Write the Alembic migration.** Adds two nullable integer columns to `projects` + `news_project_references.candidate_building_height_stories`. No backfill needed.
+- [x] **Field name decision.** `elevation` (integer, nullable, number of stories). Per Q3 resolution, matches Pipedream researcher terminology. Add a column comment / model docstring: "Building height in stories. Named `elevation` to match Pipedream's existing column and researcher mental model; not ground elevation."
+- [x] **Source field names confirmed.** CoStar export: `Number Of Stories` (both MF and Commercial workbooks). Pipedream DataStorage: `Elevation` at col 48 (header in row 3). LADBS Socrata: `stories_proposed` (verify in Socrata docs at first map — actual prod schema TBD; treat as `stories_proposed` with sentinel fallback).
+- [ ] **Write the Alembic migration.** Adds one nullable integer column `elevation` to `projects` + `candidate_elevation` to `news_project_references`. No backfill needed.
 - [ ] **Update db/models.py** for both Project and NewsProjectReference.
 - [ ] **Run migration locally + verify in staging Supabase.** Per `docs/ops/migration_runbook.md` discipline: `pg_dump` backup first.
 - [ ] **Update extract_v2 schema + prompt** to capture `candidate_building_height_stories` from news articles.
@@ -414,12 +411,17 @@ Phase 4 — Dedup table (days 10-19)
 
 ---
 
-## 10. Open questions to resolve before starting
+## 10. Open questions — resolved 2026-05-13
 
-- [ ] **LADBS allowlist completeness (Item 1).** Production has only 36 LADBS evidence rows today, mostly synthetic. Confirm the additive-paperwork allowlist against Socrata API docs or a wider real-data sample. Sentinel behavior (treat unknown as additive + alert) is the safety net.
-- [ ] **News source `display_name` column (Item 4).** Confirm whether `news_sources.display_name` exists or if we need to add it / use the slug.
-- [ ] **CoStar / Pipedream stories column names (Item 6).** Confirm against a real workbook.
-- [ ] **Relationship picker integration (Item 5).** The existing `project_relationships` types + UI from C.f handle the create-new-and-link flow; confirm the picker is reusable in the discovery context.
+- [x] **LADBS allowlist completeness (Item 1).** Production has only 36 LADBS evidence rows today, mostly synthetic. Final v1 allowlist (combined from Socrata API docs + LADBS terminology + fail-additive sentinel for unknowns):
+  - **Additive (no regression candidate):** `Issued`, `Permit Finaled`, `Ready to Issue`, `Plan Check Submitted`, `Plans Approved`, `Pending Inspection`, `CofO Issued`, `CofO Pending`, empty/None
+  - **Regression signals (DO emit candidate):** `Expired`, `Cancelled`, `Void`, `Revoked`, `Withdrawn`, `Plan Check Cancelled`, `Permit Cancelled`
+  - **Sentinel:** unknown `status_desc` → treat as additive + log a `system_alert` (key `ladbs_unknown_permit_status`, scope `{status_desc: <value>}`) once per unique value per day so operators can extend the list as new values appear.
+- [x] **News source `display_name` column (Item 4).** Not needed — `news_sources.name` already holds display-friendly values: `"Urbanize LA"`, `"L.A. Business Journal"`, `"Paste-a-link"`. Use `NewsSource.name` directly. Drop the proposed `display_name` migration from Item 4 scope.
+- [x] **CoStar / Pipedream stories column names (Item 6).** Confirmed against real workbooks:
+  - **CoStar (both MF and Commercial exports):** column header `Number Of Stories`. Map this directly to the new Project field.
+  - **Pipedream DataStorage sheet:** column `Elevation` at col 48 (header row is row 3, not row 1). **Important naming insight:** Pipedream researchers' mental model already calls this field "Elevation" — the user's terminology yesterday ("stories/elevation") was matching the existing Pipedream column. We will name the canonical Project field `elevation` (integer, number of stories) to match researcher mental model rather than `building_height_stories`. Add a comment in the model to clarify "building height in stories, not ground elevation." Drop `building_height_feet` from scope — not in either source, not used by researchers, no need to add a field that nobody populates.
+- [x] **Relationship picker integration (Item 5).** Located in `app/(app)/pipeline/[projectId]/relationship-picker.tsx`. The component uses `RELATIONSHIP_OPTIONS` (5 types — phase, master_plan, counterpart, duplicate, supersedes — exactly what Item 5 needs) and `useActionState` hooks bound to project-detail-specific server actions in `./actions`. **Not directly reusable as-is** — actions are scoped to "I have a project, add a relationship to another existing project." For the dedup-table create-and-link flow we need a different action shape that creates BOTH a new Project AND a relationship in one transaction. **Plan:** extract the inner UI atoms (`RelationshipTypeSelect`, `ProjectSearchDropdown`) into shared components under `components/relationships/`, then write a new wrapper in the dedup-table that uses those atoms with a new action bound to `POST /review/items/{item_id}/create-and-link`. Estimated ~2-3 extra hours for the extraction; small addition to Item 5 effort.
 
 ---
 
