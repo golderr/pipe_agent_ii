@@ -27,6 +27,18 @@ def get_engine() -> Engine:
         echo=settings.sql_echo,
         future=True,
         pool_pre_ping=True,
+        # Supabase pooler closes long-idle SSL sessions silently, which surfaces
+        # as `consuming input failed: SSL error: ssl/tls alert bad record mac`
+        # mid-query on the next operation. TCP keepalives keep stateful
+        # intermediaries from declaring the connection dead while the agent
+        # loop is waiting on an Anthropic response. libpq parameter names per
+        # https://www.postgresql.org/docs/current/libpq-connect.html.
+        connect_args={
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
     )
     _configure_postgres_session_timeouts(engine)
     return engine
