@@ -1089,6 +1089,54 @@ def test_regression_candidate_payload_includes_permit_descriptor_fields() -> Non
     assert candidate["status_desc"] == "Cancelled"
 
 
+def test_regression_candidate_payload_uses_pcis_permit_number() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={
+            "status_desc": "Cancelled",
+            "permit_type": "Bldg-New",
+            "pcis_permit": "24010-10000-00001",
+        },
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    candidates = resolution.metadata.get("regression_candidates", [])
+    assert len(candidates) == 1
+    assert candidates[0]["permit_number"] == "24010-10000-00001"
+
+
+def test_regression_candidate_payload_falls_back_to_source_record_id() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={
+            "status_desc": "Cancelled",
+            "permit_type": "Bldg-New",
+        },
+    )
+    permit_evidence.source_record_id = "source-record-24010"
+
+    resolution = resolve_status([permit_evidence], project)
+
+    candidates = resolution.metadata.get("regression_candidates", [])
+    assert len(candidates) == 1
+    assert candidates[0]["permit_number"] == "source-record-24010"
+
+
 def test_regression_candidate_payload_omits_descriptor_fields_for_non_ladbs() -> None:
     """News evidence shouldn't get LADBS descriptor fields injected into its
     candidate payload."""

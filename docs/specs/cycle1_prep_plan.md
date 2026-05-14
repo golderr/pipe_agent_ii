@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13 (Phase 1 hardening Item beta ready for review; items 1, 4, 2 shipped)
+> **Last updated:** 2026-05-13 (Phase 1 hardening Item gamma ready for review; items 1, 4, 2 shipped)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -140,6 +140,14 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **Commit + push.**
 
 **Acceptance:** Tests pass; a fresh review item generated under the new code shows a specific source descriptor in its `human_summary`; agent prompts deployed; smoke confirms agent outputs specific descriptors.
+
+**Phase 1 hardening sub-tasks:**
+
+- [x] **Item gamma: LADBS permit-number lookup fallback.** Regression-candidate descriptors and review-card LADBS snippets now prefer Socrata's `pcis_permit`, then existing permit-number aliases, then `evidence.source_record_id` so both Item 4 narratives and Item 2 source-field cards have a permit number whenever the evidence row carries one.
+
+**Lessons learned:**
+
+- Source descriptor and snippet helpers need to follow source-native raw column names first. Canonical aliases are useful fallbacks, but production LADBS fixtures use `pcis_permit`.
 
 ---
 

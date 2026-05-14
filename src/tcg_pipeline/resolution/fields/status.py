@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Any
 
 from tcg_pipeline.db.models import Evidence, PipelineStatus, Project, StatusConfidence
+from tcg_pipeline.permit_numbers import ladbs_permit_number_from_evidence
 from tcg_pipeline.resolution.fields import (
     FieldObservation,
     FieldResolution,
@@ -346,7 +347,7 @@ def _source_descriptor_fields(evidence: Evidence) -> dict[str, Any]:
     descriptor: dict[str, Any] = {}
     if evidence.source_type in {"ladbs_permit", "ladbs_permit_activity"}:
         permit_type = raw.get("permit_type")
-        permit_number = raw.get("permit_nbr") or raw.get("permit") or raw.get("permit_number")
+        permit_number = ladbs_permit_number_from_evidence(evidence)
         permit_subtype = raw.get("permit_sub_type")
         status_desc = raw.get("status_desc")
         if isinstance(permit_type, str):

@@ -333,6 +333,53 @@ def test_ladbs_permit_snippet_surfaces_source_fields() -> None:
     assert snippet.source_fields["status_desc"] == "Issued"
 
 
+def test_ladbs_permit_snippet_prefers_pcis_permit_over_source_record_id() -> None:
+    evidence = _evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        source_record_id="source-record-id",
+        evidence_date=date(2026, 3, 15),
+        raw_data={
+            "pcis_permit": "24010-10000-00001",
+            "permit_nbr": "permit-nbr-value",
+            "permit_type": "Bldg-New",
+            "status_desc": "Issued",
+        },
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    snippet = render_snippet(evidence, field_name="pipeline_status")
+
+    assert "PCIS 24010-10000-00001" in snippet.summary
+    assert "Permit PCIS 24010-10000-00001" in snippet.detail
+    assert snippet.source_fields["permit_number"] == "24010-10000-00001"
+
+
+def test_ladbs_permit_snippet_skips_blank_permit_number_values() -> None:
+    evidence = _evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        source_record_id="source-record-id",
+        evidence_date=date(2026, 3, 15),
+        raw_data={
+            "pcis_permit": "  ",
+            "permit_nbr": "permit-nbr-value",
+            "permit": "permit-value",
+            "permit_type": "Bldg-New",
+            "status_desc": "Issued",
+        },
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+    )
+
+    snippet = render_snippet(evidence, field_name="pipeline_status")
+
+    assert snippet.source_fields["permit_number"] == "permit-nbr-value"
+
+
 def test_costar_snippet_surfaces_source_fields() -> None:
     """UX.card-source-detail: CoStar snippets carry costar_property_id and
     upload_date in source_fields."""

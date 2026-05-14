@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from tcg_pipeline.db.evidence import serialize_json
 from tcg_pipeline.db.models import Evidence
+from tcg_pipeline.permit_numbers import ladbs_permit_number_from_evidence
 
 
 class SnippetFields(BaseModel):
@@ -56,7 +57,7 @@ def render_ladbs_permit_snippet(
     evidence: Evidence,
     field_name: str | None = None,
 ) -> SnippetPayload:
-    record_id = evidence.source_record_id or _text(_raw_value(evidence, "pcis_permit")) or "unknown"
+    record_id = ladbs_permit_number_from_evidence(evidence) or "unknown"
     evidence_type = _text(_extracted_value(evidence, "status_evidence_type"))
     issue_date = _text(
         _first_extracted_value(evidence, "permit_issue_date", "status_evidence_date")
