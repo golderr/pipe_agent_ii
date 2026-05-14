@@ -218,17 +218,22 @@ def resolve_project(
     for field_name, resolution in field_resolutions.items():
         current_value = getattr(project, field_name)
         if normalize_comparable(current_value) == normalize_comparable(resolution.value):
-            if (
-                write_resolution_log
-                and field_name == "pipeline_status"
-                and _log_preserved_status_regression(
+            if write_resolution_log and field_name == "pipeline_status":
+                logged_status_regression = _log_preserved_status_regression(
                     session,
                     project=project,
                     resolution=resolution,
                     current_value=current_value,
                 )
-            ):
-                log_entries_created += 1
+                if not logged_status_regression:
+                    logged_status_regression = _log_suppressed_status_regression(
+                        session,
+                        project=project,
+                        resolution=resolution,
+                        current_value=current_value,
+                    )
+                if logged_status_regression:
+                    log_entries_created += 1
             continue
 
         changed_fields.append(field_name)
@@ -345,6 +350,31 @@ def _log_preserved_status_regression(
                 resolution.metadata.get("regression_audit_rule_applied")
                 or resolution.rule_applied
             ),
+            confidence=resolution.confidence,
+            metadata_json=_json_safe_metadata(resolution.metadata),
+        )
+    )
+    return True
+
+
+def _log_suppressed_status_regression(
+    session: Session,
+    *,
+    project: Project,
+    resolution: FieldResolution,
+    current_value: Any,
+) -> bool:
+    suppressed = resolution.metadata.get("suppressed_regression_candidates")
+    if not isinstance(suppressed, list) or not suppressed:
+        return False
+    session.add(
+        ResolutionLog(
+            project_id=project.id,
+            field="pipeline_status",
+            current_value=normalize_comparable(current_value),
+            resolved_value=normalize_comparable(resolution.value),
+            evidence_ids=_regression_candidate_evidence_ids(suppressed) or None,
+            rule_applied="regression_candidate_suppressed",
             confidence=resolution.confidence,
             metadata_json=_json_safe_metadata(resolution.metadata),
         )

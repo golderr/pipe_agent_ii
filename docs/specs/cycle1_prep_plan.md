@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13 (Phase 1 complete — items 1, 4, 2 shipped)
+> **Last updated:** 2026-05-13 (Phase 1 hardening Item alpha ready for review; items 1, 4, 2 shipped)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -93,6 +93,14 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **Commit + push.** Single focused commit. CI confirms test suite green.
 
 **Acceptance:** Tests pass, the known-benign synthetic regression card stops being emitted, an unknown `status_desc` produces a debug alert without blocking the resolve pass.
+
+**Phase 1 hardening sub-tasks:**
+
+- [x] **Item alpha: persist suppressed-only regression audit trail.** When LADBS additive-paperwork suppression is the only status-regression outcome, `resolve_project` now writes a `resolution_log` row with `rule_applied="regression_candidate_suppressed"` and the suppressed candidate metadata.
+
+**Lessons learned:**
+
+- Suppressed candidates are still audit decisions. If no active regression candidate exists, the engine needs a dedicated suppressed-only log path so queue suppression does not erase traceability.
 
 ---
 
