@@ -59,6 +59,11 @@ import {
   type ReviewedDecisionFilters,
   type ReviewedDecisionRow
 } from "@/lib/review/reviewed";
+import {
+  buildDiscoveryCards,
+  isDiscoveryItem,
+  type DiscoveryCard
+} from "@/lib/review/discovery";
 import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type {
@@ -70,12 +75,15 @@ import type {
 } from "@/lib/review/types";
 
 type ReviewQueueClientProps = {
-  activeTab: "queue" | "reviewed";
+  activeTab: ReviewTab;
   data: ReviewQueueData;
   jurisdictionId: string | null;
+  initialDiscoveryCardId: string | null;
   currentUserId: string;
   currentUserEmail: string | null;
 };
+
+type ReviewTab = "queue" | "discovery" | "reviewed";
 
 type ReviewGroup = {
   key: string;
@@ -144,6 +152,7 @@ export function ReviewQueueClient({
   activeTab,
   data,
   jurisdictionId,
+  initialDiscoveryCardId,
   currentUserId,
   currentUserEmail
 }: ReviewQueueClientProps) {
@@ -157,6 +166,9 @@ export function ReviewQueueClient({
   const [reviewedSort, setReviewedSort] = useState<ReviewedDecisionFilters["sort"]>("date_desc");
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const [focusedItemId, setFocusedItemId] = useState<string | null>(null);
+  const [focusedDiscoveryCardId, setFocusedDiscoveryCardId] = useState<string | null>(
+    initialDiscoveryCardId
+  );
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner>(null);
   const [isPending, startTransition] = useTransition();
@@ -178,6 +190,19 @@ export function ReviewQueueClient({
   const selectedGroup = groups.find((group) => group.key === selectedGroupKey) ?? groups[0] ?? null;
   const focusedItem =
     selectedGroup?.items.find((item) => item.id === focusedItemId) ?? selectedGroup?.items[0] ?? null;
+  const discoveryCards = useMemo(
+    () =>
+      buildDiscoveryCards(
+        data.items.filter(
+          (item) =>
+            isDiscoveryItem(item) &&
+            itemMatchesFilters(item, data, search, priorityFilter, sourceFilter)
+        )
+      ),
+    [data, priorityFilter, search, sourceFilter]
+  );
+  const focusedDiscoveryCard =
+    discoveryCards.find((card) => card.key === focusedDiscoveryCardId) ?? discoveryCards[0] ?? null;
   const reviewedRows = useMemo(
     () => buildReviewedRows(data.reviewedItems, data.projects),
     [data.projects, data.reviewedItems]
@@ -334,6 +359,9 @@ export function ReviewQueueClient({
         commitQueue();
         return;
       }
+      if (activeTab !== "queue") {
+        return;
+      }
       if (!focusedItem || isPending) {
         return;
       }
@@ -370,7 +398,7 @@ export function ReviewQueueClient({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [commitQueue, focusedItem, isPending, selectedGroup, stageItem]);
+  }, [activeTab, commitQueue, focusedItem, isPending, selectedGroup, stageItem]);
 
   return (
     <main className="pb-24">
@@ -381,6 +409,8 @@ export function ReviewQueueClient({
             <h1 className="mt-1 text-xl font-semibold tracking-normal text-slate-950">
               {activeTab === "reviewed"
                 ? `${filteredReviewedRows.length.toLocaleString()} reviewed decisions`
+                : activeTab === "discovery"
+                  ? `${discoveryCards.length.toLocaleString()} discovery items`
                 : `${filteredItemCount.toLocaleString()} active items`}
             </h1>
           </div>
@@ -396,6 +426,11 @@ export function ReviewQueueClient({
             active={activeTab === "queue"}
             href={reviewPageHref("queue", jurisdictionId)}
             label="Queue"
+          />
+          <ReviewTabLink
+            active={activeTab === "discovery"}
+            href={reviewPageHref("discovery", jurisdictionId)}
+            label="Discovery"
           />
           <ReviewTabLink
             active={activeTab === "reviewed"}
@@ -516,6 +551,14 @@ export function ReviewQueueClient({
 
       {activeTab === "reviewed" ? (
         <ReviewedDecisionsView rows={filteredReviewedRows} jurisdictionId={jurisdictionId} />
+      ) : activeTab === "discovery" ? (
+        <DiscoveryView
+          cards={discoveryCards}
+          selectedCardKey={focusedDiscoveryCard?.key ?? null}
+          sourceRuns={data.sourceRuns}
+          jurisdictionId={jurisdictionId}
+          onSelect={setFocusedDiscoveryCardId}
+        />
       ) : groups.length === 0 ? (
         <div className="px-5 py-8">
           <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-600">
@@ -720,6 +763,203 @@ function ReviewedDecisionListRow({
       </div>
     </article>
   );
+}
+
+function DiscoveryView({
+  cards,
+  selectedCardKey,
+  sourceRuns,
+  jurisdictionId,
+  onSelect
+}: {
+  cards: DiscoveryCard[];
+  selectedCardKey: string | null;
+  sourceRuns: Record<string, ReviewSourceRunSummary>;
+  jurisdictionId: string | null;
+  onSelect: (cardKey: string) => void;
+}) {
+  const selectedCard = cards.find((card) => card.key === selectedCardKey) ?? cards[0] ?? null;
+  if (!cards.length) {
+    return (
+      <div className="px-5 py-8">
+        <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-600">
+          No discovery items match the current filters.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid min-h-[calc(100dvh-15rem)] xl:grid-cols-[21rem_minmax(0,1fr)]">
+      <aside className="border-b border-slate-200 bg-white xl:border-b-0 xl:border-r">
+        <div className="max-h-[calc(100dvh-14rem)] overflow-auto p-3">
+          <div className="mb-1 flex items-center justify-between px-1">
+            <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">
+              Discovery
+            </p>
+            <p className="text-xs text-slate-400">{cards.length}</p>
+          </div>
+          <div className="space-y-1">
+            {cards.map((card) => (
+              <button
+                key={card.key}
+                type="button"
+                onClick={() => onSelect(card.key)}
+                className={cn(
+                  "w-full rounded-md border px-2 py-2 text-left text-sm transition-colors",
+                  selectedCard?.key === card.key
+                    ? "border-teal-200 bg-teal-50"
+                    : "border-transparent hover:border-slate-200 hover:bg-slate-50"
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-slate-950">{card.title}</p>
+                    <p className="truncate text-xs text-slate-500">{card.subtitle}</p>
+                  </div>
+                  <span className={priorityBadgeClass(card.item.priority)}>
+                    {card.potentialMatchCount}
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  {humanize(card.item.itemType)} - {newCandidateProbabilityLabel(card)}
+                </p>
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
+      <section className="min-w-0 px-5 py-4">
+        {selectedCard ? (
+          <DiscoveryCardShell
+            card={selectedCard}
+            sourceRun={
+              selectedCard.item.sourceRunId ? sourceRuns[selectedCard.item.sourceRunId] : undefined
+            }
+            jurisdictionId={jurisdictionId}
+          />
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function DiscoveryCardShell({
+  card,
+  sourceRun,
+  jurisdictionId
+}: {
+  card: DiscoveryCard;
+  sourceRun: ReviewSourceRunSummary | undefined;
+  jurisdictionId: string | null;
+}) {
+  const subject = card.subject;
+  return (
+    <article className="rounded-md border border-slate-200 bg-white">
+      <div className="border-b border-slate-200 px-4 py-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="truncate text-lg font-semibold text-slate-950">{card.title}</h2>
+              <span className={priorityBadgeClass(card.item.priority)}>
+                {humanize(card.item.priority)}
+              </span>
+              <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600">
+                {humanize(card.item.itemType)}
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-slate-500">{card.subtitle}</p>
+            <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+              <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                Source: {sourceSummaryForItem(card.item, sourceRun)}
+              </span>
+              {sourceRun ? (
+                <span className="rounded border border-slate-200 px-2 py-1">
+                  {sourceRun.sourceName} - {formatDate(sourceRun.finishedAt ?? sourceRun.runTimestamp)}
+                </span>
+              ) : null}
+              {sourceTextForItem(card.item) ? (
+                <span className="rounded border border-slate-200 px-2 py-1">
+                  {sourceTextForItem(card.item)}
+                </span>
+              ) : null}
+              <NewsContextChips context={newsContextForItem(card.item)} />
+            </div>
+          </div>
+          <div className="grid min-w-44 grid-cols-2 gap-2 text-sm">
+            <DiscoveryMetric label="Matches" value={card.potentialMatchCount.toLocaleString()} />
+            <DiscoveryMetric
+              label="New %"
+              value={
+                card.newCandidateProbability !== null
+                  ? `${Math.round(card.newCandidateProbability * 100)}`
+                  : "-"
+              }
+            />
+          </div>
+        </div>
+      </div>
+      <div className="overflow-x-auto px-4 py-3">
+        <table className="w-full min-w-[58rem] table-fixed text-left text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 text-xs font-medium uppercase tracking-normal text-slate-500">
+              <th className="w-44 py-2 pr-3">Project</th>
+              <th className="w-64 py-2 pr-3">Address</th>
+              <th className="w-44 py-2 pr-3">Developer</th>
+              <th className="w-28 py-2 pr-3">Units</th>
+              <th className="w-32 py-2 pr-3">Product</th>
+              <th className="w-32 py-2 pr-3">Status</th>
+              <th className="w-24 py-2 pr-3">Stories</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-slate-100 align-top last:border-b-0">
+              <SubjectCell value={subject.projectName} />
+              <SubjectCell value={subject.canonicalAddress} />
+              <SubjectCell value={subject.developer} />
+              <SubjectCell value={subject.totalUnits} />
+              <SubjectCell value={subject.productType ?? subject.ageRestriction} />
+              <SubjectCell value={subject.pipelineStatus} />
+              <SubjectCell value={subject.stories} />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 text-sm">
+        <div className="text-slate-600">
+          Potential matches: {card.potentialMatchCount.toLocaleString()} -{" "}
+          {newCandidateProbabilityLabel(card)}
+        </div>
+        <Link
+          className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
+          href={reviewItemHref(card.item.id, jurisdictionId)}
+        >
+          <ExternalLink className="size-3.5" aria-hidden="true" />
+          Detail
+        </Link>
+      </div>
+    </article>
+  );
+}
+
+function SubjectCell({ value }: { value: unknown }) {
+  return <td className="break-words py-3 pr-3 text-slate-800">{formatValue(value)}</td>;
+}
+
+function DiscoveryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className="text-lg font-semibold text-slate-950">{value}</p>
+    </div>
+  );
+}
+
+function newCandidateProbabilityLabel(card: DiscoveryCard) {
+  if (card.newCandidateProbability === null) {
+    return "New probability unavailable";
+  }
+  return `New probability ${Math.round(card.newCandidateProbability * 100)}%`;
 }
 
 function ProjectSection({
@@ -1686,10 +1926,10 @@ function reviewItemHref(itemId: string, jurisdictionId: string | null) {
   return query ? `/review/${itemId}?${query}` : `/review/${itemId}`;
 }
 
-function reviewPageHref(tab: "queue" | "reviewed", jurisdictionId: string | null) {
+function reviewPageHref(tab: ReviewTab, jurisdictionId: string | null) {
   const params = new URLSearchParams();
-  if (tab === "reviewed") {
-    params.set("tab", "reviewed");
+  if (tab !== "queue") {
+    params.set("tab", tab);
   }
   if (jurisdictionId) {
     params.set("jurisdiction_id", jurisdictionId);
@@ -1707,7 +1947,7 @@ function hasActiveSearchOrFilter({
   reviewedOutcomeFilter,
   reviewedDeciderFilter
 }: {
-  activeTab: "queue" | "reviewed";
+  activeTab: ReviewTab;
   search: string;
   priorityFilter: string;
   sourceFilter: SourceFilter;

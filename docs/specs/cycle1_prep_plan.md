@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-14 (Item 5B ready for review; candidate API + preview endpoints)
+> **Last updated:** 2026-05-14 (Item 5C ready for review; Discovery tab shell)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -334,6 +334,8 @@ Phase 4 — Dedup table (days 10-19)
 - **Match-with-deltas component reuse:** reuse the Item 3 `<ThreeFieldEditor>` presentation, but generalize its prop boundary to a plain value-change UI model (`fieldName`, `fieldLabel`, `fieldType`, `currentValue`, `evidenceValue`, `defaultResultValue`, `constraints`). Real review items and project-vs-project delta rows both adapt into that shape; match deltas do not pretend to be persisted review items.
 - **Match-with-deltas API body:** keep v1 narrow: `accept_deltas` is a list of field names, not per-delta edited values. Inline value editing happens on the subject row before Match/Create; post-match disagreements that are not accepted become normal value-change review items.
 - **Subject-row inline edit write path:** no direct PATCH endpoint in v1. Keep subject edits client-local and bundle them into Match/Create requests as `edits: {...}` so source-reference correction and match/create decision apply atomically. This avoids a window where candidate/reference state diverges from extracted source state before the reviewer commits an action.
+- **Card-focus URL state:** persist only `?tab=discovery` during normal navigation. Accept `?tab=discovery&card=<item_id>` for direct loads, but keep focus changes local so keyboard/table movement does not clutter browser history.
+- **Multi-reference articles:** render one Discovery card per review item/reference. This matches the queue's item-as-unit model and avoids article-level grouping special cases.
 
 **Reviewable sub-phases:**
 
@@ -416,10 +418,10 @@ Phase 4 — Dedup table (days 10-19)
 - [x] `?layer=3` implies `include_layer3=true` as a convenience. The frontend can request the broader sweep with either explicit flag.
 
 ### 8.5 Frontend Discovery tab
-- [ ] **Tab UI** on `/review` page. State persisted in URL query param (`?tab=discovery`).
-- [ ] **List view** shows discovery items grouped by source (one card per article or per LADBS permit).
+- [x] **Tab UI** on `/review` page. State persisted in URL query param (`?tab=discovery`).
+- [x] **List view** shows discovery items grouped by review item/reference (one card per `new_candidate` / `possible_match` item).
 - [ ] **DedupCard component:**
-  - [ ] Header: source name (small), project name (if extracted), project address, `Potential matches: N` and `New candidate probability: X%` indicators
+  - [x] Header: source name (small), project name (if extracted), project address, `Potential matches: N` and `New candidate probability: X%` indicators
   - [ ] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`.
   - [ ] Candidate table below
   - [ ] **Confident empty state** when no candidates returned: render the API response's `searched` block as a paragraph (e.g., "No candidates found within 1km. Searched by APN, CoStar Property ID, normalized address, name/address trigrams (threshold from `searched.layer_2.trigram_min_score`), and canonical developer match. None passed Layer 1 or Layer 2 thresholds."). Do not render a bare empty table — reviewers second-guess silent failure.
@@ -466,6 +468,7 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] Backend action endpoints: `relationship_type` validator rejects `duplicate` for create-and-link
 - [x] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
 - [ ] Frontend: component tests for DedupCard / SubjectRow / CandidateTable / MapPopup
+- [x] Frontend helper tests for Discovery item filtering, one-card-per-review-item grouping, and subject normalization
 - [ ] Frontend: per-signal chip renders green-when-contributed / gray-when-searched / hidden-when-absent
 - [ ] Frontend: row color band agrees with match-likelihood band thresholds
 - [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
@@ -486,6 +489,10 @@ Phase 4 — Dedup table (days 10-19)
 **5B lessons learned:**
 - Keep subject/candidate delta computation shared between preview and write paths. The preview emits only field names today, but the same helper will feed the Match-with-deltas action in 5E.
 - Preview blast-radius counts should follow the reviewer's decision scope: current discovery card plus same-reference open/staged sibling cards, not every open item on the matched project.
+
+**5C lessons learned:**
+- Keep Discovery focus local by default. Deep links can seed the focused card with `card=<item_id>`, but normal focus movement should not write browser history entries.
+- One card per review item/reference keeps the shell aligned with queue semantics; article-level grouping can wait until real reviewer feedback shows the density tradeoff is worth it.
 
 **Deferred follow-ons:**
 

@@ -14,13 +14,17 @@ function firstQueryValue(value: string | string[] | undefined) {
 }
 
 function normalizeTab(value: string | undefined) {
-  return value === "reviewed" ? "reviewed" : "queue";
+  if (value === "discovery" || value === "reviewed") {
+    return value;
+  }
+  return "queue";
 }
 
 export default async function ReviewPage({ searchParams }: ReviewPageProps) {
   const query = searchParams ? await searchParams : {};
   const jurisdictionId = firstQueryValue(query.jurisdiction_id);
   const activeTab = normalizeTab(firstQueryValue(query.tab));
+  const discoveryCardId = firstQueryValue(query.card);
   const supabase = await createSupabaseServerClient();
   const {
     data: { user }
@@ -46,6 +50,7 @@ export default async function ReviewPage({ searchParams }: ReviewPageProps) {
       activeTab={activeTab}
       data={result.data}
       jurisdictionId={jurisdictionId ?? null}
+      initialDiscoveryCardId={discoveryCardId ?? null}
       currentUserId={user.id}
       currentUserEmail={user.email ?? null}
     />
