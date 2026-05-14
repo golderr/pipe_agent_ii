@@ -5,7 +5,7 @@ from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, object_session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -16,10 +16,20 @@ from tcg_pipeline.api.schemas import (
     ReviewDecisionStageRequest,
     ReviewDecisionStageResponse,
     ReviewDecisionSummary,
+    ReviewDedupCandidatesResponse,
     ReviewEvidenceSummary,
+    ReviewMatchPreviewResponse,
     ReviewQueueItemResponse,
 )
-from tcg_pipeline.db.models import Evidence, Priority, Project, ReviewDecision, ReviewItem
+from tcg_pipeline.db.models import (
+    Evidence,
+    NewsProjectReference,
+    Priority,
+    Project,
+    ReviewDecision,
+    ReviewItem,
+    ReviewItemType,
+)
 from tcg_pipeline.db.review_workflow import (
     REVIEW_DECISION_STATE_COMMITTED,
     REVIEW_DECISION_STATE_STAGED,
@@ -36,6 +46,12 @@ from tcg_pipeline.db.review_workflow import (
 from tcg_pipeline.db.review_workflow import (
     unstage_review_decision as unstage_review_decision_value,
 )
+from tcg_pipeline.matching.candidates import (
+    DedupSubject,
+    compute_subject_candidate_deltas,
+    find_dedup_candidates,
+    subject_from_news_reference,
+)
 from tcg_pipeline.review.contradictions import values_contradict
 from tcg_pipeline.review.decision_cards import (
     evidence_ids_for_payload,
@@ -49,6 +65,10 @@ from tcg_pipeline.review.value_changes import value_change_payload_for_review_it
 router = APIRouter(prefix="/review", tags=["review"])
 AUTH_USER = Depends(require_user)
 DB_SESSION = Depends(get_db_session)
+DISCOVERY_ITEM_TYPES = {
+    ReviewItemType.NEW_CANDIDATE.value,
+    ReviewItemType.POSSIBLE_MATCH.value,
+}
 
 
 @router.get("/queue")
@@ -97,6 +117,67 @@ def get_review_item(
         raise HTTPException(status_code=404, detail="Review item not found.")
     evidence_by_id = _evidence_by_id_for_items(session, [review_item])
     return _serialize_review_item(review_item, evidence_by_id=evidence_by_id)
+
+
+@router.get("/queue/{item_id}/candidates")
+def get_review_item_candidates(
+    item_id: uuid.UUID,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+    layer: int | None = Query(default=None, ge=1, le=3),
+    include_layer3: bool = False,
+    limit: int = Query(default=25, ge=1, le=100),
+) -> ReviewDedupCandidatesResponse:
+    review_item = _load_review_item_for_discovery(session, item_id)
+    subject, _reference = _dedup_subject_for_review_item(session, review_item)
+    result = find_dedup_candidates(
+        session,
+        subject,
+        include_layer3=include_layer3 or layer == 3,
+        limit=limit,
+    )
+    payload = result.as_payload()
+    if layer is not None:
+        payload["candidates"] = [
+            candidate
+            for candidate in payload["candidates"]
+            if int(candidate.get("match_layer") or 0) <= layer
+        ]
+        payload["new_candidate_probability"] = _new_candidate_probability_for_payload(
+            payload["candidates"]
+        )
+    return ReviewDedupCandidatesResponse(**payload)
+
+
+@router.get("/items/{item_id}/match-preview")
+def get_review_item_match_preview(
+    item_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ReviewMatchPreviewResponse:
+    review_item = _load_review_item_for_discovery(session, item_id)
+    candidate = session.get(Project, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate project not found.")
+
+    subject, reference = _dedup_subject_for_review_item(session, review_item)
+    deltas = compute_subject_candidate_deltas(subject, candidate)
+    review_items_to_close = (
+        _same_reference_open_review_item_count(session, reference.id)
+        if reference is not None
+        else 1
+    )
+    evidence_rows_to_reattach = (
+        _evidence_rows_to_reattach_count(session, reference.id, candidate.id)
+        if reference is not None
+        else 0
+    )
+    return ReviewMatchPreviewResponse(
+        review_items_to_close=review_items_to_close,
+        evidence_rows_to_reattach=evidence_rows_to_reattach,
+        value_change_items_that_would_be_queued=[delta.field_name for delta in deltas],
+    )
 
 
 @router.post("/{item_id}/decide")
@@ -197,6 +278,211 @@ def _serialize_stage_result(result) -> ReviewDecisionStageResponse:
         staged_by_email=result.staged_by_email,
         revised=result.revised,
     )
+
+
+def _load_review_item_for_discovery(session: Session, item_id: uuid.UUID) -> ReviewItem:
+    review_item = session.get(ReviewItem, item_id)
+    if review_item is None:
+        raise HTTPException(status_code=404, detail="Review item not found.")
+    item_type = getattr(review_item.item_type, "value", review_item.item_type)
+    if str(item_type) not in DISCOVERY_ITEM_TYPES:
+        raise HTTPException(status_code=400, detail="Review item is not a discovery item.")
+    return review_item
+
+
+def _dedup_subject_for_review_item(
+    session: Session,
+    review_item: ReviewItem,
+) -> tuple[DedupSubject, NewsProjectReference | None]:
+    reference = _news_reference_for_review_item(session, review_item)
+    if reference is not None:
+        return subject_from_news_reference(reference.article, reference), reference
+    return _fallback_subject_from_payload(review_item), None
+
+
+def _news_reference_for_review_item(
+    session: Session,
+    review_item: ReviewItem,
+) -> NewsProjectReference | None:
+    payload = review_item.payload if isinstance(review_item.payload, dict) else {}
+    for reference_id in _reference_ids_from_payload(payload):
+        reference = session.get(NewsProjectReference, reference_id)
+        if reference is not None:
+            return reference
+    return None
+
+
+def _reference_ids_from_payload(payload: dict[str, Any]) -> list[uuid.UUID]:
+    raw_values = [
+        payload.get("source_record_id"),
+        payload.get("reference_id"),
+    ]
+    news_context = payload.get("news_context")
+    if isinstance(news_context, dict):
+        raw_values.append(news_context.get("reference_id"))
+    reference_ids: list[uuid.UUID] = []
+    for raw_value in raw_values:
+        try:
+            reference_ids.append(uuid.UUID(str(raw_value)))
+        except (TypeError, ValueError):
+            continue
+    return reference_ids
+
+
+def _fallback_subject_from_payload(review_item: ReviewItem) -> DedupSubject:
+    payload = review_item.payload if isinstance(review_item.payload, dict) else {}
+    mapped_fields = payload.get("mapped_fields")
+    mapped_fields = mapped_fields if isinstance(mapped_fields, dict) else {}
+    identifiers = _identifier_mapping(
+        payload.get("identifiers") or mapped_fields.get("identifiers")
+    )
+    subject = DedupSubject(
+        project_name=_first_text(
+            mapped_fields.get("project_name"),
+            mapped_fields.get("name"),
+            payload.get("project_name"),
+        ),
+        canonical_address=_first_text(
+            payload.get("canonical_address"),
+            mapped_fields.get("canonical_address"),
+            mapped_fields.get("address"),
+        ),
+        developer=_first_text(mapped_fields.get("developer"), payload.get("developer")),
+        total_units=_first_int(mapped_fields.get("total_units"), mapped_fields.get("units_total")),
+        market_rate_units=_first_int(mapped_fields.get("market_rate_units")),
+        affordable_units=_first_int(mapped_fields.get("affordable_units")),
+        workforce_units=_first_int(mapped_fields.get("workforce_units")),
+        product_type=_first_text(mapped_fields.get("product_type")),
+        age_restriction=_first_text(mapped_fields.get("age_restriction")),
+        pipeline_status=_first_text(
+            mapped_fields.get("pipeline_status"),
+            mapped_fields.get("status"),
+        ),
+        building_height_stories=_first_int(
+            mapped_fields.get("stories"),
+            mapped_fields.get("building_height_stories"),
+        ),
+        lat=_first_float(mapped_fields.get("lat"), payload.get("lat")),
+        lng=_first_float(mapped_fields.get("lng"), payload.get("lng")),
+        market=_first_text(
+            getattr(review_item.source_run, "market", None),
+            payload.get("market"),
+        ),
+        jurisdiction_id=getattr(review_item.source_run, "jurisdiction_id", None),
+        identifiers=identifiers,
+    )
+    if not _subject_has_search_signal(subject):
+        raise HTTPException(status_code=400, detail="Review item has no dedup subject fields.")
+    return subject
+
+
+def _subject_has_search_signal(subject: DedupSubject) -> bool:
+    return any(
+        (
+            subject.project_name,
+            subject.canonical_address,
+            subject.developer,
+            subject.total_units is not None,
+            subject.lat is not None and subject.lng is not None,
+            any(subject.identifiers.values()),
+        )
+    )
+
+
+def _same_reference_open_review_item_count(
+    session: Session,
+    reference_id: uuid.UUID,
+) -> int:
+    reference_text = str(reference_id)
+    return int(
+        session.execute(
+            select(func.count(ReviewItem.id)).where(
+                ReviewItem.state.in_([REVIEW_ITEM_STATE_OPEN, REVIEW_ITEM_STATE_STAGED]),
+                or_(
+                    ReviewItem.payload["source_record_id"].astext == reference_text,
+                    ReviewItem.payload["reference_id"].astext == reference_text,
+                    ReviewItem.payload["news_context"]["reference_id"].astext == reference_text,
+                ),
+            )
+        ).scalar_one()
+    )
+
+
+def _evidence_rows_to_reattach_count(
+    session: Session,
+    reference_id: uuid.UUID,
+    candidate_project_id: uuid.UUID,
+) -> int:
+    return int(
+        session.execute(
+            select(func.count(Evidence.id)).where(
+                Evidence.source_type == "news_article",
+                Evidence.source_record_id == str(reference_id),
+                Evidence.superseded_at.is_(None),
+                or_(Evidence.project_id.is_(None), Evidence.project_id != candidate_project_id),
+            )
+        ).scalar_one()
+    )
+
+
+def _new_candidate_probability_for_payload(candidates: list[dict[str, Any]]) -> float:
+    if not candidates:
+        return 1.0
+    return round(
+        max(
+            0.0,
+            min(
+                1.0,
+                1.0
+                - max(float(candidate.get("match_likelihood") or 0.0) for candidate in candidates),
+            ),
+        ),
+        4,
+    )
+
+
+def _identifier_mapping(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for identifier_type, raw_values in value.items():
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        cleaned = [str(item).strip() for item in values if str(item).strip()]
+        if cleaned:
+            result[str(identifier_type)] = sorted(set(cleaned))
+    return result
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _first_float(*values: Any) -> float | None:
+    for value in values:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _serialize_review_item(

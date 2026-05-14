@@ -28,6 +28,7 @@ from tcg_pipeline.matching.similarity import (
     product_type_match_score,
     weighted_match_likelihood,
 )
+from tcg_pipeline.review.field_metadata import field_metadata_for_review
 
 ACTIVE_REVIEW_STATES = ("open", "staged")
 DELETED_PROJECT_STATUSES = (
@@ -162,6 +163,26 @@ class DedupCandidateSearchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FieldDelta:
+    field_name: str
+    field_label: str
+    field_type: str
+    current_value: Any | None
+    evidence_value: Any | None
+    constraints: dict[str, Any]
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "field_name": self.field_name,
+            "field_label": self.field_label,
+            "field_type": self.field_type,
+            "current_value": self.current_value,
+            "evidence_value": self.evidence_value,
+            "constraints": dict(self.constraints),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _HardSignal:
     name: str
     detail: str
@@ -269,6 +290,35 @@ def find_dedup_candidates(
         layer_3_available=layer3_available,
         searched=searched,
     )
+
+
+def compute_subject_candidate_deltas(
+    subject: DedupSubject,
+    candidate: DedupCandidate | Project,
+) -> list[FieldDelta]:
+    deltas: list[FieldDelta] = []
+    for field_name, subject_value, candidate_value in _comparable_field_values(
+        subject,
+        candidate,
+    ):
+        normalized_subject = _delta_value(subject_value)
+        if normalized_subject is None:
+            continue
+        normalized_candidate = _delta_value(candidate_value)
+        if normalized_subject == normalized_candidate:
+            continue
+        metadata = field_metadata_for_review(field_name)
+        deltas.append(
+            FieldDelta(
+                field_name=field_name,
+                field_label=metadata.label,
+                field_type=metadata.field_type,
+                current_value=normalized_candidate,
+                evidence_value=normalized_subject,
+                constraints=dict(metadata.constraints),
+            )
+        )
+    return deltas
 
 
 def searched_metadata(subject: DedupSubject) -> dict[str, Any]:
@@ -700,6 +750,74 @@ def _enum_value(value: Any) -> str | None:
         return None
     enum_value = getattr(value, "value", None)
     return str(enum_value if enum_value is not None else value)
+
+
+def _comparable_field_values(
+    subject: DedupSubject,
+    candidate: DedupCandidate | Project,
+) -> list[tuple[str, Any, Any]]:
+    return [
+        ("project_name", subject.project_name, _candidate_value(candidate, "project_name")),
+        (
+            "canonical_address",
+            subject.canonical_address,
+            _candidate_value(candidate, "canonical_address"),
+        ),
+        ("developer", subject.developer, _candidate_value(candidate, "developer")),
+        ("total_units", subject.total_units, _candidate_value(candidate, "total_units")),
+        (
+            "market_rate_units",
+            subject.market_rate_units,
+            _candidate_value(candidate, "market_rate_units"),
+        ),
+        (
+            "affordable_units",
+            subject.affordable_units,
+            _candidate_value(candidate, "affordable_units"),
+        ),
+        (
+            "workforce_units",
+            subject.workforce_units,
+            _candidate_value(candidate, "workforce_units"),
+        ),
+        ("product_type", subject.product_type, _candidate_value(candidate, "product_type")),
+        (
+            "age_restriction",
+            subject.age_restriction,
+            _candidate_value(candidate, "age_restriction"),
+        ),
+        (
+            "pipeline_status",
+            subject.pipeline_status,
+            _candidate_value(candidate, "pipeline_status"),
+        ),
+        ("stories", subject.building_height_stories, _candidate_value(candidate, "stories")),
+    ]
+
+
+def _candidate_value(candidate: DedupCandidate | Project, field_name: str) -> Any:
+    if isinstance(candidate, DedupCandidate):
+        candidate_field_names = {
+            "total_units": "units_total",
+            "market_rate_units": "units_market",
+            "affordable_units": "units_affordable",
+            "workforce_units": "units_workforce",
+            "stories": "building_height_stories",
+        }
+        return getattr(candidate, candidate_field_names.get(field_name, field_name))
+    return getattr(candidate, field_name)
+
+
+def _delta_value(value: Any) -> Any:
+    if value is None:
+        return None
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        return enum_value
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return value
 
 
 def _clean_text(value: Any) -> str | None:

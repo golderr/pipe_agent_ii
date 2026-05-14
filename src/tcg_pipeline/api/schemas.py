@@ -227,6 +227,20 @@ class ReviewQueueItemResponse(BaseModel):
     evidence_summaries: list[ReviewEvidenceSummary] = []
 
 
+class ReviewDedupCandidatesResponse(BaseModel):
+    subject: dict[str, Any]
+    candidates: list[dict[str, Any]]
+    layer_3_available: bool
+    new_candidate_probability: float
+    searched: dict[str, Any]
+
+
+class ReviewMatchPreviewResponse(BaseModel):
+    review_items_to_close: int
+    evidence_rows_to_reattach: int
+    value_change_items_that_would_be_queued: list[str]
+
+
 class ReviewCommitRequest(BaseModel):
     jurisdiction_id: uuid.UUID | None = None
     dry_run: bool = False

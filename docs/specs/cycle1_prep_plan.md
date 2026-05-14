@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-14 (Item 5A ready for review; dedup-UI lessons wired into 5B–5F)
+> **Last updated:** 2026-05-14 (Item 5B ready for review; candidate API + preview endpoints)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -380,8 +380,8 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **Recency weighting is deferred** — see Deferred follow-ons below. The v1 formula does not include any recency component. Cycle 1 calibration will tell us whether stale candidates clutter the top of result lists; if so, add a small (~5%) weight on `Project.updated_at` or `last_evidence_at` as a follow-up.
 
 ### 8.4 API endpoint
-- [ ] `GET /review/queue/{item_id}/candidates?layer={1|2|3}&include_layer3=false`
-- [ ] Returns:
+- [x] `GET /review/queue/{item_id}/candidates?layer={1|2|3}&include_layer3=false`
+- [x] Returns:
   ```
   {
     subject: { /* fields from the review-item payload, editable on frontend */ },
@@ -412,7 +412,8 @@ Phase 4 — Dedup table (days 10-19)
   }
   ```
 - [x] **`searched` block contents.** Backend retrieval (`matching/candidates.py`) emits this descriptor on every response so the empty-state UI can explain itself. Shape: `layer_1` is the list of hard-signal probes tried (`apn`, `costar_property_id`, `address_exact`, `geo_250m`, `developer_plus_secondary`); `layer_2` records the trigram thresholds + weight set used; `layer_3` records whether broader sweep is reachable from this query. Each entry includes a human-readable label so the frontend renders without translation tables.
-- [ ] **`GET /review/items/{item_id}/match-preview?candidate_id=...`** — separate lightweight endpoint returning `{review_items_to_close: int, evidence_rows_to_reattach: int, value_change_items_that_would_be_queued: [field_name, ...]}` for the focused candidate row. Called on row focus/hover before the reviewer commits Match. Kept off the main `/candidates` response so we don't pay the preview cost for all 25 candidates on every card load.
+- [x] **`GET /review/items/{item_id}/match-preview?candidate_id=...`** — separate lightweight endpoint returning `{review_items_to_close: int, evidence_rows_to_reattach: int, value_change_items_that_would_be_queued: [field_name, ...]}` for the focused candidate row. Called on row focus/hover before the reviewer commits Match. Kept off the main `/candidates` response so we don't pay the preview cost for all 25 candidates on every card load. Preview count scope is the current item plus open/staged siblings tied to the same `news_project_references.id`; target-project-wide review items stay out of scope.
+- [x] `?layer=3` implies `include_layer3=true` as a convenience. The frontend can request the broader sweep with either explicit flag.
 
 ### 8.5 Frontend Discovery tab
 - [ ] **Tab UI** on `/review` page. State persisted in URL query param (`?tab=discovery`).
@@ -463,7 +464,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Backend retrieval: `searched` block emitted with the expected probes per layer; per-signal `contributed` flag agrees with score threshold
 - [ ] Backend action endpoints: each writes the correct rows + closes the item; Match-to-this `change_log` row contains "absorbed reference X from source S" framing
 - [ ] Backend action endpoints: `relationship_type` validator rejects `duplicate` for create-and-link
-- [ ] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
+- [x] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
 - [ ] Frontend: component tests for DedupCard / SubjectRow / CandidateTable / MapPopup
 - [ ] Frontend: per-signal chip renders green-when-contributed / gray-when-searched / hidden-when-absent
 - [ ] Frontend: row color band agrees with match-likelihood band thresholds
@@ -481,6 +482,10 @@ Phase 4 — Dedup table (days 10-19)
 **5A lessons learned:**
 - Shape retrieval metadata before the API layer: "why it matched" chips and confident empty states require per-signal scores, `contributed` flags, and a `searched` summary from the backend retrieval module.
 - Developer is a stronger cycle-1 dedup signal than project name; the initial weights now use developer 0.20 and name 0.10.
+
+**5B lessons learned:**
+- Keep subject/candidate delta computation shared between preview and write paths. The preview emits only field names today, but the same helper will feed the Match-with-deltas action in 5E.
+- Preview blast-radius counts should follow the reviewer's decision scope: current discovery card plus same-reference open/staged sibling cards, not every open item on the matched project.
 
 **Deferred follow-ons:**
 

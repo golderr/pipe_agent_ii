@@ -18,7 +18,11 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
 )
 from tcg_pipeline.ingesters._common import build_location
-from tcg_pipeline.matching.candidates import DedupSubject, find_dedup_candidates
+from tcg_pipeline.matching.candidates import (
+    DedupSubject,
+    compute_subject_candidate_deltas,
+    find_dedup_candidates,
+)
 
 
 def test_find_dedup_candidates_returns_layered_signal_payloads(
@@ -121,6 +125,36 @@ def test_find_dedup_candidates_returns_layered_signal_payloads(
     assert soft_candidate.match_signals["developer"].contributed is False
     assert result.as_payload()["searched"]["layer_2"]["weights"]["developer"] == 0.20
     assert result.new_candidate_probability < 1.0
+
+
+def test_compute_subject_candidate_deltas_returns_project_field_names() -> None:
+    subject = DedupSubject(
+        project_name="Fig Tower",
+        canonical_address="100 FIG ST LOS ANGELES CA",
+        developer="Atlas Development",
+        total_units=140,
+        building_height_stories=8,
+        product_type=ProductType.APARTMENT.value,
+    )
+    project = _project(
+        "100 FIG ST LOS ANGELES CA",
+        market=f"dedup_delta_{uuid.uuid4().hex[:8]}",
+        project_name="Fig Tower",
+        developer="Old Developer",
+        total_units=100,
+        stories=6,
+        product_type=ProductType.APARTMENT,
+    )
+
+    deltas = compute_subject_candidate_deltas(subject, project)
+
+    assert [delta.field_name for delta in deltas] == [
+        "developer",
+        "total_units",
+        "stories",
+    ]
+    assert deltas[1].current_value == 100
+    assert deltas[1].evidence_value == 140
 
 
 def test_find_dedup_candidates_empty_result_reports_searched_metadata(
