@@ -24,6 +24,7 @@ import {
 } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ThreeFieldEditor } from "@/components/review/three-field-editor";
 import {
   acceptDecisionValue,
   asString,
@@ -35,6 +36,7 @@ import {
   fieldNameForItem,
   formatDate,
   formatDateTime,
+  formatInputValue,
   formatValue,
   humanSummaryForItem,
   humanize,
@@ -42,10 +44,12 @@ import {
   isStagedByOther,
   newsContextForItem,
   proposedValueForItem,
+  resultDefaultValueForItem,
   sourceTextForItem,
   structuralDisagreementText,
   supportingEvidenceForItem,
   type NewsContext,
+  valueChangeForItem,
   warningForItem
 } from "@/lib/review/payload";
 import {
@@ -206,6 +210,7 @@ export function ReviewQueueClient({
       if (isStagedByOther(item, currentUserId, currentUserEmail)) {
         return;
       }
+      const nextFocus = nextFocusAfterItem(groups, item.id);
 
       let normalizedValue = decisionValue;
       if (decisionType === "accept_new") {
@@ -231,11 +236,15 @@ export function ReviewQueueClient({
           message: result.message
         });
         if (result.ok) {
+          if (nextFocus) {
+            setSelectedGroupKey(nextFocus.groupKey);
+            setFocusedItemId(nextFocus.itemId);
+          }
           router.refresh();
         }
       });
     },
-    [currentUserEmail, currentUserId, jurisdictionId, router]
+    [currentUserEmail, currentUserId, groups, jurisdictionId, router]
   );
 
   const unstageItem = useCallback(
@@ -337,11 +346,15 @@ export function ReviewQueueClient({
         event.preventDefault();
         setFocusedItemId(selectedGroup.items[Math.max(currentIndex - 1, 0)]?.id ?? null);
       }
-      if (event.key.toLowerCase() === "a" && canAcceptItem(focusedItem)) {
+      if (event.key.toLowerCase() === "c" && valueChangeForItem(focusedItem)) {
+        event.preventDefault();
+        stageItem(focusedItem, "custom", { value: resultDefaultValueForItem(focusedItem) });
+      }
+      if (event.key.toLowerCase() === "a" && canAcceptItem(focusedItem) && !valueChangeForItem(focusedItem)) {
         event.preventDefault();
         stageItem(focusedItem, "accept_new");
       }
-      if (event.key.toLowerCase() === "s") {
+      if (event.key.toLowerCase() === "s" && !valueChangeForItem(focusedItem)) {
         event.preventDefault();
         stageItem(focusedItem, "keep_old");
       }
@@ -933,6 +946,7 @@ function ReviewItemRow({
   const dissentingEvidence = dissentingEvidenceForItem(item);
   const newsContext = newsContextForItem(item);
   const sourceSummary = sourceSummaryForItem(item, sourceRun);
+  const valueChange = valueChangeForItem(item);
 
   return (
     <article
@@ -964,11 +978,22 @@ function ReviewItemRow({
             {humanSummaryForItem(item)}
           </p>
 
-          <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
-            <ValueBlock label="Current" value={currentValueForItem(item)} />
-            <ArrowRight className="hidden size-4 text-slate-300 md:block" aria-hidden="true" />
-            <ValueBlock label="Proposed" value={proposedValueForItem(item)} />
-          </div>
+          {valueChange ? (
+            <div className="mt-3">
+              <ThreeFieldEditor
+                valueChange={valueChange}
+                resultValue={formatInputValue(resultDefaultValueForItem(item))}
+                editable={false}
+                compact
+              />
+            </div>
+          ) : (
+            <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
+              <ValueBlock label="Current" value={currentValueForItem(item)} />
+              <ArrowRight className="hidden size-4 text-slate-300 md:block" aria-hidden="true" />
+              <ValueBlock label="Proposed" value={proposedValueForItem(item)} />
+            </div>
+          )}
 
           <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
             <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
@@ -1053,20 +1078,32 @@ function ReviewItemRow({
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2 xl:max-w-72 xl:justify-end">
-          <DecisionButton
-            keycap="a"
-            label={item.itemType === "new_candidate" ? "Create project" : "Accept new"}
-            disabled={disabled || !canAcceptItem(item)}
-            pending={pending}
-            onClick={() => onStage(item, "accept_new")}
-          />
-          <DecisionButton
-            keycap="s"
-            label="Keep old"
-            disabled={disabled}
-            pending={pending}
-            onClick={() => onStage(item, "keep_old")}
-          />
+          {valueChange ? (
+            <DecisionButton
+              keycap="c"
+              label="Confirm"
+              disabled={disabled}
+              pending={pending}
+              onClick={() => onStage(item, "custom", { value: resultDefaultValueForItem(item) })}
+            />
+          ) : (
+            <>
+              <DecisionButton
+                keycap="a"
+                label={item.itemType === "new_candidate" ? "Create project" : "Accept new"}
+                disabled={disabled || !canAcceptItem(item)}
+                pending={pending}
+                onClick={() => onStage(item, "accept_new")}
+              />
+              <DecisionButton
+                keycap="s"
+                label="Keep old"
+                disabled={disabled}
+                pending={pending}
+                onClick={() => onStage(item, "keep_old")}
+              />
+            </>
+          )}
           <DecisionButton
             keycap="d"
             label="Defer"
@@ -1074,13 +1111,15 @@ function ReviewItemRow({
             pending={pending}
             onClick={() => onStage(item, "defer")}
           />
-          <DecisionButton
-            keycap="f"
-            label="Custom"
-            disabled={disabled || item.itemType === "new_candidate" || item.itemType === "possible_match"}
-            pending={pending}
-            onClick={() => onStage(item, "custom")}
-          />
+          {!valueChange ? (
+            <DecisionButton
+              keycap="f"
+              label="Custom"
+              disabled={disabled || item.itemType === "new_candidate" || item.itemType === "possible_match"}
+              pending={pending}
+              onClick={() => onStage(item, "custom")}
+            />
+          ) : null}
           <Link
             className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
             href={reviewItemHref(item.id, jurisdictionId)}
@@ -1431,6 +1470,17 @@ function buildGroup(
     allDeferred,
     allStaged
   };
+}
+
+function nextFocusAfterItem(groups: ReviewGroup[], itemId: string) {
+  const flattened = groups.flatMap((group) =>
+    group.items.map((item) => ({ groupKey: group.key, itemId: item.id }))
+  );
+  const index = flattened.findIndex((item) => item.itemId === itemId);
+  if (index < 0) {
+    return null;
+  }
+  return flattened[index + 1] ?? flattened[index - 1] ?? null;
 }
 
 function itemMatchesFilters(

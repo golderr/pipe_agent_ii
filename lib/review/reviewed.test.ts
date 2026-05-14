@@ -55,6 +55,7 @@ function reviewItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
     resolvedAt: "2026-04-28T12:00:00Z",
     resolvedBy: "reviewer@example.com",
     activeDecision: decision(),
+    valueChange: null,
     evidenceSummaries: [],
     ...overrides
   };

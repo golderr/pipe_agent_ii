@@ -3,20 +3,24 @@ import {
   acceptDecisionValue,
   candidateProjectIdsForItem,
   candidateValuesForItem,
+  coerceResultValue,
   currentValueForItem,
   dissentingEvidenceForItem,
   displayActor,
   fieldNameForItem,
   flattenPayload,
   formatDate,
+  formatInputValue,
   humanSummaryForItem,
   isStagedByMe,
   newProjectDataForItem,
   newsContextForItem,
   proposedValueForItem,
+  resultDefaultValueForItem,
   sourceTextForItem,
   structuralDisagreementText,
   supportingEvidenceForItem,
+  valueChangeForItem,
   warningForItem,
   winningEvidenceForItem
 } from "./payload";
@@ -40,6 +44,7 @@ function reviewItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
     resolvedAt: null,
     resolvedBy: null,
     activeDecision: null,
+    valueChange: null,
     evidenceSummaries: [],
     ...overrides
   };
@@ -194,6 +199,66 @@ describe("review payload helpers", () => {
 
     expect(humanSummaryForItem(item)).toBe("Pipeline Status regression needs review");
     expect(warningForItem(item)).toBe("This item asks whether pipeline status should move backward.");
+  });
+
+  it("prefers unified value-change fields when present", () => {
+    const item = reviewItem({
+      fieldName: "pipeline_status",
+      itemType: "status_regression_review",
+      payload: {
+        current_value: "Under Construction",
+        proposed_value: "Approved"
+      },
+      valueChange: {
+        fieldName: "pipeline_status",
+        fieldLabel: "Status",
+        fieldType: "status_enum",
+        currentValue: "Under Construction",
+        evidenceValue: "Approved",
+        agentRecommendedValue: null,
+        defaultResultValue: "Approved",
+        constraints: { enumValues: ["Approved", "Under Construction"] },
+        supportingEvidenceIds: ["evidence-1"],
+        dissentingEvidenceIds: ["evidence-2"],
+        humanSummary: "Evidence suggests a status regression."
+      }
+    });
+
+    expect(valueChangeForItem(item)?.fieldLabel).toBe("Status");
+    expect(fieldNameForItem(item)).toBe("pipeline_status");
+    expect(currentValueForItem(item)).toBe("Under Construction");
+    expect(proposedValueForItem(item)).toBe("Approved");
+    expect(resultDefaultValueForItem(item)).toBe("Approved");
+    expect(humanSummaryForItem(item)).toBe("Evidence suggests a status regression.");
+  });
+
+  it("coerces result editor values by field type", () => {
+    const base = {
+      fieldName: "total_units",
+      fieldLabel: "Total units",
+      fieldType: "integer",
+      currentValue: 100,
+      evidenceValue: 140,
+      agentRecommendedValue: null,
+      defaultResultValue: 140,
+      constraints: { min: 0 },
+      supportingEvidenceIds: [],
+      dissentingEvidenceIds: [],
+      humanSummary: null
+    };
+
+    expect(coerceResultValue(base, " 141 ")).toBe(141);
+    expect(coerceResultValue(base, "1,400")).toBe(1400);
+    expect(coerceResultValue({ ...base, fieldType: "decimal" }, "12.5")).toBe(12.5);
+    expect(coerceResultValue({ ...base, fieldType: "decimal" }, "1,400.5")).toBe(1400.5);
+    expect(coerceResultValue({ ...base, fieldType: "date" }, "2026-05-13")).toBe("2026-05-13");
+    expect(coerceResultValue({ ...base, fieldType: "developer" }, " Acme ")).toBe("Acme");
+  });
+
+  it("uses raw numeric strings for editor input values", () => {
+    expect(formatInputValue(1400)).toBe("1400");
+    expect(formatInputValue("1,400")).toBe("1,400");
+    expect(formatInputValue(null)).toBe("");
   });
 
   it("extracts news context and uses article source text", () => {

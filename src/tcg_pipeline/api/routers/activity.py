@@ -2488,6 +2488,8 @@ def _field_label(value: str) -> str:
         "stories": "Stories",
         "date_delivery": "Delivery date",
         "developer": "Developer",
+        "product_type": "Product type",
+        "age_restriction": "Age restriction",
     }
     return labels.get(value, _source_label(value))
 

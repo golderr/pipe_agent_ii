@@ -17,6 +17,7 @@ from tcg_pipeline.api.routers import review as review_router
 from tcg_pipeline.db.models import (
     CoStarUploadStatus,
     Evidence,
+    PipelineStatus,
     Priority,
     ReviewItemStatus,
     ReviewItemType,
@@ -549,6 +550,8 @@ def test_review_queue_serializes_news_context_and_news_evidence_summary() -> Non
         'Article "Urbanize reports a project" (2026-04-29) suggests Total Units '
         "should change from 100 to 140; review before applying."
     )
+    assert serialized.value_change is not None
+    assert serialized.value_change.supporting_evidence_ids == [str(evidence_id)]
     assert len(serialized.evidence_summaries) == 1
     summary = serialized.evidence_summaries[0]
     assert summary.is_winning is True
@@ -556,6 +559,162 @@ def test_review_queue_serializes_news_context_and_news_evidence_summary() -> Non
     assert summary.summary == "total_units: 140"
     assert summary.highlights[0]["passage"] == "The project includes 140 apartments."
     assert summary.extracted_value == 140
+
+
+def test_review_queue_serializes_status_change_value_change_payload() -> None:
+    review_item = SimpleNamespace(
+        id=ITEM_ID,
+        project_id=PROJECT_ID,
+        source_run_id=None,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.MEDIUM,
+        match_confidence=None,
+        field_name="total_units",
+        winning_evidence_id=None,
+        payload={
+            "field_name": "total_units",
+            "current_value": 100,
+            "proposed_value": 140,
+            "human_summary": "Units changed.",
+        },
+        assigned_to=None,
+        created_at=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        resolved_at=None,
+        resolved_by=None,
+        decisions=[],
+    )
+
+    serialized = review_router._serialize_review_item(review_item)
+
+    assert serialized.value_change is not None
+    assert serialized.value_change.field_name == "total_units"
+    assert serialized.value_change.field_label == "Total units"
+    assert serialized.value_change.field_type == "integer"
+    assert serialized.value_change.current_value == 100
+    assert serialized.value_change.evidence_value == 140
+    assert serialized.value_change.agent_recommended_value is None
+    assert serialized.value_change.default_result_value == 140
+    assert serialized.value_change.constraints == {"min": 0}
+
+
+def test_review_queue_serializes_agentless_status_regression_default_to_evidence() -> None:
+    review_item = SimpleNamespace(
+        id=ITEM_ID,
+        project_id=PROJECT_ID,
+        source_run_id=None,
+        item_type=ReviewItemType.STATUS_REGRESSION_REVIEW,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.HIGH,
+        match_confidence=None,
+        field_name="pipeline_status",
+        winning_evidence_id=None,
+        payload={
+            "origin": "status_regression_candidate",
+            "field_name": "pipeline_status",
+            "current_value": "Under Construction",
+            "proposed_value": "Approved",
+            "agent_recommendation": None,
+        },
+        assigned_to=None,
+        created_at=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        resolved_at=None,
+        resolved_by=None,
+        decisions=[],
+    )
+
+    serialized = review_router._serialize_review_item(review_item)
+
+    assert serialized.value_change is not None
+    assert serialized.value_change.field_type == "status_enum"
+    assert serialized.value_change.current_value == "Under Construction"
+    assert serialized.value_change.evidence_value == "Approved"
+    assert serialized.value_change.agent_recommended_value is None
+    assert serialized.value_change.default_result_value == "Approved"
+    assert "Under Construction" in serialized.value_change.constraints["enum_values"]
+    assert (
+        PipelineStatus.DELETE_DUPLICATE.value
+        not in serialized.value_change.constraints["enum_values"]
+    )
+    assert (
+        PipelineStatus.DELETE_OUTSIDE_MARKET_AREA.value
+        not in serialized.value_change.constraints["enum_values"]
+    )
+    assert (
+        PipelineStatus.DELETE_NOT_RESIDENTIAL.value
+        not in serialized.value_change.constraints["enum_values"]
+    )
+
+
+def test_review_queue_serializes_agent_recommendation_to_result_default() -> None:
+    review_item = SimpleNamespace(
+        id=ITEM_ID,
+        project_id=PROJECT_ID,
+        source_run_id=None,
+        item_type=ReviewItemType.OVERRIDE_CONTRADICTION,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.MEDIUM,
+        match_confidence=None,
+        field_name="total_units",
+        winning_evidence_id=None,
+        payload={
+            "field_name": "total_units",
+            "current_override": {"value": 100},
+            "proposed_value": 140,
+            "agent_revised_verdict": {"decision": "recommend_keep_override"},
+        },
+        assigned_to=None,
+        created_at=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        resolved_at=None,
+        resolved_by=None,
+        decisions=[],
+    )
+
+    serialized = review_router._serialize_review_item(review_item)
+
+    assert serialized.value_change is not None
+    assert serialized.value_change.current_value == 100
+    assert serialized.value_change.evidence_value == 140
+    assert serialized.value_change.agent_recommended_value == 100
+    assert serialized.value_change.default_result_value == 100
+
+
+@pytest.mark.parametrize("decision", ["defer_to_review", "escalated"])
+def test_review_queue_agent_nonrecommendation_decisions_do_not_set_result_default(
+    decision: str,
+) -> None:
+    review_item = SimpleNamespace(
+        id=ITEM_ID,
+        project_id=PROJECT_ID,
+        source_run_id=None,
+        item_type=ReviewItemType.OVERRIDE_CONTRADICTION,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.MEDIUM,
+        match_confidence=None,
+        field_name="total_units",
+        winning_evidence_id=None,
+        payload={
+            "field_name": "total_units",
+            "current_override": {"value": 100},
+            "proposed_value": 140,
+            "agent_revised_verdict": {"decision": decision},
+        },
+        assigned_to=None,
+        created_at=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+        resolved_at=None,
+        resolved_by=None,
+        decisions=[],
+    )
+
+    serialized = review_router._serialize_review_item(review_item)
+
+    assert serialized.value_change is not None
+    assert serialized.value_change.agent_recommended_value is None
+    assert serialized.value_change.default_result_value == 140
 
 
 def test_phase_c_stubs_do_not_run_without_auth() -> None:

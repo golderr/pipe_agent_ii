@@ -12,6 +12,7 @@ import type {
   ReviewProjectSummary,
   ReviewQueueData,
   ReviewQueueItem,
+  ReviewValueChangePayload,
   ReviewSourceRunSummary
 } from "@/lib/review/types";
 
@@ -56,7 +57,26 @@ type ReviewQueueItemApi = {
   resolved_at: string | null;
   resolved_by: string | null;
   active_decision: ReviewDecisionApi | null;
+  value_change?: ReviewValueChangeApi | null;
   evidence_summaries?: ReviewEvidenceSummaryApi[];
+};
+
+type ReviewValueChangeApi = {
+  field_name: string;
+  field_label: string;
+  field_type: string;
+  current_value: unknown;
+  evidence_value: unknown;
+  agent_recommended_value: unknown;
+  default_result_value: unknown;
+  constraints?: {
+    enum_values?: string[];
+    min?: number;
+    max?: number;
+  } | null;
+  supporting_evidence_ids?: string[];
+  dissenting_evidence_ids?: string[];
+  human_summary?: string | null;
 };
 
 type ReviewEvidenceSummaryApi = {
@@ -418,6 +438,7 @@ function mapReviewItem(item: ReviewQueueItemApi): ReviewQueueItem {
     resolvedAt: item.resolved_at,
     resolvedBy: item.resolved_by,
     activeDecision: item.active_decision ? mapDecision(item.active_decision) : null,
+    valueChange: item.value_change ? mapValueChange(item.value_change) : null,
     evidenceSummaries: (item.evidence_summaries ?? []).map((evidence) => ({
       evidenceId: evidence.evidence_id,
       stance: evidence.stance,
@@ -434,6 +455,26 @@ function mapReviewItem(item: ReviewQueueItemApi): ReviewQueueItem {
       highlights: evidence.highlights ?? [],
       extractedValue: evidence.extracted_value
     }))
+  };
+}
+
+function mapValueChange(payload: ReviewValueChangeApi): ReviewValueChangePayload {
+  return {
+    fieldName: payload.field_name,
+    fieldLabel: payload.field_label,
+    fieldType: payload.field_type,
+    currentValue: payload.current_value,
+    evidenceValue: payload.evidence_value,
+    agentRecommendedValue: payload.agent_recommended_value,
+    defaultResultValue: payload.default_result_value,
+    constraints: {
+      enumValues: payload.constraints?.enum_values,
+      min: payload.constraints?.min,
+      max: payload.constraints?.max
+    },
+    supportingEvidenceIds: payload.supporting_evidence_ids ?? [],
+    dissentingEvidenceIds: payload.dissenting_evidence_ids ?? [],
+    humanSummary: payload.human_summary ?? null
   };
 }
 

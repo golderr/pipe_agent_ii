@@ -192,6 +192,20 @@ class ReviewEvidenceSummary(BaseModel):
     extracted_value: Any | None
 
 
+class ReviewValueChangePayload(BaseModel):
+    field_name: str
+    field_label: str
+    field_type: str
+    current_value: Any | None
+    evidence_value: Any | None
+    agent_recommended_value: Any | None
+    default_result_value: Any | None
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    dissenting_evidence_ids: list[str] = Field(default_factory=list)
+    human_summary: str | None = None
+
+
 class ReviewQueueItemResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID | None
@@ -209,6 +223,7 @@ class ReviewQueueItemResponse(BaseModel):
     resolved_at: str | None
     resolved_by: str | None
     active_decision: ReviewDecisionSummary | None
+    value_change: ReviewValueChangePayload | None = None
     evidence_summaries: list[ReviewEvidenceSummary] = []
 
 

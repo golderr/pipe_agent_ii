@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13 (Item 6 scope corrected to existing `projects.stories`)
+> **Last updated:** 2026-05-14 (Item 3 shipped)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -15,10 +15,10 @@ Six pre-cycle-1 items must land before `AGENT.reset` cycle 1 begins:
 |---|---|---|---|---|
 | 1 | Resolver-level suppression of benign LADBS follow-on permits | `UX.regression-suppression` | ✅ Shipped 2026-05-13 | `e4c37c4` |
 | 2 | Card source-detail rendering for permit + CoStar regression cards | `UX.card-source-detail` | ✅ Shipped 2026-05-13 | `93e8648` |
-| 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | 🔜 Phase 3 (~2-3 days) | — |
+| 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | ✅ Shipped 2026-05-14 | — |
 | 4 | Narrative descriptiveness (name permit types + news sources) | `UX.narrative-detail` | ✅ Shipped 2026-05-13 | `c111433` |
 | 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | 🔜 Phase 4 (~1.5-2 weeks) | — |
-| 6 | Building height / stories resolver support (canonical field `stories`) | `UX.building-height` | 🔜 Phase 2 next (~0.5-1 day) | — |
+| 6 | Building height / stories resolver support (canonical field `stories`) | `UX.building-height` | ✅ Shipped 2026-05-13 | `7ce99af` |
 
 **Total:** ~2.5-3 weeks at single-threaded execution; ~2 weeks if independent backends + frontends can overlap.
 
@@ -232,7 +232,7 @@ Phase 4 — Dedup table (days 10-19)
   - [x] News integrator: reference row and evidence expose `stories`
   - [x] Resolver: most-recent-wins, source-priority tiebreak, null handling
 - [ ] **Apply migration in production.** Backup + apply per migration runbook. Record in Decision Log.
-- [ ] **Commit + push.**
+- [x] **Commit + push.**
 
 **Acceptance:** Migration applied to production, CoStar / Pipedream / news can populate `stories`, resolver writes the correct value, and project-detail Snapshot shows the field.
 
@@ -261,14 +261,15 @@ Phase 4 — Dedup table (days 10-19)
 
 **Sub-tasks:**
 
-- [ ] **Design the unified payload contract.** Every value-change review item (`status_change`, `status_regression_review`, `material_contradiction`, `unit_split_mismatch`, `override_contradiction`) returns:
+- [x] **Design the unified payload contract.** Every value-change review item (`status_change`, `status_regression_review`, `material_contradiction`, `unit_split_mismatch`, `override_contradiction`) returns:
   ```
   {
     field_name: "pipeline_status",
     field_type: "status_enum" | "integer" | "decimal" | "date" | "developer" | "product_type" | ...,
     current_value: <typed>,
     evidence_value: <typed>,
-    agent_recommended_value: <typed>,  // defaults to evidence_value when no agent recommendation; null if neither
+    agent_recommended_value: <typed> | null,  // actual agent output only; null when no agent weighed in
+    default_result_value: <typed>,      // agent recommendation if present, else evidence_value, else current_value
     constraints: {
       // optional, per field type
       enum_values: [...],          // for enums
@@ -280,30 +281,37 @@ Phase 4 — Dedup table (days 10-19)
     human_summary: "...",            // already exists today
   }
   ```
-- [ ] **Backend changes:**
-  - [ ] Extend `GET /review/queue/{item_id}` to return the unified shape for value-change items. Map each existing item type's payload to the new shape.
-  - [ ] Map `agent_recommended_value` from `payload.agent_revised_verdict` / `payload.agent_recommendation` for items that have an agent. For items without an agent (direct review cards from slice 5), `agent_recommended_value` = `current_value`.
-  - [ ] Tests for each item type's serialization.
-- [ ] **Frontend changes:**
-  - [ ] Build a generic `<ThreeFieldEditor>` component that takes `current`, `evidence`, `defaultResult`, `fieldType`, `constraints` and renders three cells:
+- [x] **Backend changes:**
+  - [x] Extend `GET /review/queue/{item_id}` and queue-list serialization to return the unified shape for value-change items. Map each existing value-change payload shape to the new `value_change` response.
+  - [x] Map `agent_recommended_value` from `payload.agent_revised_verdict` / `payload.agent_recommendation` only when an agent has made a recommendation. For agentless cards (including direct slice-5 `status_regression_review` cards), leave it null and default the Result cell to `evidence_value` so Confirm applies the evidence-proposed change unless the reviewer edits it.
+  - [x] Keep field metadata distributed for now, but add a drift test across the review payload metadata, override allowlists, integer coercion set, activity labels, and changelog priority map. Defer a full registry refactor until Item 5 or later.
+  - [x] Tests for the real value-change item types (`status_change`, `status_regression_review`, `override_contradiction`). Material contradictions and unit-split mismatches ride through `status_change` payloads today.
+- [x] **Frontend changes:**
+  - [x] Build a generic `<ThreeFieldEditor>` component that takes `current`, `evidence`, `defaultResult`, `fieldType`, `constraints` and renders three cells:
     - Current (read-only)
     - Evidence (read-only)
     - Result (editable per field type — dropdown / number / date / autocomplete)
-  - [ ] Refactor the review-item detail page (`app/(app)/review/[itemId]/`) to use `<ThreeFieldEditor>` for value-change items.
-  - [ ] Simplify action buttons: Confirm (commits the Result value), Defer (no decision, marks deferred), Detail (drill-in for full context).
-  - [ ] Implement auto-advance: after Confirm/Defer, fetch the next item in the active queue and load it. Use the existing queue navigation helpers from C.k.1 ([ ] keys).
-  - [ ] Keep the existing decision-card layout for discovery items (`new_candidate`, `possible_match`) — those go to the new Discovery tab built in Item 5.
-- [ ] **Server actions:**
-  - [ ] Confirm action accepts the Result value and writes a `review_decisions` row + applies the override / change_log entry through the existing review-workflow helpers.
-  - [ ] Defer action just marks the item deferred without applying.
+  - [x] Refactor the review-item detail page (`app/(app)/review/[itemId]/`) to use `<ThreeFieldEditor>` for value-change items.
+  - [x] Simplify value-change action buttons: Confirm (stages the Result value), Defer, Detail from queue cards.
+  - [x] Implement auto-advance: detail Confirm/Defer routes to the next active item; queue-card actions move focus to the next visible item before refresh.
+  - [x] Keep the existing decision-card layout for discovery items (`new_candidate`, `possible_match`) — those go to the new Discovery tab built in Item 5.
+- [x] **Server actions:**
+  - [x] Confirm action accepts the Result value and writes a `review_decisions` row + applies the override / change_log entry through the existing review-workflow helpers.
+  - [x] Defer action just marks the item deferred without applying.
 - [ ] **Tests:**
-  - [ ] Backend: serialization test per value-change item type
-  - [ ] Frontend: component tests for ThreeFieldEditor with each field type
-  - [ ] E2E: confirm-with-modified-result writes the modified value, not the agent recommendation
-- [ ] **Local validation** on prod data: walk a few existing value-change items and confirm the new UI renders correctly.
-- [ ] **Commit + push.**
+  - [x] Backend: serialization test per real value-change item type
+  - [x] Backend: metadata drift test for resolver-owned scalar review fields
+  - [x] Frontend: payload helper tests for unified value-change defaults and Result coercion by field type
+  - [x] E2E: authenticated Playwright walkthrough confirms a modified Result value (`1450`) stages and commits to `change_log` as the modified value.
+- [x] **Local validation** on staging data: authenticated Playwright walkthrough confirmed a 1,400-unit Result input renders as raw `1400`, unedited Confirm stages and commits `1400`, and `status_regression_review` Result dropdowns exclude the three `Delete-*` statuses. Synthetic validation rows were cleaned up afterward; no existing open 1,000+ `total_units` card was available.
+- [x] **Commit + push.**
 
-**Acceptance:** All five value-change item types render with the 3-field model; Confirm applies the Result value (whether equal to current, evidence, or user-edited); auto-advance moves to the next item; existing decision-card layout still works for discovery items.
+**Acceptance:** All real value-change item types render with the 3-field model; Confirm applies the Result value (whether equal to current, evidence, or user-edited); auto-advance moves to the next item; existing decision-card layout still works for discovery items.
+
+**Lessons learned:**
+
+- Treat `agent_recommended_value` as agent output only. Agentless cards should default Result to the evidence value, especially status-regression cards where the reviewer is judging the proposed regression.
+- A full shared field registry is larger than Item 3. A focused review metadata helper plus drift tests catches the same class of misses without forcing API, activity, override, and project-detail modules through one refactor.
 
 ---
 

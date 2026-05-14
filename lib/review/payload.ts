@@ -1,4 +1,4 @@
-import type { ReviewQueueItem } from "./types";
+import type { ReviewQueueItem, ReviewValueChangePayload } from "./types";
 
 export type PayloadRow = {
   key: string;
@@ -83,6 +83,7 @@ export function fieldNameForItem(item: ReviewQueueItem) {
   const change = firstChange(item);
   const statusSuggestion = asRecord(payload?.status_suggestion);
   return (
+    item.valueChange?.fieldName ??
     item.fieldName ??
     asString(payload?.field_name) ??
     (statusSuggestion ? "pipeline_status" : null) ??
@@ -93,6 +94,9 @@ export function fieldNameForItem(item: ReviewQueueItem) {
 }
 
 export function currentValueForItem(item: ReviewQueueItem) {
+  if (item.valueChange) {
+    return item.valueChange.currentValue;
+  }
   const payload = item.payload;
   const currentOverride = asRecord(payload?.current_override);
   const statusSuggestion = asRecord(payload?.status_suggestion);
@@ -113,6 +117,9 @@ export function currentValueForItem(item: ReviewQueueItem) {
 }
 
 export function proposedValueForItem(item: ReviewQueueItem) {
+  if (item.valueChange) {
+    return item.valueChange.evidenceValue;
+  }
   const payload = item.payload;
   const candidate = asRecord(payload?.candidate);
   const proposedAlternatives = asRecordArray(payload?.proposed_alternatives);
@@ -236,6 +243,10 @@ export function warningForItem(item: ReviewQueueItem) {
 }
 
 export function humanSummaryForItem(item: ReviewQueueItem) {
+  const valueChangeSummary = item.valueChange?.humanSummary;
+  if (valueChangeSummary) {
+    return valueChangeSummary;
+  }
   const summary = asString(item.payload?.human_summary);
   if (summary) {
     return summary;
@@ -248,6 +259,35 @@ export function humanSummaryForItem(item: ReviewQueueItem) {
 
 export function firstChange(item: ReviewQueueItem) {
   return asRecordArray(item.payload?.changes)[0] ?? null;
+}
+
+export function valueChangeForItem(item: ReviewQueueItem): ReviewValueChangePayload | null {
+  return item.valueChange;
+}
+
+export function resultDefaultValueForItem(item: ReviewQueueItem) {
+  return item.valueChange?.defaultResultValue ?? proposedValueForItem(item);
+}
+
+export function coerceResultValue(
+  valueChange: ReviewValueChangePayload,
+  inputValue: string
+) {
+  const text = inputValue.trim();
+  if (!text) {
+    return null;
+  }
+  if (valueChange.fieldType === "integer") {
+    const numericText = text.replace(/,/g, "");
+    const parsed = Number.parseInt(numericText, 10);
+    return Number.isFinite(parsed) ? parsed : text;
+  }
+  if (valueChange.fieldType === "decimal") {
+    const numericText = text.replace(/,/g, "");
+    const parsed = Number.parseFloat(numericText);
+    return Number.isFinite(parsed) ? parsed : text;
+  }
+  return text;
 }
 
 export function flattenPayload(payload: Record<string, unknown> | null): PayloadRow[] {
@@ -284,6 +324,9 @@ export function formatInputValue(value: unknown) {
   }
   if (typeof value === "string") {
     return value;
+  }
+  if (typeof value === "number") {
+    return String(value);
   }
   return formatValue(value);
 }

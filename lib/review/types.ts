@@ -30,7 +30,26 @@ export type ReviewQueueItem = {
   resolvedAt: string | null;
   resolvedBy: string | null;
   activeDecision: ReviewDecisionSummary | null;
+  valueChange: ReviewValueChangePayload | null;
   evidenceSummaries: ReviewEvidenceSummary[];
+};
+
+export type ReviewValueChangePayload = {
+  fieldName: string;
+  fieldLabel: string;
+  fieldType: string;
+  currentValue: unknown;
+  evidenceValue: unknown;
+  agentRecommendedValue: unknown;
+  defaultResultValue: unknown;
+  constraints: {
+    enumValues?: string[];
+    min?: number;
+    max?: number;
+  };
+  supportingEvidenceIds: string[];
+  dissentingEvidenceIds: string[];
+  humanSummary: string | null;
 };
 
 export type ReviewEvidenceSummary = {

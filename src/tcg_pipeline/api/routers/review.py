@@ -44,6 +44,7 @@ from tcg_pipeline.review.decision_cards import (
 )
 from tcg_pipeline.review.human_summary import human_summary_for_payload
 from tcg_pipeline.review.snippets import render_snippet
+from tcg_pipeline.review.value_changes import value_change_payload_for_review_item
 
 router = APIRouter(prefix="/review", tags=["review"])
 AUTH_USER = Depends(require_user)
@@ -204,6 +205,21 @@ def _serialize_review_item(
     evidence_by_id: dict[uuid.UUID, Evidence] | None = None,
 ) -> ReviewQueueItemResponse:
     active_decision = _active_decision_for_item(review_item)
+    response_payload = _response_payload_for_review_item(review_item)
+    evidence_summaries = _serialize_evidence_summaries(
+        review_item,
+        evidence_by_id=evidence_by_id or {},
+    )
+    supporting_evidence_ids = [
+        str(summary.evidence_id)
+        for summary in evidence_summaries
+        if summary.stance == "supporting"
+    ]
+    dissenting_evidence_ids = [
+        str(summary.evidence_id)
+        for summary in evidence_summaries
+        if summary.stance == "against"
+    ]
     return ReviewQueueItemResponse(
         id=review_item.id,
         project_id=review_item.project_id,
@@ -215,16 +231,19 @@ def _serialize_review_item(
         match_confidence=review_item.match_confidence,
         field_name=review_item.field_name,
         winning_evidence_id=review_item.winning_evidence_id,
-        payload=_response_payload_for_review_item(review_item),
+        payload=response_payload,
         assigned_to=review_item.assigned_to,
         created_at=review_item.created_at.isoformat(),
         resolved_at=review_item.resolved_at.isoformat() if review_item.resolved_at else None,
         resolved_by=review_item.resolved_by,
         active_decision=_serialize_decision(active_decision),
-        evidence_summaries=_serialize_evidence_summaries(
+        value_change=value_change_payload_for_review_item(
             review_item,
-            evidence_by_id=evidence_by_id or {},
+            payload=response_payload,
+            supporting_evidence_ids=supporting_evidence_ids if evidence_summaries else None,
+            dissenting_evidence_ids=dissenting_evidence_ids,
         ),
+        evidence_summaries=evidence_summaries,
     )
 
 

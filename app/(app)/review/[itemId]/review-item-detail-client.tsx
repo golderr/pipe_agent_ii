@@ -24,9 +24,11 @@ import {
 } from "@/app/(app)/review/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ThreeFieldEditor } from "@/components/review/three-field-editor";
 import {
   acceptDecisionValue,
   asString,
+  coerceResultValue,
   currentValueForItem,
   dissentingEvidenceForItem,
   displayActor,
@@ -42,10 +44,12 @@ import {
   isStagedByOther,
   newsContextForItem,
   proposedValueForItem,
+  resultDefaultValueForItem,
   sourceTextForItem,
   structuralDisagreementText,
   supportingEvidenceForItem,
   type NewsContext,
+  valueChangeForItem,
   warningForItem
 } from "@/lib/review/payload";
 import { compactStatus, statusStyle } from "@/lib/status";
@@ -76,9 +80,19 @@ export function ReviewItemDetailClient({
 }: ReviewItemDetailClientProps) {
   const router = useRouter();
   const { item, project, candidateProjects, sourceRun, navigation, processedChanges } = data;
-  const [customValue, setCustomValue] = useState(formatInputValue(proposedValueForItem(item)));
-  const [notes, setNotes] = useState(item.activeDecision?.decisionNotes ?? "");
-  const [sourceUrl, setSourceUrl] = useState(item.activeDecision?.sourceUrl ?? "");
+  const valueChange = valueChangeForItem(item);
+  const defaultResultInput = formatInputValue(resultDefaultValueForItem(item));
+  const defaultCustomInput = formatInputValue(proposedValueForItem(item));
+  const defaultNotes = item.activeDecision?.decisionNotes ?? "";
+  const defaultSourceUrl = item.activeDecision?.sourceUrl ?? "";
+  const [resultState, setResultState] = useState({ itemId: item.id, value: defaultResultInput });
+  const [customState, setCustomState] = useState({ itemId: item.id, value: defaultCustomInput });
+  const [notesState, setNotesState] = useState({ itemId: item.id, value: defaultNotes });
+  const [sourceUrlState, setSourceUrlState] = useState({ itemId: item.id, value: defaultSourceUrl });
+  const resultValue = resultState.itemId === item.id ? resultState.value : defaultResultInput;
+  const customValue = customState.itemId === item.id ? customState.value : defaultCustomInput;
+  const notes = notesState.itemId === item.id ? notesState.value : defaultNotes;
+  const sourceUrl = sourceUrlState.itemId === item.id ? sourceUrlState.value : defaultSourceUrl;
   const [banner, setBanner] = useState<Banner>(null);
   const [isPending, startTransition] = useTransition();
   const stagedDecision = item.activeDecision?.state === "staged" ? item.activeDecision : null;
@@ -127,7 +141,11 @@ export function ReviewItemDetailClient({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [nextHref, previousHref, router]);
 
-  function stageDecision(decisionType: string, decisionValue?: unknown) {
+  function stageDecision(
+    decisionType: string,
+    decisionValue?: unknown,
+    options: { autoAdvance?: boolean } = {}
+  ) {
     if (stagedByOther) {
       return;
     }
@@ -143,9 +161,25 @@ export function ReviewItemDetailClient({
       });
       setBanner({ tone: result.ok ? "success" : "error", message: result.message });
       if (result.ok) {
-        router.refresh();
+        if (options.autoAdvance) {
+          router.push(nextHref ?? queueHref);
+        } else {
+          router.refresh();
+        }
       }
     });
+  }
+
+  function confirmValueChange() {
+    if (!valueChange) {
+      stageDecision("accept_new", acceptDecisionValue(item), { autoAdvance: true });
+      return;
+    }
+    stageDecision(
+      "custom",
+      { value: coerceResultValue(valueChange, resultValue) },
+      { autoAdvance: true }
+    );
   }
 
   function unstageDecision() {
@@ -227,11 +261,19 @@ export function ReviewItemDetailClient({
               <GitCompareArrows className="size-4 text-slate-500" aria-hidden="true" />
               <h2 className="text-sm font-semibold text-slate-950">Decision Context</h2>
             </div>
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-stretch">
-              <ValuePanel label="Current" value={currentValueForItem(item)} />
-              <ArrowRight className="hidden size-4 self-center text-slate-300 lg:block" aria-hidden="true" />
-              <ValuePanel label="Proposed" value={proposedValueForItem(item)} />
-            </div>
+            {valueChange ? (
+              <ThreeFieldEditor
+                valueChange={valueChange}
+                resultValue={resultValue}
+                onResultChange={(value) => setResultState({ itemId: item.id, value })}
+              />
+            ) : (
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-stretch">
+                <ValuePanel label="Current" value={currentValueForItem(item)} />
+                <ArrowRight className="hidden size-4 self-center text-slate-300 lg:block" aria-hidden="true" />
+                <ValuePanel label="Proposed" value={proposedValueForItem(item)} />
+              </div>
+            )}
             {warningForItem(item) ? (
               <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                 {warningForItem(item)}
@@ -277,26 +319,39 @@ export function ReviewItemDetailClient({
               </div>
             ) : null}
             <div className="mt-4 flex flex-wrap gap-2">
-              <Button
-                type="button"
-                onClick={() => stageDecision("accept_new", acceptDecisionValue(item))}
-                disabled={isPending || stagedByOther || !canAcceptItem(item, candidateProjects)}
-              >
-                <Check className="size-4" aria-hidden="true" />
-                {hasSingleCandidate ? "Accept match" : acceptLabel}
-              </Button>
+              {valueChange ? (
+                <Button
+                  type="button"
+                  onClick={confirmValueChange}
+                  disabled={isPending || stagedByOther || !resultValue.trim()}
+                >
+                  <Check className="size-4" aria-hidden="true" />
+                  Confirm
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    type="button"
+                    onClick={() => stageDecision("accept_new", acceptDecisionValue(item))}
+                    disabled={isPending || stagedByOther || !canAcceptItem(item, candidateProjects)}
+                  >
+                    <Check className="size-4" aria-hidden="true" />
+                    {hasSingleCandidate ? "Accept match" : acceptLabel}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => stageDecision("keep_old")}
+                    disabled={isPending || stagedByOther}
+                  >
+                    Keep old
+                  </Button>
+                </>
+              )}
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => stageDecision("keep_old")}
-                disabled={isPending || stagedByOther}
-              >
-                Keep old
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => stageDecision("defer")}
+                onClick={() => stageDecision("defer", undefined, { autoAdvance: Boolean(valueChange) })}
                 disabled={isPending || stagedByOther}
               >
                 <Clock className="size-4" aria-hidden="true" />
@@ -310,25 +365,51 @@ export function ReviewItemDetailClient({
               ) : null}
             </div>
 
-            {canUseCustom ? (
+            {valueChange ? (
               <div className="mt-5 border-t border-slate-200 pt-4">
-                <h3 className="text-sm font-semibold text-slate-950">Custom Value</h3>
                 <div className="mt-3 grid gap-3">
-                  <label className="text-sm">
-                    <span className="mb-1 block text-xs font-medium text-slate-600">Value</span>
-                    <Input value={customValue} onChange={(event) => setCustomValue(event.target.value)} />
-                  </label>
                   <label className="text-sm">
                     <span className="mb-1 block text-xs font-medium text-slate-600">Notes</span>
                     <textarea
                       value={notes}
-                      onChange={(event) => setNotes(event.target.value)}
+                      onChange={(event) => setNotesState({ itemId: item.id, value: event.target.value })}
                       className="min-h-24 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
                     />
                   </label>
                   <label className="text-sm">
                     <span className="mb-1 block text-xs font-medium text-slate-600">Source URL</span>
-                    <Input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} />
+                    <Input
+                      value={sourceUrl}
+                      onChange={(event) => setSourceUrlState({ itemId: item.id, value: event.target.value })}
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : canUseCustom ? (
+              <div className="mt-5 border-t border-slate-200 pt-4">
+                <h3 className="text-sm font-semibold text-slate-950">Custom Value</h3>
+                <div className="mt-3 grid gap-3">
+                  <label className="text-sm">
+                    <span className="mb-1 block text-xs font-medium text-slate-600">Value</span>
+                    <Input
+                      value={customValue}
+                      onChange={(event) => setCustomState({ itemId: item.id, value: event.target.value })}
+                    />
+                  </label>
+                  <label className="text-sm">
+                    <span className="mb-1 block text-xs font-medium text-slate-600">Notes</span>
+                    <textarea
+                      value={notes}
+                      onChange={(event) => setNotesState({ itemId: item.id, value: event.target.value })}
+                      className="min-h-24 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+                    />
+                  </label>
+                  <label className="text-sm">
+                    <span className="mb-1 block text-xs font-medium text-slate-600">Source URL</span>
+                    <Input
+                      value={sourceUrl}
+                      onChange={(event) => setSourceUrlState({ itemId: item.id, value: event.target.value })}
+                    />
                   </label>
                   <div>
                     <Button
