@@ -85,6 +85,10 @@ def is_benign_ladbs_additive_paperwork(
     """
     if evidence.source_type not in LADBS_SOURCE_TYPES:
         return False, None
+    # Do not require the current higher-rank status to have come from LADBS.
+    # A new in-force LADBS permit is forward progress even if UC/Complete was
+    # established by news or another source; a same-source-family condition
+    # would reintroduce false-positive regression cards for real corroboration.
     raw = evidence.raw_data if isinstance(evidence.raw_data, dict) else {}
     status_desc = (raw.get("status_desc") or "").strip()
     if status_desc in LADBS_REGRESSION_STATUS_DESC:

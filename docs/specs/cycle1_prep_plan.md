@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13 (Phase 1 hardening Item gamma ready for review; items 1, 4, 2 shipped)
+> **Last updated:** 2026-05-13 (Phase 1 hardening Item delta ready for review; items 1, 4, 2 shipped)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -77,10 +77,10 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **Define the regression-signal list.** Values that DO indicate genuine regression:
   - `Cancelled`, `Void`, `Expired`, `Revoked`, `Withdrawn`, `Plan Check Cancelled`, `Permit Cancelled`
 - [ ] **Document the source.** Production currently has limited LADBS evidence (only 36 rows, mostly synthetic). Initial allowlist is from Socrata docs and common LADBS terminology. Treat as v1 and revisit after first cycle's organic LADBS data lands. Sentinel behavior for unknown `status_desc`: assume additive (do NOT emit candidate) and log a `system_alert` once per session with the unknown value so we can extend the list.
-- [ ] **Implement the suppression predicate.** Function signature: `is_benign_additive_paperwork(new_evidence, current_status_evidence) -> bool`. Returns True iff:
-  1. `new_evidence.source_type` is in `{'ladbs_permit', 'ladbs_permit_activity'}`
-  2. `new_evidence.raw_data['status_desc']` is in the additive allowlist (or unknown — fail-additive)
-  3. The project's current higher-rank status comes from the same LADBS source family (the `winning_evidence` for `pipeline_status` resolution is also a ladbs_* source)
+- [ ] **Implement the suppression predicate.** Final rule is intentionally simpler than the initial same-source-family sketch. Function signature: `is_benign_ladbs_additive_paperwork(evidence) -> tuple[bool, dict | None]`. Returns True iff:
+  1. `evidence.source_type` is in `{'ladbs_permit', 'ladbs_permit_activity'}`
+  2. `evidence.raw_data['status_desc']` is in the additive allowlist (or unknown - fail-additive)
+  3. No same-source-family condition is required. Rationale: LADBS permit issuance is never a regression signal regardless of how the current status was established. A project that's UC because of news evidence and then has a LADBS permit issued is showing forward progress (first government corroboration), not regression. Adding the same-source-family condition would generate false-positive regression cards for genuine forward progress.
 - [ ] **Wire the predicate into `resolve_status`.** After enumerating regression candidates, filter them via the predicate. Log to `resolution_log.metadata.suppressed_regression_candidates` so the audit trail shows what was filtered + why.
 - [ ] **Tests:**
   - [ ] `test_follow_on_permit_on_uc_project_does_not_emit_regression_candidate` (Issued ladbs_permit on UC project — no candidate)
@@ -88,7 +88,7 @@ Phase 4 — Dedup table (days 10-19)
   - [ ] `test_unknown_status_desc_logs_alert_and_treats_as_additive` (logs system_alert, no candidate)
   - [ ] `test_news_regression_candidate_unaffected` (news status regression still emits)
   - [ ] `test_stalled_inactive_carve_out_unchanged` (Stalled/Inactive still take the manual-review path)
-  - [ ] `test_cross_source_regression_emits_candidate` (Pipedream regression on UC project IS emitted — predicate only suppresses same-source-family)
+  - [ ] `test_cross_source_regression_emits_candidate` (Pipedream/news regression on UC project IS emitted - predicate only suppresses LADBS additive paperwork)
 - [ ] **Local validation** against the staged regression card `5eeb3658-8326-4cbd-889b-cc902f55a611`: re-run the resolver and confirm no regression candidate is now emitted for that fixture.
 - [ ] **Commit + push.** Single focused commit. CI confirms test suite green.
 
@@ -98,11 +98,13 @@ Phase 4 — Dedup table (days 10-19)
 
 - [x] **Item alpha: persist suppressed-only regression audit trail.** When LADBS additive-paperwork suppression is the only status-regression outcome, `resolve_project` now writes a `resolution_log` row with `rule_applied="regression_candidate_suppressed"` and the suppressed candidate metadata.
 - [x] **Item beta: live alerting for unknown LADBS status_desc.** The LADBS suppression predicate now returns a pending alert payload for unknown values, and `resolve_project` drains that metadata channel into `system_alerts` when resolution writes are enabled.
+- [x] **Item delta: document dropped same-source-family condition.** The predicate documentation now records that LADBS additive paperwork is suppressed regardless of the source family that established the current higher-rank status.
 
 **Lessons learned:**
 
 - Suppressed candidates are still audit decisions. If no active regression candidate exists, the engine needs a dedicated suppressed-only log path so queue suppression does not erase traceability.
 - Resolver predicates should stay session-free. Engine-owned metadata channels are the safer place to coordinate database side effects like operator alerts.
+- A LADBS permit issuance is forward progress even when the current UC status came from news or another non-LADBS source. Requiring same-source-family would create false-positive cards for first government corroboration.
 
 ---
 
