@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13 (Item 6 elevation scope corrected; LADBS deferred)
+> **Last updated:** 2026-05-13 (Item 6 scope corrected to existing `projects.stories`)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -18,7 +18,7 @@ Six pre-cycle-1 items must land before `AGENT.reset` cycle 1 begins:
 | 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | 🔜 Phase 3 (~2-3 days) | — |
 | 4 | Narrative descriptiveness (name permit types + news sources) | `UX.narrative-detail` | ✅ Shipped 2026-05-13 | `c111433` |
 | 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | 🔜 Phase 4 (~1.5-2 weeks) | — |
-| 6 | Building height / stories as a Project field (canonical name `elevation`) | `UX.building-height` | 🔜 Phase 2 next (~2-3 days) | — |
+| 6 | Building height / stories resolver support (canonical field `stories`) | `UX.building-height` | 🔜 Phase 2 next (~0.5-1 day) | — |
 
 **Total:** ~2.5-3 weeks at single-threaded execution; ~2 weeks if independent backends + frontends can overlap.
 
@@ -34,8 +34,8 @@ Phase 1 — Quick wins (days 1-2)
   Item 4 (UX.narrative-detail)         — narrative templates + prompts
   Item 2 (UX.card-source-detail)       — backend snippet renderers + frontend display
 
-Phase 2 — Schema + data foundation (days 3-5)
-  Item 6 (UX.building-height)          — migration, model, ingest, resolver, project-detail UI
+Phase 2 — Stories resolver foundation (day 3)
+  Item 6 (UX.building-height)          — news reference migration, resolver, project-detail UI
 
 Phase 3 — 3-field model (days 6-9)
   Item 3 (UX.3-field-review)           — backend payload contract + frontend ThreeFieldEditor +
@@ -199,47 +199,42 @@ Phase 4 — Dedup table (days 10-19)
 
 ---
 
-## 6. Item 6 — UX.building-height (canonical field name: `elevation`)
+## 6. Item 6 - UX.building-height (canonical field name: `stories`)
 
-**Goal:** add `elevation` (integer, number of stories) as a Project field so the dedup table's column has real data on day one. **Naming decision (per Q3 resolution):** match Pipedream's existing `Elevation` column terminology — researchers already think of this field as "elevation" of the building in stories. Add a docstring/comment to disambiguate from ground elevation. Drop the originally-proposed `building_height_feet` from scope (not present in any source today).
+**Goal:** add resolver support for the existing `projects.stories` field so the dedup table's building-height column has a single canonical value per project. CoStar and Pipedream ingesters already populate `stories`; this item adds news-extraction support and a resolver.
 
 **Files to touch:**
-- New Alembic migration: `alembic/versions/2026_05_14_xxxx_add_elevation_to_projects.py`
-- `src/tcg_pipeline/db/models.py` — Project model
-- `src/tcg_pipeline/db/models.py` — NewsProjectReference (add `candidate_elevation`)
-- News extraction prompt schema: `src/tcg_pipeline/agents/prompts/news_v1/extract_v2.json` (or equivalent — locate exact path)
-- News integrator: include the new field when writing evidence rows
-- `src/tcg_pipeline/ingesters/costar.py` — map CoStar's `Number Of Stories` column
-- `src/tcg_pipeline/ingesters/pipedream.py` — map Pipedream's `Elevation` column (DataStorage col 48)
-- New: `src/tcg_pipeline/resolution/fields/elevation.py` — resolver
-- `src/tcg_pipeline/resolution/engine.py` — wire the new resolver in
-- Frontend project detail Snapshot: add the field to the Snapshot panel labelled "Elevation (stories)"
+- New Alembic migration: add nullable integer `candidate_stories` to `news_project_references`
+- `src/tcg_pipeline/db/models.py` - NewsProjectReference (add `candidate_stories`)
+- News extraction prompt schema: `src/tcg_pipeline/news/prompts/extract_v2/schema.json`
+- News extraction prompt text: `src/tcg_pipeline/news/prompts/extract_v2/system.md`
+- News extraction / integration: thread `candidate_stories` into reference rows and evidence `extracted_fields.stories`
+- New: `src/tcg_pipeline/resolution/fields/stories.py` - resolver
+- `src/tcg_pipeline/resolution/engine.py` - wire the resolver in
+- Frontend project detail Snapshot: verify/show the field labelled `Stories`
 - Migration verification + tests
 
 **Sub-tasks:**
 
-- [x] **Field name decision.** `elevation` (integer, nullable, number of stories). Per Q3 resolution, matches Pipedream researcher terminology. Add a column comment / model docstring: "Building height in stories. Named `elevation` to match Pipedream's existing column and researcher mental model; not ground elevation."
+- [x] **Canonical field confirmed.** `projects.stories` already exists as a nullable integer Project field. CoStar and Pipedream already populate it from source-native story-count columns.
 - [x] **Source field names confirmed.** CoStar export: `Number Of Stories` (both MF and Commercial workbooks). Pipedream DataStorage: `Elevation` at col 48 (header in row 3). LADBS `pi9x-tg5x` active feed exposes `height` as text / decimal feet, not stories, so LADBS is dropped from the Item 6 source list. See deferred follow-on below.
-- [ ] **Write the Alembic migration.** Adds one nullable integer column `elevation` to `projects` + `candidate_elevation` to `news_project_references`. No backfill needed.
-- [ ] **Update db/models.py** for both Project and NewsProjectReference.
-- [ ] **Run migration locally + verify in staging Supabase.** Per `docs/ops/migration_runbook.md` discipline: `pg_dump` backup first.
-- [ ] **Update extract_v2 schema + prompt** to capture `candidate_building_height_stories` from news articles.
-- [ ] **Update news integrator** to include the new field when writing reference rows and to thread it into the evidence row's `extracted_fields`.
-- [ ] **Update CoStar import** to map the stories column.
-- [ ] **Update Pipedream import** to map the stories column.
-- [ ] **Write the resolver.** New file `resolution/fields/elevation.py`. Rule: most recent explicit value wins, with source-priority tiebreak for same-date matches (Pipedream > CoStar > news_article). Treat null as "no evidence" — null Project value remains null if no evidence has the field.
-- [ ] **Wire into resolution_engine.** Register the new resolver alongside the existing six (status, units, delivery, developer, product_type, age_restriction).
-- [ ] **Update project detail Snapshot UI.** Add the field with a "Building height" label.
+- [ ] **Write the Alembic migration.** Adds one nullable integer column `candidate_stories` to `news_project_references`. No Project migration needed.
+- [ ] **Update db/models.py** for `NewsProjectReference.candidate_stories` only.
+- [ ] **Run migration locally + verify production/staging target only after backup.** Per `docs/ops/migration_runbook.md` discipline: `pg_dump` backup first. The remaining migration is nullable/additive and should land before `AGENT.reset`.
+- [ ] **Update extract_v2 schema + prompt** to capture `candidate_stories` from articles. Prompt language should say `building height in stories` so the extraction instruction is unambiguous; store the DB/model field as `candidate_stories`.
+- [ ] **Update news integrator** to write `candidate_stories` on reference rows and thread it into evidence as `stories`.
+- [ ] **Write the resolver.** New file `resolution/fields/stories.py`. Rule: most recent explicit value wins, with source-priority tiebreak for same-date matches (Pipedream > CoStar > news_article). Treat null as no evidence - null Project value remains null if no evidence has the field.
+- [ ] **Wire into resolution_engine.** Register the resolver alongside existing field resolvers.
+- [ ] **Update project detail Snapshot UI.** Verify `stories` is already displayed; adjust label if needed.
 - [ ] **Tests:**
   - [ ] Migration: forward + downgrade work cleanly
-  - [ ] News extraction: prompt produces `candidate_building_height_stories` from a fixture
-  - [ ] CoStar import: maps stories column correctly
-  - [ ] Pipedream import: same
+  - [ ] News extraction: prompt/schema accepts `candidate_stories` from a fixture
+  - [ ] News integrator: reference row and evidence expose `stories`
   - [ ] Resolver: most-recent-wins, source-priority tiebreak, null handling
 - [ ] **Apply migration in production.** Backup + apply per migration runbook. Record in Decision Log.
 - [ ] **Commit + push.**
 
-**Acceptance:** Migration applied to production, CoStar / Pipedream / news can populate the field, resolver writes the correct value, project-detail Snapshot shows the field.
+**Acceptance:** Migration applied to production, CoStar / Pipedream / news can populate `stories`, resolver writes the correct value, and project-detail Snapshot shows the field.
 
 **Deferred follow-ons:**
 
@@ -247,7 +242,8 @@ Phase 4 — Dedup table (days 10-19)
 
 **Lessons learned:**
 
-- Verify the actual source schema against a live API call before adding it to a multi-source resolver. Documentation hedges like "TBD, verify at first map" should be treated as work-not-yet-done, not as a placeholder to code against.
+- Verify the actual source schema against a live API call before adding it to a multi-source resolver. Documentation hedges like `TBD, verify at first map` should be treated as work-not-yet-done, not as a placeholder to code against.
+- Verify the canonical schema before naming a new field. Both the prior `elevation` framing and the LADBS `stories_proposed` assumption were spec-side hallucinations that would have been caught by a quick model-file grep. Pre-flight verification belongs at planning time, not just implementation time.
 
 ---
 
@@ -461,9 +457,10 @@ Phase 4 — Dedup table (days 10-19)
   - **Regression signals (DO emit candidate):** `Expired`, `Cancelled`, `Void`, `Revoked`, `Withdrawn`, `Plan Check Cancelled`, `Permit Cancelled`
   - **Sentinel:** unknown `status_desc` → treat as additive + log a `system_alert` (key `ladbs_unknown_permit_status`, scope `{status_desc: <value>}`) once per unique value per day so operators can extend the list as new values appear.
 - [x] **News source `display_name` column (Item 4).** Not needed — `news_sources.name` already holds display-friendly values: `"Urbanize LA"`, `"L.A. Business Journal"`, `"Paste-a-link"`. Use `NewsSource.name` directly. Drop the proposed `display_name` migration from Item 4 scope.
-- [x] **CoStar / Pipedream stories column names (Item 6).** Confirmed against real workbooks:
-  - **CoStar (both MF and Commercial exports):** column header `Number Of Stories`. Map this directly to the new Project field.
-  - **Pipedream DataStorage sheet:** column `Elevation` at col 48 (header row is row 3, not row 1). **Important naming insight:** Pipedream researchers' mental model already calls this field "Elevation" — the user's terminology yesterday ("stories/elevation") was matching the existing Pipedream column. We will name the canonical Project field `elevation` (integer, number of stories) to match researcher mental model rather than `building_height_stories`. Add a comment in the model to clarify "building height in stories, not ground elevation." Drop `building_height_feet` from scope — not in either source, not used by researchers, no need to add a field that nobody populates.
+- [x] **CoStar / Pipedream stories column names (Item 6).** Confirmed against real workbooks and superseded by model-file verification on 2026-05-13:
+  - **Canonical Project field:** `projects.stories` already exists. No new `elevation` Project field is needed.
+  - **CoStar (both MF and Commercial exports):** column header `Number Of Stories`; already mapped to `Project.stories`.
+  - **Pipedream DataStorage sheet:** column `Elevation` at col 48 (header row is row 3, not row 1); already mapped to `Project.stories`.
 - [x] **Relationship picker integration (Item 5).** Located in `app/(app)/pipeline/[projectId]/relationship-picker.tsx`. The component uses `RELATIONSHIP_OPTIONS` (5 types — phase, master_plan, counterpart, duplicate, supersedes — exactly what Item 5 needs) and `useActionState` hooks bound to project-detail-specific server actions in `./actions`. **Not directly reusable as-is** — actions are scoped to "I have a project, add a relationship to another existing project." For the dedup-table create-and-link flow we need a different action shape that creates BOTH a new Project AND a relationship in one transaction. **Plan:** extract the inner UI atoms (`RelationshipTypeSelect`, `ProjectSearchDropdown`) into shared components under `components/relationships/`, then write a new wrapper in the dedup-table that uses those atoms with a new action bound to `POST /review/items/{item_id}/create-and-link`. Estimated ~2-3 extra hours for the extraction; small addition to Item 5 effort.
 
 ---
