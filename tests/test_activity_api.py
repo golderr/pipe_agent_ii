@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.routers.activity import (
     MAX_INTERNAL_LIMIT,
+    _field_label,
     list_activity_events,
     list_activity_semantic_metrics,
 )
@@ -90,6 +91,10 @@ def _tamper_activity_cursor(cursor: str, **updates: object) -> str:
     payload.update(updates)
     raw = json.dumps(payload, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def test_activity_field_label_formats_stories() -> None:
+    assert _field_label("stories") == "Stories"
 
 
 def _project(
@@ -268,6 +273,7 @@ def _semantic_interpretation(
     parse_status: str = NewsExtractionParseStatus.OK.value,
     created_at: datetime = datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
 ) -> NewsSemanticInterpretation:
+    _ensure_candidate_stories_reference_column(postgres_session)
     source, article = _news_article(postgres_session, source_slug=source_slug)
     extraction = NewsExtraction(
         article_id=article.id,
@@ -333,6 +339,17 @@ def _semantic_interpretation(
     postgres_session.add(semantic)
     postgres_session.flush()
     return semantic
+
+
+def _ensure_candidate_stories_reference_column(postgres_session: Session) -> None:
+    inspector = inspect(postgres_session.bind)
+    if not inspector.has_table("news_project_references"):
+        pytest.skip("Apply news reference migrations before running semantic activity tests.")
+    reference_columns = {
+        column["name"] for column in inspector.get_columns("news_project_references")
+    }
+    if "candidate_stories" not in reference_columns:
+        pytest.skip("Apply migration 202605130039 before running semantic activity tests.")
 
 
 def _semantic_review_decision(

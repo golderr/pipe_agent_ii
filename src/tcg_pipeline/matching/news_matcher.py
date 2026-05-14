@@ -794,6 +794,11 @@ def _source_default_city(article: NewsArticle) -> str | None:
 
 
 def _candidate_stories(reference: NewsProjectReference) -> int | None:
+    try:
+        if reference.candidate_stories is not None:
+            return int(reference.candidate_stories)
+    except (TypeError, ValueError):
+        pass
     payload = reference.candidate_signal_flags or {}
     if isinstance(payload, dict):
         for key in ("stories", "story_count", "floors"):

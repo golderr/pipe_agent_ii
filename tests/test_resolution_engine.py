@@ -120,6 +120,53 @@ def test_resolve_project_logs_only_discrepancies_and_can_apply(
     assert "Evidence type: building_inspection_recorded" in (status_history_rows[0].notes or "")
 
 
+def test_resolve_project_applies_stories_resolution(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("evidence"):
+        pytest.skip("Apply the evidence layer migration before running resolution tests.")
+
+    project = Project(
+        canonical_address="500 STORY STREET LOS ANGELES CA 90012",
+        raw_addresses=["500 Story St"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.PROPOSED,
+        stories=5,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(
+        Evidence(
+            project_id=project.id,
+            source_type="news_article",
+            source_tier=2,
+            ingest_method="news_integrator",
+            collected_at=datetime(2026, 4, 5, tzinfo=UTC),
+            evidence_date=date(2026, 4, 5),
+            extracted_fields={"stories": {"value": 9, "confidence": "medium"}},
+        )
+    )
+    postgres_session.flush()
+
+    result = resolve_project(project.id, postgres_session, apply=True, write_resolution_log=True)
+    postgres_session.flush()
+
+    assert "stories" in result.changed_fields
+    assert result.field_resolutions["stories"].value == 9
+    assert project.stories == 9
+    logged = postgres_session.execute(
+        select(ResolutionLog).where(
+            ResolutionLog.project_id == project.id,
+            ResolutionLog.field == "stories",
+        )
+    ).scalar_one()
+    assert logged.current_value == 5
+    assert logged.resolved_value == 9
+
+
 def test_resolve_project_keeps_existing_values_when_partial_evidence_arrives(
     postgres_session: Session,
 ) -> None:

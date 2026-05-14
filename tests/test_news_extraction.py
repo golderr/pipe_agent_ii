@@ -543,6 +543,9 @@ def test_render_extraction_prompt_omits_registry_glossary(
     assert "Do not compute market-rate units by subtracting affordable units" in (
         rendered_prompt.system_text
     )
+    assert "directly states the building height in stories or floors" in (
+        rendered_prompt.system_text
+    )
     assert "Use candidate_city for the city or municipality directly stated" in (
         rendered_prompt.system_text
     )
@@ -552,6 +555,7 @@ def test_render_extraction_prompt_omits_registry_glossary(
     assert "Permits alone are not Under Construction" in rendered_prompt.system_text
     required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
     assert "candidate_city" in required
+    assert "candidate_stories" in required
     assert "registry_developer_id" not in required
     assert "registry_project_id" not in required
     diagnostic_properties = rendered_prompt.schema["properties"]["diagnostic"]["properties"]
@@ -648,6 +652,9 @@ def test_render_extract_retry_prompt_uses_retry_context_without_glossary(
     assert "schema_invalid" in rendered_prompt.user_text
     assert "missing required field" in rendered_prompt.user_text
     assert "Retry context" in rendered_prompt.user_text
+    required = rendered_prompt.schema["properties"]["project_references"]["items"]["required"]
+    assert "candidate_stories" in required
+    assert "directly states building height" in rendered_prompt.system_text
 
 
 def test_persist_extraction_response_writes_extraction_references_article_pointer_and_cost(
@@ -660,7 +667,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     postgres_session.flush()
     rendered_prompt = render_extraction_prompt(postgres_session, article)
     response = ExtractionLLMResponse(
-        payload=_payload(candidate_unit_workforce=16),
+        payload=_payload(candidate_unit_workforce=16, candidate_stories=8),
         text="{}",
         model="claude-opus-4-7",
         usage=LLMUsage(
@@ -714,6 +721,7 @@ def test_persist_extraction_response_writes_extraction_references_article_pointe
     assert reference.candidate_city == "Los Angeles"
     assert reference.candidate_unit_total == 140
     assert reference.candidate_unit_workforce == 16
+    assert reference.candidate_stories == 8
     assert reference.candidate_signal_flags == {"groundbreaking_announced": True}
     assert reference.candidate_delivery_year_normalized == date(2027, 11, 1)
     assert reference.match_status == "pending"
@@ -1608,6 +1616,7 @@ def _payload(
     candidate_city: str | None = "Los Angeles",
     candidate_unit_total: int = 140,
     candidate_unit_workforce: int | None = None,
+    candidate_stories: int | None = None,
     candidate_confidence: str = "high",
     passage_excerpts: list[dict] | None = None,
     registry_project_id: str | None = None,
@@ -1641,6 +1650,7 @@ def _payload(
                 "candidate_unit_affordable": 14,
                 "candidate_unit_market_rate": 126,
                 "candidate_unit_workforce": candidate_unit_workforce,
+                "candidate_stories": candidate_stories,
                 "candidate_product_type": "apartment",
                 "candidate_age_restriction": "non_age_restricted",
                 "candidate_status_signal": "Under Construction",
@@ -1708,6 +1718,11 @@ def _ensure_news_extraction_tables(postgres_session: Session) -> None:
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply Phase D migrations before running extraction tests: {missing}")
+    reference_columns = {
+        column["name"] for column in inspector.get_columns("news_project_references")
+    }
+    if "candidate_stories" not in reference_columns:
+        pytest.skip("Apply migration 202605130039 before running extraction tests.")
 
 
 def _news_source(postgres_session: Session) -> NewsSource:

@@ -400,6 +400,7 @@ def _gated_reference(
         candidate_unit_affordable=12,
         candidate_unit_market_rate=108,
         candidate_unit_workforce=None,
+        candidate_stories=None,
         candidate_product_type="apartment",
         candidate_age_restriction="non_age_restricted",
         candidate_status_signal="Proposed",
@@ -512,6 +513,11 @@ def _ensure_agent1_tables(postgres_session: Session) -> None:
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply AGENT.1 migrations before running news embedding tests: {missing}")
+    reference_columns = {
+        column["name"] for column in inspector.get_columns("news_project_references")
+    }
+    if "candidate_stories" not in reference_columns:
+        pytest.skip("Apply migration 202605130039 before running news embedding tests.")
 
 
 def _urbanize_source(postgres_session: Session) -> NewsSource:

@@ -37,6 +37,7 @@ EVIDENCE_DERIVED_OVERRIDE_FIELDS = frozenset(
         "affordable_units",
         "market_rate_units",
         "workforce_units",
+        "stories",
         "developer",
         "product_type",
         "age_restriction",
@@ -45,7 +46,7 @@ EVIDENCE_DERIVED_OVERRIDE_FIELDS = frozenset(
 )
 
 INTEGER_FIELDS = frozenset(
-    {"total_units", "affordable_units", "market_rate_units", "workforce_units"}
+    {"total_units", "affordable_units", "market_rate_units", "workforce_units", "stories"}
 )
 
 

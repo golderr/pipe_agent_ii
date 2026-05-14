@@ -1432,6 +1432,7 @@ class NewsProjectReference(Base, TimestampMixin):
     candidate_unit_affordable: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_unit_market_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_unit_workforce: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    candidate_stories: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_product_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_age_restriction: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_status_signal: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -218,19 +218,19 @@ Phase 4 — Dedup table (days 10-19)
 
 - [x] **Canonical field confirmed.** `projects.stories` already exists as a nullable integer Project field. CoStar and Pipedream already populate it from source-native story-count columns.
 - [x] **Source field names confirmed.** CoStar export: `Number Of Stories` (both MF and Commercial workbooks). Pipedream DataStorage: `Elevation` at col 48 (header in row 3). LADBS `pi9x-tg5x` active feed exposes `height` as text / decimal feet, not stories, so LADBS is dropped from the Item 6 source list. See deferred follow-on below.
-- [ ] **Write the Alembic migration.** Adds one nullable integer column `candidate_stories` to `news_project_references`. No Project migration needed.
-- [ ] **Update db/models.py** for `NewsProjectReference.candidate_stories` only.
+- [x] **Write the Alembic migration.** Adds one nullable integer column `candidate_stories` to `news_project_references`. No Project migration needed.
+- [x] **Update db/models.py** for `NewsProjectReference.candidate_stories` only.
 - [ ] **Run migration locally + verify production/staging target only after backup.** Per `docs/ops/migration_runbook.md` discipline: `pg_dump` backup first. The remaining migration is nullable/additive and should land before `AGENT.reset`.
-- [ ] **Update extract_v2 schema + prompt** to capture `candidate_stories` from articles. Prompt language should say `building height in stories` so the extraction instruction is unambiguous; store the DB/model field as `candidate_stories`.
-- [ ] **Update news integrator** to write `candidate_stories` on reference rows and thread it into evidence as `stories`.
-- [ ] **Write the resolver.** New file `resolution/fields/stories.py`. Rule: most recent explicit value wins, with source-priority tiebreak for same-date matches (Pipedream > CoStar > news_article). Treat null as no evidence - null Project value remains null if no evidence has the field.
-- [ ] **Wire into resolution_engine.** Register the resolver alongside existing field resolvers.
-- [ ] **Update project detail Snapshot UI.** Verify `stories` is already displayed; adjust label if needed.
+- [x] **Update extract_v2 schema + prompt** to capture `candidate_stories` from articles. Prompt language should say `building height in stories` so the extraction instruction is unambiguous; store the DB/model field as `candidate_stories`.
+- [x] **Update news integrator** to write `candidate_stories` on reference rows and thread it into evidence as `stories`.
+- [x] **Write the resolver.** New file `resolution/fields/stories.py`. Rule: most recent explicit value wins, with source-priority tiebreak for same-date matches (Pipedream > CoStar > news_article). Treat null as no evidence - null Project value remains null if no evidence has the field.
+- [x] **Wire into resolution_engine.** Register the resolver alongside existing field resolvers.
+- [x] **Update project detail Snapshot UI.** Verify `stories` is already displayed; adjust label if needed.
 - [ ] **Tests:**
-  - [ ] Migration: forward + downgrade work cleanly
-  - [ ] News extraction: prompt/schema accepts `candidate_stories` from a fixture
-  - [ ] News integrator: reference row and evidence expose `stories`
-  - [ ] Resolver: most-recent-wins, source-priority tiebreak, null handling
+  - [x] Migration: forward + downgrade SQL generation works cleanly; live application remains gated by the backup/runbook step above
+  - [x] News extraction: prompt/schema accepts `candidate_stories` from a fixture
+  - [x] News integrator: reference row and evidence expose `stories`
+  - [x] Resolver: most-recent-wins, source-priority tiebreak, null handling
 - [ ] **Apply migration in production.** Backup + apply per migration runbook. Record in Decision Log.
 - [ ] **Commit + push.**
 
@@ -244,6 +244,9 @@ Phase 4 — Dedup table (days 10-19)
 
 - Verify the actual source schema against a live API call before adding it to a multi-source resolver. Documentation hedges like `TBD, verify at first map` should be treated as work-not-yet-done, not as a placeholder to code against.
 - Verify the canonical schema before naming a new field. Both the prior `elevation` framing and the LADBS `stories_proposed` assumption were spec-side hallucinations that would have been caught by a quick model-file grep. Pre-flight verification belongs at planning time, not just implementation time.
+- Keep retry schemas aligned with the active extraction schema when adding required prompt fields; otherwise a schema-invalid first pass can retry back into an older shape.
+- When an existing Project field becomes resolver-owned, verify the UI grouping as well as field visibility. `stories` was already visible in Snapshot, but belonged in Core rather than read-only Source Facts after resolver wiring.
+- Resolver-owned Snapshot fields also need API metadata wired in parallel today: override allowlists, integer coercion, activity labels, review priority, and diff support all need to agree until Item 3 decides whether to centralize field metadata.
 
 ---
 

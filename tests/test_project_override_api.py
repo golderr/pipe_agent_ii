@@ -105,6 +105,59 @@ def test_set_project_override_writes_table_resolves_and_logs(
     assert change_log.reviewed_by_email == "allowed@example.com"
 
 
+def test_set_project_override_supports_stories_roundtrip(
+    postgres_session: Session,
+) -> None:
+    _ensure_override_api_tables(postgres_session)
+    project = _project("910 STORIES OVERRIDE WAY LOS ANGELES CA 90012", stories=5)
+    postgres_session.add(project)
+    postgres_session.flush()
+    postgres_session.add(_stories_evidence(project.id, 5))
+    postgres_session.flush()
+    client = _client(postgres_session)
+
+    response = client.post(
+        f"/projects/{project.id}/override",
+        json={
+            "field_name": "stories",
+            "value": "8",
+            "note": "Confirmed building height.",
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    postgres_session.refresh(project)
+    override = postgres_session.execute(
+        select(ResearcherOverride).where(
+            ResearcherOverride.project_id == project.id,
+            ResearcherOverride.field_name == "stories",
+            ResearcherOverride.cleared_at.is_(None),
+        )
+    ).scalar_one()
+    change_log = postgres_session.execute(
+        select(ChangeLog).where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.field == "stories",
+            ChangeLog.change_type == ChangeType.RESEARCHER_OVERRIDE,
+        )
+    ).scalar_one()
+
+    assert body["field_name"] == "stories"
+    assert body["old_value"] == 5
+    assert body["new_value"] == 8
+    assert body["resolved_value"] == 8
+    assert project.stories == 8
+    assert override.value == 8
+    assert override.mode == "review_protected"
+    assert override.note == "Confirmed building height."
+    assert override.baseline is not None
+    assert change_log.old_value == 5
+    assert change_log.new_value == 8
+    assert change_log.reviewed_by_email == "allowed@example.com"
+
+
 def test_clear_project_override_marks_row_cleared_resolves_and_logs(
     postgres_session: Session,
 ) -> None:
@@ -429,4 +482,20 @@ def _total_units_evidence(
         collected_at=collected_at or datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
         evidence_date=evidence_date or date(2026, 4, 26),
         extracted_fields={"total_units": {"value": value, "confidence": "medium"}},
+    )
+
+
+def _stories_evidence(
+    project_id: uuid.UUID,
+    value: int,
+) -> Evidence:
+    return Evidence(
+        project_id=project_id,
+        source_type="costar",
+        source_tier=3,
+        ingest_method="manual",
+        source_record_id=f"costar-stories-{project_id}-{value}",
+        collected_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        evidence_date=date(2026, 4, 26),
+        extracted_fields={"stories": {"value": value, "confidence": "medium"}},
     )

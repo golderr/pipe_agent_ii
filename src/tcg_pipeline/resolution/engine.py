@@ -34,6 +34,7 @@ from tcg_pipeline.resolution.fields.delivery_year import resolve_delivery_year
 from tcg_pipeline.resolution.fields.developer import resolve_developer
 from tcg_pipeline.resolution.fields.product_type import resolve_product_type
 from tcg_pipeline.resolution.fields.status import resolve_status
+from tcg_pipeline.resolution.fields.stories import resolve_stories
 from tcg_pipeline.resolution.fields.units import resolve_unit_split, resolve_units
 from tcg_pipeline.resolution.likelihood import compute_likelihood
 from tcg_pipeline.review.contradictions import detect_project_contradictions
@@ -46,6 +47,7 @@ LOGGED_FIELDS = {
     "affordable_units",
     "market_rate_units",
     "workforce_units",
+    "stories",
     "product_type",
     "date_delivery",
     "delivery_year_provenance",
@@ -112,6 +114,11 @@ def resolve_project(
         "workforce_units",
         overrides=overrides,
     )
+    stories_resolution = resolve_stories(
+        evidence_rows,
+        project,
+        overrides=overrides,
+    )
     product_type_resolution = resolve_product_type(
         evidence_rows,
         project,
@@ -143,6 +150,7 @@ def resolve_project(
         "affordable_units": affordable_units_resolution,
         "market_rate_units": market_rate_units_resolution,
         "workforce_units": workforce_units_resolution,
+        "stories": stories_resolution,
         "product_type": product_type_resolution,
         "date_delivery": delivery_resolution,
         "delivery_year_provenance": FieldResolution(

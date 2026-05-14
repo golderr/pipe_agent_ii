@@ -51,6 +51,7 @@ from tcg_pipeline.db.review_workflow import accept_review_item
 from tcg_pipeline.matching.news_matcher import (
     NewsMatchCandidate,
     NewsMatchResult,
+    _candidate_stories,
     match_news_reference,
 )
 from tcg_pipeline.matching.normalizer import normalize_address
@@ -352,6 +353,15 @@ def test_news_matcher_confirms_identifier_and_ignores_invalid_registry_hint(
     assert "ignored_registry_project_id" in match.diagnostics
 
 
+def test_news_matcher_reads_candidate_stories_column_before_legacy_flags() -> None:
+    reference = NewsProjectReference(
+        candidate_stories=9,
+        candidate_signal_flags={"stories": 6},
+    )
+
+    assert _candidate_stories(reference) == 9
+
+
 def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
     postgres_session: Session,
 ) -> None:
@@ -378,6 +388,7 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
                 candidate_developer="Atlas Development",
                 candidate_unit_total=140,
                 candidate_unit_workforce=16,
+                candidate_stories=8,
                 passage_excerpts=[
                     {
                         "field": "candidate_unit_total",
@@ -392,6 +403,13 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
                         "passage": "The plans include 16 workforce units.",
                         "offset_start": 36,
                         "offset_end": 54,
+                    },
+                    {
+                        "field": "candidate_stories",
+                        "value": 8,
+                        "passage": "Helio will rise eight stories.",
+                        "offset_start": 55,
+                        "offset_end": 84,
                     },
                 ],
             )
@@ -425,6 +443,8 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
     assert refreshed_reference is not None
     assert refreshed_project.total_units == 140
     assert refreshed_project.workforce_units == 16
+    assert refreshed_project.stories == 8
+    assert refreshed_reference.candidate_stories == 8
     assert refreshed_reference.match_status == NewsMatchStatus.CONFIRMED.value
     evidence = postgres_session.execute(
         select(Evidence).where(Evidence.source_record_id == str(reference.id))
@@ -438,6 +458,8 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
     assert evidence.extracted_fields["workforce_units"]["highlights"][0]["field"] == (
         "workforce_units"
     )
+    assert evidence.extracted_fields["stories"]["value"] == 8
+    assert evidence.extracted_fields["stories"]["highlights"][0]["field"] == "stories"
     assert evidence.extracted_fields["total_units"]["highlights"][0]["passage"].startswith(
         "Atlas broke ground"
     )
@@ -461,6 +483,16 @@ def test_news_integration_writes_confirmed_evidence_and_per_field_review_items(
             "evidence_id": str(evidence.id),
         }
     ]
+    stories_item = postgres_session.execute(
+        select(ReviewItem).where(
+            ReviewItem.project_id == project.id,
+            ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+            ReviewItem.field_name == "stories",
+        )
+    ).scalar_one()
+    assert stories_item.source_run_id == source_run.id
+    assert stories_item.winning_evidence_id == evidence.id
+    assert stories_item.payload["changes"][0]["new_value"] == 8
     all_status_items = postgres_session.execute(
         select(ReviewItem).where(
             ReviewItem.project_id == project.id,
@@ -4102,10 +4134,13 @@ def _ensure_news_integration_tables(postgres_session: Session) -> None:
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
         pytest.skip(f"Apply Phase D migrations before running integration tests: {missing}")
-    if "matched_evidence_id" not in {
+    reference_columns = {
         column["name"] for column in inspector.get_columns("news_project_references")
-    }:
+    }
+    if "matched_evidence_id" not in reference_columns:
         pytest.skip("Apply latest Phase D news reference migrations before running tests.")
+    if "candidate_stories" not in reference_columns:
+        pytest.skip("Apply migration 202605130039 before running integration tests.")
 
 
 def _ensure_agent2_tables(postgres_session: Session) -> None:
@@ -4393,6 +4428,7 @@ def _reference_from_payload(
         candidate_unit_affordable=payload.get("candidate_unit_affordable"),
         candidate_unit_market_rate=payload.get("candidate_unit_market_rate"),
         candidate_unit_workforce=payload.get("candidate_unit_workforce"),
+        candidate_stories=payload.get("candidate_stories"),
         candidate_product_type=payload.get("candidate_product_type"),
         candidate_age_restriction=payload.get("candidate_age_restriction"),
         candidate_status_signal=payload.get("candidate_status_signal"),
@@ -4417,6 +4453,7 @@ def _reference_payload(
     candidate_developer: str | None = None,
     candidate_unit_total: int | None = None,
     candidate_unit_workforce: int | None = None,
+    candidate_stories: int | None = None,
     candidate_identifiers: dict[str, list[str]] | None = None,
     candidate_product_type: str | None = None,
     candidate_age_restriction: str | None = None,
@@ -4434,6 +4471,7 @@ def _reference_payload(
         "candidate_unit_affordable": None,
         "candidate_unit_market_rate": None,
         "candidate_unit_workforce": candidate_unit_workforce,
+        "candidate_stories": candidate_stories,
         "candidate_product_type": candidate_product_type,
         "candidate_age_restriction": candidate_age_restriction,
         "candidate_status_signal": candidate_status_signal,

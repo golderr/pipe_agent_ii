@@ -50,6 +50,7 @@ class ProjectDiffSnapshot:
     affordable_units: int | None
     market_rate_units: int | None
     workforce_units: int | None
+    stories: int | None
     product_type: ProductType
     date_delivery: date | None
     age_restriction: AgeRestriction
@@ -122,6 +123,17 @@ def diff_project_against_record(project: Project, raw_record: RawRecord) -> Diff
             )
         )
 
+    new_stories = _parse_int(mapped_fields.get("stories"))
+    if new_stories is not None and new_stories != project.stories:
+        diff_result.field_changes.append(
+            DetectedChange(
+                field="stories",
+                old_value=project.stories,
+                new_value=new_stories,
+                priority=Priority.MEDIUM,
+            )
+        )
+
     return diff_result
 
 
@@ -134,6 +146,7 @@ def snapshot_project_for_diff(project: Project) -> ProjectDiffSnapshot:
         affordable_units=project.affordable_units,
         market_rate_units=project.market_rate_units,
         workforce_units=project.workforce_units,
+        stories=project.stories,
         product_type=project.product_type,
         date_delivery=project.date_delivery,
         age_restriction=project.age_restriction,
@@ -211,6 +224,13 @@ def diff_project_snapshots(
         field="workforce_units",
         old_value=previous.workforce_units,
         new_value=current.workforce_units,
+        priority=Priority.MEDIUM,
+    )
+    _append_change(
+        diff_result,
+        field="stories",
+        old_value=previous.stories,
+        new_value=current.stories,
         priority=Priority.MEDIUM,
     )
     _append_change(

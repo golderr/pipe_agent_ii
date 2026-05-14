@@ -2485,6 +2485,7 @@ def _field_label(value: str) -> str:
         "affordable_units": "Affordable units",
         "market_rate_units": "Market-rate units",
         "workforce_units": "Workforce units",
+        "stories": "Stories",
         "date_delivery": "Delivery date",
         "developer": "Developer",
     }

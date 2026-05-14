@@ -56,6 +56,7 @@ CHANGELOG_PRIORITY_BY_FIELD = {
     "affordable_units": Priority.MEDIUM,
     "market_rate_units": Priority.MEDIUM,
     "workforce_units": Priority.MEDIUM,
+    "stories": Priority.MEDIUM,
     "product_type": Priority.MEDIUM,
     "date_delivery": Priority.MEDIUM,
     "age_restriction": Priority.MEDIUM,

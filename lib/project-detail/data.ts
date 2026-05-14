@@ -317,6 +317,12 @@ const CORE_FIELDS: FieldDefinition[] = [
     edit: { mutation: "override", kind: "number", options: null, info: CORE_OVERRIDE_INFO }
   },
   {
+    key: "stories",
+    label: "Stories",
+    className: "evidence",
+    edit: { mutation: "override", kind: "number", options: null, info: CORE_OVERRIDE_INFO }
+  },
+  {
     key: "developer",
     label: "Developer",
     className: "evidence",
@@ -347,7 +353,6 @@ const SOURCE_FACT_FIELDS: FieldDefinition[] = [
   { key: "costar_submarket", label: "CoStar submarket", className: "source" },
   { key: "applicant", label: "Applicant", className: "source" },
   { key: "description", label: "Description", className: "source" },
-  { key: "stories", label: "Stories", className: "source" },
   { key: "acres", label: "Acres", className: "source" },
   { key: "retail_sf", label: "Retail SF", className: "source" },
   { key: "office_sf", label: "Office SF", className: "source" },

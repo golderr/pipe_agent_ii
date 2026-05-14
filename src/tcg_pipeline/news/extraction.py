@@ -272,6 +272,7 @@ class ProjectReferencePayload(BaseModel):
     candidate_unit_affordable: int | None = Field(default=None, ge=0)
     candidate_unit_market_rate: int | None = Field(default=None, ge=0)
     candidate_unit_workforce: int | None = Field(default=None, ge=0)
+    candidate_stories: int | None = Field(default=None, ge=0)
     candidate_product_type: (
         Literal["apartment", "condo", "townhome", "single_family", "micro_co_living", "other"]
         | None
@@ -898,6 +899,7 @@ def _reference_from_payload(
         candidate_unit_affordable=payload.get("candidate_unit_affordable"),
         candidate_unit_market_rate=payload.get("candidate_unit_market_rate"),
         candidate_unit_workforce=payload.get("candidate_unit_workforce"),
+        candidate_stories=payload.get("candidate_stories"),
         candidate_product_type=payload.get("candidate_product_type"),
         candidate_age_restriction=payload.get("candidate_age_restriction"),
         candidate_status_signal=payload.get("candidate_status_signal"),

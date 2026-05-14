@@ -61,3 +61,30 @@ def test_diff_project_against_record_skips_backward_status_suggestion() -> None:
 
     assert diff_result.status_suggestion is None
     assert diff_result.field_changes == []
+
+
+def test_diff_project_against_record_detects_stories_change() -> None:
+    project = Project(
+        canonical_address="100 STORY AVENUE LOS ANGELES CA 90045",
+        raw_addresses=["100 Story Ave"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        stories=5,
+    )
+    raw_record = RawRecord(
+        source_name="pipedream",
+        source_record_id="pd-100",
+        raw_payload={},
+        canonical_address="100 STORY AVENUE LOS ANGELES CA 90045",
+        mapped_fields={"stories": "7"},
+    )
+
+    diff_result = diff_project_against_record(project, raw_record)
+
+    assert len(diff_result.field_changes) == 1
+    change = diff_result.field_changes[0]
+    assert change.field == "stories"
+    assert change.old_value == 5
+    assert change.new_value == 7

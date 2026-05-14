@@ -173,6 +173,7 @@ def test_news_summary_views_hide_raw_content_and_use_reader_role(
 
     reference_columns = _relation_columns(postgres_session, "news_project_references_summary")
     assert "candidate_city" in reference_columns
+    assert "candidate_stories" in reference_columns
     assert "passage_excerpts" not in reference_columns
 
     assert _has_select(postgres_session, "authenticated", "news_articles_summary")
@@ -308,6 +309,8 @@ def _ensure_news_schema(postgres_session: Session) -> None:
     }
     if "candidate_city" not in reference_columns:
         pytest.skip("Apply migration 202605080035 before running news schema tests.")
+    if "candidate_stories" not in reference_columns:
+        pytest.skip("Apply migration 202605130039 before running news schema tests.")
     missing_views = [
         view_name
         for view_name in (

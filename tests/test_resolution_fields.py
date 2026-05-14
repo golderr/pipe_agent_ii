@@ -20,6 +20,7 @@ from tcg_pipeline.resolution.fields.delivery_year import resolve_delivery_year
 from tcg_pipeline.resolution.fields.developer import resolve_developer
 from tcg_pipeline.resolution.fields.product_type import resolve_product_type
 from tcg_pipeline.resolution.fields.status import resolve_status
+from tcg_pipeline.resolution.fields.stories import resolve_stories
 from tcg_pipeline.resolution.fields.units import resolve_unit_split, resolve_units
 
 
@@ -129,6 +130,71 @@ def test_resolve_units_uses_most_recent_evidence() -> None:
     resolution = resolve_units([older, newer], project, "total_units")
 
     assert resolution.value == 240
+
+
+def test_resolve_stories_uses_most_recent_explicit_value() -> None:
+    project = _build_project()
+    project.stories = 5
+    older = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2025, 12, 1),
+        extracted_fields={"stories": {"value": 6, "confidence": None}},
+    )
+    newer = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 2, 1),
+        extracted_fields={"stories": {"value": "9", "confidence": "medium"}},
+    )
+
+    resolution = resolve_stories([older, newer], project)
+
+    assert resolution.value == 9
+    assert resolution.confidence.value == "medium"
+    assert resolution.rule_applied == "most_recent_wins"
+
+
+def test_resolve_stories_prefers_pipedream_on_temporal_tie() -> None:
+    project = _build_project()
+    collected_at = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
+    costar_evidence = _build_evidence(
+        source_type="costar",
+        source_tier=3,
+        evidence_date=date(2026, 2, 1),
+        collected_at=collected_at,
+        extracted_fields={"stories": {"value": 7, "confidence": None}},
+    )
+    pipedream_evidence = _build_evidence(
+        source_type="pipedream",
+        source_tier=1,
+        evidence_date=date(2026, 2, 1),
+        collected_at=collected_at,
+        extracted_fields={"stories": {"value": 8, "confidence": None}},
+    )
+    news_evidence = _build_evidence(
+        source_type="news_article",
+        source_tier=2,
+        evidence_date=date(2026, 2, 1),
+        collected_at=collected_at,
+        extracted_fields={"stories": {"value": 9, "confidence": None}},
+    )
+
+    resolution = resolve_stories([costar_evidence, news_evidence, pipedream_evidence], project)
+
+    assert resolution.value == 8
+    assert resolution.metadata["evidence_frontier"]["source_type"] == "pipedream"
+
+
+def test_resolve_stories_keeps_existing_project_value_without_evidence() -> None:
+    project = _build_project()
+    project.stories = 11
+
+    resolution = resolve_stories([], project)
+
+    assert resolution.value == 11
+    assert resolution.confidence.value == "low"
+    assert resolution.rule_applied == "no_explicit_stories_evidence"
 
 
 def test_resolve_delivery_year_estimates_midyear_when_explicit_date_missing() -> None:

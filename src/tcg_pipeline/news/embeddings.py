@@ -143,6 +143,7 @@ class GatedNewsReference:
     candidate_unit_affordable: int | None
     candidate_unit_market_rate: int | None
     candidate_unit_workforce: int | None
+    candidate_stories: int | None
     candidate_product_type: str | None
     candidate_age_restriction: str | None
     candidate_status_signal: str | None
@@ -660,6 +661,7 @@ def _gated_reference_from_rows(
         candidate_unit_affordable=reference.candidate_unit_affordable,
         candidate_unit_market_rate=reference.candidate_unit_market_rate,
         candidate_unit_workforce=reference.candidate_unit_workforce,
+        candidate_stories=reference.candidate_stories,
         candidate_product_type=reference.candidate_product_type,
         candidate_age_restriction=reference.candidate_age_restriction,
         candidate_status_signal=reference.candidate_status_signal,
@@ -704,6 +706,7 @@ def _field_lines(reference: GatedNewsReference) -> list[str]:
         ("Affordable units", reference.candidate_unit_affordable),
         ("Market-rate units", reference.candidate_unit_market_rate),
         ("Workforce units", reference.candidate_unit_workforce),
+        ("Stories", reference.candidate_stories),
         ("Product type", reference.candidate_product_type),
         ("Age restriction", reference.candidate_age_restriction),
         ("Status signal", reference.candidate_status_signal),

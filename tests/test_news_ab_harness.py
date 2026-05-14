@@ -40,6 +40,7 @@ CANNED_EXTRACTION_PAYLOAD = {
             "candidate_unit_affordable": None,
             "candidate_unit_market_rate": None,
             "candidate_unit_workforce": None,
+            "candidate_stories": 12,
             "candidate_product_type": "apartment",
             "candidate_age_restriction": "non_age_restricted",
             "candidate_status_signal": "Proposed",
@@ -243,6 +244,7 @@ def test_run_extraction_ab_harness_rolls_back_projection_writes(
     assert reference_result["candidate_product_type"] == "apartment"
     assert reference_result["candidate_age_restriction"] == "non_age_restricted"
     assert reference_result["candidate_status_signal"] == "Proposed"
+    assert reference_result["candidate_stories"] == 12
     assert reference_result["candidate_neighborhood"] == "Downtown Los Angeles"
     assert reference_result["candidate_city"] == "Los Angeles"
     assert reference_result["passage_excerpts"][0]["field"] == "candidate_name"
