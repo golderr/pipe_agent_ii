@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   buildDiscoveryCards,
+  candidateBandTone,
   isDiscoveryItem,
   mapDedupCandidatesResponse,
   searchedSummary,
-  subjectForDiscoveryItem
+  sortCandidates,
+  subjectForDiscoveryItem,
+  visibleMatchSignals
 } from "./discovery";
 import type { ReviewQueueItem } from "./types";
 
@@ -132,7 +135,102 @@ describe("review discovery helpers", () => {
     expect(result.newCandidateProbability).toBe(0.18);
     expect(searchedSummary(result)).toContain("threshold 0.12");
   });
+
+  it("sorts candidates with match layer as the primary key", () => {
+    const result = mapDedupCandidatesResponse({
+      candidates: [
+        candidatePayload("layer-2-high", {
+          match_layer: 2,
+          match_likelihood: 0.9,
+          project_name: "Beta"
+        }),
+        candidatePayload("layer-1-low", {
+          match_layer: 1,
+          match_likelihood: 0,
+          project_name: "Zulu"
+        }),
+        candidatePayload("layer-1-alpha", {
+          match_layer: 1,
+          match_likelihood: 0.6,
+          project_name: "Alpha"
+        })
+      ]
+    });
+
+    expect(sortCandidates(result.candidates).map((candidate) => candidate.projectId)).toEqual([
+      "layer-1-alpha",
+      "layer-1-low",
+      "layer-2-high"
+    ]);
+    expect(
+      sortCandidates(result.candidates, {
+        field: "projectName",
+        direction: "asc"
+      }).map((candidate) => candidate.projectId)
+    ).toEqual(["layer-1-alpha", "layer-1-low", "layer-2-high"]);
+  });
+
+  it("keeps hidden signals in the data model and bands rows by layer/likelihood", () => {
+    const result = mapDedupCandidatesResponse({
+      candidates: [
+        candidatePayload("candidate-1", {
+          match_layer: 2,
+          match_likelihood: 0.55,
+          match_signals: {
+            address: {
+              score: 0,
+              contributed: false,
+              searched: true,
+              label: "Address",
+              detail: null,
+              weight: 0.25
+            },
+            name: {
+              score: 0,
+              contributed: false,
+              searched: false,
+              label: "Name",
+              detail: null,
+              weight: 0.1
+            },
+            developer: {
+              score: 1,
+              contributed: true,
+              searched: true,
+              label: "Developer",
+              detail: "exact",
+              weight: 0.2
+            }
+          }
+        }),
+        candidatePayload("candidate-2", { match_layer: 1, match_likelihood: 0 }),
+        candidatePayload("candidate-3", { match_layer: 3, match_likelihood: 0.8 })
+      ]
+    });
+
+    expect(result.candidates[0].matchSignals.name.searched).toBe(false);
+    expect(visibleMatchSignals(result.candidates[0]).map(([key]) => key)).toEqual([
+      "address",
+      "developer"
+    ]);
+    expect(candidateBandTone(result.candidates[0])).toBe("medium");
+    expect(candidateBandTone(result.candidates[1])).toBe("hard");
+    expect(candidateBandTone(result.candidates[2])).toBe("broad");
+  });
 });
+
+function candidatePayload(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    project_id: id,
+    project_name: "Candidate",
+    canonical_address: "100 Fig St",
+    match_likelihood: 0.5,
+    match_layer: 2,
+    open_review_item_count: 0,
+    match_signals: {},
+    ...overrides
+  };
+}
 
 function item(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
   return {

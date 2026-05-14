@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-14 (Item 5D-1 ready for review; focused-card candidate fetch + raw table)
+> **Last updated:** 2026-05-14 (Item 5D-2 ready for review; sortable table + match chips + row bands)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -428,14 +428,14 @@ Phase 4 — Dedup table (days 10-19)
   - [ ] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action.
 - [ ] **CandidateTable component:**
   - [x] Columns from the agreed list (5D-1 raw columns: project name, address, developer, total units, product type/age, status, building height, match likelihood; remaining unit split + lat/lng refinements land with 5D-2/5D-3 table work)
-  - [ ] Sortable by clicking column headers
+  - [x] Sortable by clicking column headers. Layer precedence remains primary for every sort so Layer 1 hard-signal candidates never get buried below Layer 2/3 rows.
   - [ ] Cell-level overlap highlighting:
     - Substring match for name / address / developer (case-insensitive)
     - Cross-field numeric equality for unit counts (subject's "312 affordable" highlights candidate's "312 total" too)
     - Distance-threshold highlight for lat/lng (within ~250m subject lat/lng)
     - Building-height match within ±2 stories
-  - [ ] **Row color band by match-likelihood**, paired with (not replacing) the numeric percentage. Layer 1 candidates render with a green band; Layer 2 with a green-to-yellow-to-orange gradient by likelihood; Layer 3 with a neutral gray band. The band reads in <200ms; the number is still there for ties and precision.
-  - [ ] **Per-signal chips inline next to the match-likelihood column.** Render one chip per signal from `match_signals` (geographic, address, name, developer, units, product_type, identifier when present). Green chip when `contributed=true`; gray when searched but not contributed; omitted when the subject lacked the field. Each chip's tooltip shows the underlying `score` and `detail`. This is the "why it matched" surface — reviewer scans reasons in under a second.
+  - [x] **Row color band by match-likelihood**, paired with (not replacing) the numeric percentage. Layer 1 candidates render with a green band; Layer 2 with a green-to-yellow-to-orange gradient by likelihood; Layer 3 with a neutral gray band. The band reads in <200ms; the number is still there for ties and precision.
+  - [x] **Per-signal chips inline next to the match-likelihood column.** Render one chip per signal from `match_signals` (geographic, address, name, developer, units, product_type, identifier when present). Green chip when `contributed=true`; gray when searched but not contributed; omitted when the subject lacked the field. Each chip's tooltip shows the underlying `score` and `detail`. This is the "why it matched" surface — reviewer scans reasons in under a second.
   - [ ] **Layer 3 "show more" affordance** using `include_layer3=true` (or `layer=3`) when the API returns `layer_3_available=true`.
   - [ ] Per-row actions: `Match to this`, `Create new + link as ▾` (dropdown shows `phase` / `master_plan` / `counterpart` / `supersedes` — see §8.6 for the rationale on dropping `duplicate` from this dropdown).
   - [ ] **Impact preview line** on the focused candidate row, fetched lazily from `GET /review/items/{item_id}/match-preview?candidate_id=...` (see §8.4). Renders as a single line ("This will close 3 open review items and reattach 4 evidence rows to project X.") above the per-row Match button so the reviewer sees the blast radius before committing.
@@ -470,8 +470,8 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
 - [ ] Frontend: component tests for DedupCard / SubjectRow / CandidateTable / MapPopup
 - [x] Frontend helper tests for Discovery item filtering, one-card-per-review-item grouping, and subject normalization
-- [ ] Frontend: per-signal chip renders green-when-contributed / gray-when-searched / hidden-when-absent
-- [ ] Frontend: row color band agrees with match-likelihood band thresholds
+- [x] Frontend helper tests: per-signal chip visibility preserves `searched=false` in the data model but hides it from render lists
+- [x] Frontend helper tests: row color-band tone agrees with match layer / likelihood thresholds
 - [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
 - [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
 - [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
@@ -498,6 +498,10 @@ Phase 4 — Dedup table (days 10-19)
 **5D-1 lessons learned:**
 - Fetch candidates only for the focused card. The Discovery shell stays cheap on initial load, and auto-advance/focus changes naturally drive the next candidate request.
 - Keep the 5D-1 table intentionally plain. It proves the API/data path and empty-state contract before adding sortable columns, signal chips, row bands, and overlap highlighting.
+
+**5D-2 lessons learned:**
+- Keep candidate sorting in `lib/review/discovery.ts` so layer precedence, column sorting, and future overlap highlighting share one ordering contract.
+- Filter `searched=false` match signals at render time, not while mapping the API response. The complete signal dict remains available for debugging and future UI while the visible chips stay clean.
 
 **Deferred follow-ons:**
 

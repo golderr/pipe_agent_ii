@@ -62,9 +62,14 @@ import {
 } from "@/lib/review/reviewed";
 import {
   buildDiscoveryCards,
+  candidateBandTone,
   isDiscoveryItem,
   searchedSummary,
+  sortCandidates,
+  visibleMatchSignals,
   type DiscoveryCandidate,
+  type DiscoveryCandidateSort,
+  type DiscoveryCandidateSortField,
   type DiscoveryCandidateSearch,
   type DiscoveryCard
 } from "@/lib/review/discovery";
@@ -901,11 +906,30 @@ function DiscoveryCardShell({
     }
   }, [card.item.id, candidatesEntry, onRequestCandidates]);
 
+  const [candidateSort, setCandidateSort] = useState<DiscoveryCandidateSort>({
+    field: "matchLikelihood",
+    direction: "desc"
+  });
   const candidates = candidatesEntry?.status === "loaded" ? candidatesEntry.data : null;
+  const sortedCandidates = useMemo(
+    () => sortCandidates(candidates?.candidates ?? [], candidateSort),
+    [candidateSort, candidates]
+  );
   const subject = candidates?.subject ?? card.subject;
   const potentialMatchCount = candidates?.candidates.length ?? card.potentialMatchCount;
   const newCandidateProbability =
     candidates?.newCandidateProbability ?? card.newCandidateProbability;
+  const onSort = (field: DiscoveryCandidateSortField) => {
+    setCandidateSort((current) => {
+      if (current.field === field) {
+        return {
+          field,
+          direction: current.direction === "asc" ? "desc" : "asc"
+        };
+      }
+      return { field, direction: defaultCandidateSortDirection(field) };
+    });
+  };
   return (
     <article className="rounded-md border border-slate-200 bg-white">
       <div className="border-b border-slate-200 px-4 py-3">
@@ -952,17 +976,65 @@ function DiscoveryCardShell({
         </div>
       </div>
       <div className="overflow-x-auto px-4 py-3">
-        <table className="w-full min-w-[64rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[72rem] table-fixed text-left text-sm">
           <thead>
             <tr className="border-b border-slate-200 text-xs font-medium uppercase tracking-normal text-slate-500">
-              <th className="w-44 py-2 pr-3">Project</th>
-              <th className="w-64 py-2 pr-3">Address</th>
-              <th className="w-44 py-2 pr-3">Developer</th>
-              <th className="w-28 py-2 pr-3">Units</th>
-              <th className="w-32 py-2 pr-3">Product</th>
-              <th className="w-32 py-2 pr-3">Status</th>
-              <th className="w-24 py-2 pr-3">Stories</th>
-              <th className="w-24 py-2 pr-3">Match</th>
+              <CandidateHeaderCell
+                className="w-44"
+                field="projectName"
+                label="Project"
+                sort={candidateSort}
+                onSort={onSort}
+              />
+              <CandidateHeaderCell
+                className="w-64"
+                field="canonicalAddress"
+                label="Address"
+                sort={candidateSort}
+                onSort={onSort}
+              />
+              <CandidateHeaderCell
+                className="w-44"
+                field="developer"
+                label="Developer"
+                sort={candidateSort}
+                onSort={onSort}
+              />
+              <CandidateHeaderCell
+                className="w-28"
+                field="totalUnits"
+                label="Units"
+                sort={candidateSort}
+                onSort={onSort}
+              />
+              <CandidateHeaderCell
+                className="w-32"
+                field="productType"
+                label="Product"
+                sort={candidateSort}
+                onSort={onSort}
+              />
+              <CandidateHeaderCell
+                className="w-32"
+                field="pipelineStatus"
+                label="Status"
+                sort={candidateSort}
+                onSort={onSort}
+              />
+              <CandidateHeaderCell
+                className="w-24"
+                field="stories"
+                label="Stories"
+                sort={candidateSort}
+                onSort={onSort}
+              />
+              <CandidateHeaderCell
+                className="w-44"
+                field="matchLikelihood"
+                label="Match"
+                sort={candidateSort}
+                onSort={onSort}
+              />
             </tr>
           </thead>
           <tbody>
@@ -976,7 +1048,7 @@ function DiscoveryCardShell({
               <SubjectCell value={subject.stories} />
               <td className="py-3 pr-3 text-slate-500">Subject</td>
             </tr>
-            {candidates?.candidates.map((candidate, index) => (
+            {sortedCandidates.map((candidate, index) => (
               <CandidateRow candidate={candidate} index={index} key={candidate.projectId} />
             ))}
           </tbody>
@@ -1008,6 +1080,41 @@ function SubjectCell({ value }: { value: unknown }) {
   return <td className="break-words py-3 pr-3 text-slate-800">{formatValue(value)}</td>;
 }
 
+function CandidateHeaderCell({
+  field,
+  label,
+  sort,
+  className,
+  onSort
+}: {
+  field: DiscoveryCandidateSortField;
+  label: string;
+  sort: DiscoveryCandidateSort;
+  className: string;
+  onSort: (field: DiscoveryCandidateSortField) => void;
+}) {
+  const active = sort.field === field;
+  return (
+    <th
+      aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}
+      className={cn("py-2 pr-3", className)}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(field)}
+        className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+      >
+        {label}
+        {active ? (
+          <span aria-hidden="true" className="text-[10px] font-semibold text-teal-700">
+            {sort.direction === "asc" ? "↑" : "↓"}
+          </span>
+        ) : null}
+      </button>
+    </th>
+  );
+}
+
 function CandidateRow({
   candidate,
   index
@@ -1016,7 +1123,12 @@ function CandidateRow({
   index: number;
 }) {
   return (
-    <tr className="border-b border-slate-100 align-top last:border-b-0">
+    <tr
+      className={cn(
+        "border-b border-l-4 border-b-slate-100 align-top last:border-b-0",
+        candidateBandClass(candidate)
+      )}
+    >
       <SubjectCell value={`${index + 1}. ${candidate.projectName ?? "Unnamed project"}`} />
       <SubjectCell value={candidate.canonicalAddress} />
       <SubjectCell value={candidate.developer} />
@@ -1027,9 +1139,62 @@ function CandidateRow({
       <td className="py-3 pr-3 text-slate-800">
         <span className="font-medium">{Math.round(candidate.matchLikelihood * 100)}%</span>
         <span className="mt-1 block text-xs text-slate-500">Layer {candidate.matchLayer}</span>
+        <CandidateSignalChips candidate={candidate} />
       </td>
     </tr>
   );
+}
+
+function CandidateSignalChips({ candidate }: { candidate: DiscoveryCandidate }) {
+  const signals = visibleMatchSignals(candidate);
+  if (!signals.length) {
+    return null;
+  }
+  return (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {signals.map(([key, signal]) => (
+        <span
+          key={key}
+          className={cn(
+            "rounded border px-1.5 py-0.5 text-[11px] font-medium",
+            signal.contributed
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : "border-slate-200 bg-slate-50 text-slate-600"
+          )}
+          title={signalTooltip(signal)}
+        >
+          {signal.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function signalTooltip(signal: DiscoveryCandidate["matchSignals"][string]) {
+  const score = `score ${signal.score.toFixed(2)}`;
+  const weight = signal.weight !== null ? `weight ${signal.weight.toFixed(2)}` : null;
+  return [score, weight, signal.detail].filter(Boolean).join(" - ");
+}
+
+function candidateBandClass(candidate: DiscoveryCandidate) {
+  const tone = candidateBandTone(candidate);
+  return cn(
+    tone === "hard" && "border-l-emerald-500 bg-emerald-50/40",
+    tone === "strong" && "border-l-teal-500 bg-teal-50/30",
+    tone === "medium" && "border-l-amber-400 bg-amber-50/30",
+    tone === "weak" && "border-l-orange-400 bg-orange-50/25",
+    tone === "broad" && "border-l-slate-300 bg-slate-50/80"
+  );
+}
+
+function defaultCandidateSortDirection(field: DiscoveryCandidateSortField): "asc" | "desc" {
+  return field === "projectName" ||
+    field === "canonicalAddress" ||
+    field === "developer" ||
+    field === "productType" ||
+    field === "pipelineStatus"
+    ? "asc"
+    : "desc";
 }
 
 function CandidateTableSection({

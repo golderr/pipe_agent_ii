@@ -73,6 +73,34 @@ export type DiscoveryCandidateSearch = {
   searched: Record<string, unknown>;
 };
 
+export type DiscoveryCandidateSortField =
+  | "matchLikelihood"
+  | "projectName"
+  | "canonicalAddress"
+  | "developer"
+  | "totalUnits"
+  | "productType"
+  | "pipelineStatus"
+  | "stories";
+
+export type DiscoveryCandidateSort = {
+  field: DiscoveryCandidateSortField;
+  direction: "asc" | "desc";
+};
+
+const SIGNAL_DISPLAY_ORDER = [
+  "identifier",
+  "geographic",
+  "address",
+  "name",
+  "developer",
+  "units",
+  "product_type"
+];
+
+const STRONG_LIKELIHOOD_THRESHOLD = 0.7;
+const MEDIUM_LIKELIHOOD_THRESHOLD = 0.4;
+
 export const DISCOVERY_ITEM_TYPES = new Set(["new_candidate", "possible_match"]);
 
 export function isDiscoveryItem(item: ReviewQueueItem) {
@@ -171,6 +199,61 @@ export function searchedSummary(search: DiscoveryCandidateSearch) {
     : "No search signals were available for this subject.";
 }
 
+export function sortCandidates(
+  candidates: DiscoveryCandidate[],
+  sort: DiscoveryCandidateSort = { field: "matchLikelihood", direction: "desc" }
+) {
+  return [...candidates].sort((left, right) => {
+    const layerDelta = left.matchLayer - right.matchLayer;
+    if (layerDelta !== 0) {
+      return layerDelta;
+    }
+    const fieldDelta = compareSortValues(
+      candidateSortValue(left, sort.field),
+      candidateSortValue(right, sort.field),
+      sort.direction
+    );
+    if (fieldDelta !== 0) {
+      return fieldDelta;
+    }
+    const likelihoodDelta = right.matchLikelihood - left.matchLikelihood;
+    if (likelihoodDelta !== 0) {
+      return likelihoodDelta;
+    }
+    return left.projectId.localeCompare(right.projectId);
+  });
+}
+
+export function visibleMatchSignals(candidate: DiscoveryCandidate) {
+  return Object.entries(candidate.matchSignals)
+    .filter(([, signal]) => signal.searched)
+    .sort(([left], [right]) => {
+      const leftIndex = SIGNAL_DISPLAY_ORDER.indexOf(left);
+      const rightIndex = SIGNAL_DISPLAY_ORDER.indexOf(right);
+      return (
+        (leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex) -
+          (rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex) ||
+        left.localeCompare(right)
+      );
+    });
+}
+
+export function candidateBandTone(candidate: DiscoveryCandidate) {
+  if (candidate.matchLayer === 1) {
+    return "hard";
+  }
+  if (candidate.matchLayer === 3) {
+    return "broad";
+  }
+  if (candidate.matchLikelihood >= STRONG_LIKELIHOOD_THRESHOLD) {
+    return "strong";
+  }
+  if (candidate.matchLikelihood >= MEDIUM_LIKELIHOOD_THRESHOLD) {
+    return "medium";
+  }
+  return "weak";
+}
+
 function subjectFromApi(payload: unknown): DiscoverySubject {
   const row = asRecord(payload) ?? {};
   return {
@@ -237,6 +320,48 @@ function matchSignalsFromApi(payload: unknown): Record<string, DiscoveryMatchSig
       })
       .filter((entry): entry is readonly [string, DiscoveryMatchSignal] => Boolean(entry))
   );
+}
+
+function candidateSortValue(candidate: DiscoveryCandidate, field: DiscoveryCandidateSortField) {
+  switch (field) {
+    case "projectName":
+      return candidate.projectName;
+    case "canonicalAddress":
+      return candidate.canonicalAddress;
+    case "developer":
+      return candidate.developer;
+    case "totalUnits":
+      return candidate.totalUnits;
+    case "productType":
+      return candidate.productType ?? candidate.ageRestriction;
+    case "pipelineStatus":
+      return candidate.pipelineStatus;
+    case "stories":
+      return candidate.stories;
+    case "matchLikelihood":
+      return candidate.matchLikelihood;
+  }
+}
+
+function compareSortValues(
+  left: string | number | null,
+  right: string | number | null,
+  direction: "asc" | "desc"
+) {
+  if (left === null && right === null) {
+    return 0;
+  }
+  if (left === null) {
+    return 1;
+  }
+  if (right === null) {
+    return -1;
+  }
+  const multiplier = direction === "asc" ? 1 : -1;
+  if (typeof left === "number" && typeof right === "number") {
+    return (left - right) * multiplier;
+  }
+  return String(left).localeCompare(String(right)) * multiplier;
 }
 
 function newCandidateProbabilityForItem(item: ReviewQueueItem) {
