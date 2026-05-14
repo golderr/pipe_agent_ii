@@ -73,6 +73,12 @@ export type DiscoveryCandidateSearch = {
   searched: Record<string, unknown>;
 };
 
+export type DiscoveryMatchPreview = {
+  reviewItemsToClose: number;
+  evidenceRowsToReattach: number;
+  valueChangeItemsThatWouldBeQueued: string[];
+};
+
 export type DiscoveryCandidateSortField =
   | "matchLikelihood"
   | "projectName"
@@ -217,6 +223,21 @@ export function mapDedupCandidatesResponse(payload: unknown): DiscoveryCandidate
   };
 }
 
+export function mapMatchPreviewResponse(payload: unknown): DiscoveryMatchPreview {
+  const row = asRecord(payload) ?? {};
+  return {
+    reviewItemsToClose: asNumber(row.review_items_to_close) ?? 0,
+    evidenceRowsToReattach: asNumber(row.evidence_rows_to_reattach) ?? 0,
+    valueChangeItemsThatWouldBeQueued: Array.isArray(
+      row.value_change_items_that_would_be_queued
+    )
+      ? row.value_change_items_that_would_be_queued
+          .map((value) => asString(value))
+          .filter((value): value is string => Boolean(value))
+      : []
+  };
+}
+
 export function searchedSummary(search: DiscoveryCandidateSearch) {
   const layer1 = Array.isArray(search.searched.layer_1)
     ? search.searched.layer_1
@@ -320,6 +341,43 @@ export function computeCandidateOverlaps(
   addStoriesOverlap(overlaps, subject, candidate);
   addCoordinateOverlap(overlaps, subject, candidate);
   return overlaps;
+}
+
+export function candidateFocusByOffset(
+  candidates: DiscoveryCandidate[],
+  currentProjectId: string | null,
+  offset: number
+) {
+  if (!candidates.length) {
+    return null;
+  }
+  const currentIndex = candidates.findIndex((candidate) => candidate.projectId === currentProjectId);
+  const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+  const nextIndex = Math.min(candidates.length - 1, Math.max(0, baseIndex + offset));
+  return candidates[nextIndex]?.projectId ?? null;
+}
+
+export function candidateFocusByNumber(candidates: DiscoveryCandidate[], numberKey: string) {
+  const index = Number.parseInt(numberKey, 10) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= candidates.length) {
+    return null;
+  }
+  return candidates[index]?.projectId ?? null;
+}
+
+export function matchPreviewImpactText(preview: DiscoveryMatchPreview) {
+  const closeText = `${preview.reviewItemsToClose.toLocaleString()} review item${
+    preview.reviewItemsToClose === 1 ? "" : "s"
+  }`;
+  const evidenceText = `${preview.evidenceRowsToReattach.toLocaleString()} evidence row${
+    preview.evidenceRowsToReattach === 1 ? "" : "s"
+  }`;
+  const deltaCount = preview.valueChangeItemsThatWouldBeQueued.length;
+  const deltaText =
+    deltaCount > 0
+      ? `${deltaCount.toLocaleString()} value-change review${deltaCount === 1 ? "" : "s"}`
+      : "no value-change reviews";
+  return `Would close ${closeText}, reattach ${evidenceText}, and queue ${deltaText}.`;
 }
 
 function subjectFromApi(payload: unknown): DiscoverySubject {

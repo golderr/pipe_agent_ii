@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState, useTransition, type MouseEve
 import {
   commitReviewDecisionsAction,
   fetchDedupCandidatesAction,
+  fetchMatchPreviewAction,
   stageReviewDecisionAction,
   unstageReviewDecisionAction
 } from "./actions";
@@ -63,8 +64,11 @@ import {
 import {
   buildDiscoveryCards,
   candidateBandTone,
+  candidateFocusByNumber,
+  candidateFocusByOffset,
   computeCandidateOverlaps,
   isDiscoveryItem,
+  matchPreviewImpactText,
   searchedSummary,
   sortCandidates,
   visibleMatchSignals,
@@ -74,6 +78,7 @@ import {
   type DiscoveryCandidateSortField,
   type DiscoveryCandidateSearch,
   type DiscoveryCard,
+  type DiscoveryMatchPreview,
   type DiscoverySubject
 } from "@/lib/review/discovery";
 import { compactStatus, statusStyle } from "@/lib/status";
@@ -125,9 +130,18 @@ type Banner = {
 } | null;
 
 type CandidateCacheEntry =
+  | { status: "loading"; includeLayer3: boolean }
+  | { status: "loaded"; data: DiscoveryCandidateSearch; includeLayer3: boolean }
+  | { status: "error"; message: string; includeLayer3: boolean };
+
+type MatchPreviewCacheEntry =
   | { status: "loading" }
-  | { status: "loaded"; data: DiscoveryCandidateSearch }
+  | { status: "loaded"; data: DiscoveryMatchPreview }
   | { status: "error"; message: string };
+
+type CreateNewPrompt = {
+  card: DiscoveryCard;
+} | null;
 
 type SourceFamily = "news" | "permit" | "costar" | "pipedream" | "other";
 type SourceFilter = "all" | SourceFamily | "multiple";
@@ -165,6 +179,8 @@ const SOURCE_FILTER_OPTIONS: Array<{ value: SourceFilter; label: string }> = [
   { value: "other", label: "Other" }
 ];
 
+const MATCH_PREVIEW_DEBOUNCE_MS = 150;
+
 export function ReviewQueueClient({
   activeTab,
   data,
@@ -187,6 +203,10 @@ export function ReviewQueueClient({
     initialDiscoveryCardId
   );
   const [candidateCache, setCandidateCache] = useState<Record<string, CandidateCacheEntry>>({});
+  const [matchPreviewCache, setMatchPreviewCache] = useState<Record<string, MatchPreviewCacheEntry>>(
+    {}
+  );
+  const [createNewPrompt, setCreateNewPrompt] = useState<CreateNewPrompt>(null);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner>(null);
   const [isPending, startTransition] = useTransition();
@@ -362,19 +382,53 @@ export function ReviewQueueClient({
     });
   }, [jurisdictionId, router, stagedMineCount]);
 
-  const requestDiscoveryCandidates = useCallback((itemId: string) => {
-    setCandidateCache((cache) => {
-      const existing = cache[itemId];
+  const requestDiscoveryCandidates = useCallback(
+    (
+      itemId: string,
+      options: { includeLayer3?: boolean; force?: boolean } = {}
+    ) => {
+      const includeLayer3 = options.includeLayer3 === true;
+      setCandidateCache((cache) => {
+        const existing = cache[itemId];
+        if (existing?.status === "loading") {
+          return cache;
+        }
+        if (
+          existing?.status === "loaded" &&
+          !options.force &&
+          (existing.includeLayer3 || !includeLayer3)
+        ) {
+          return cache;
+        }
+        return { ...cache, [itemId]: { status: "loading", includeLayer3 } };
+      });
+
+      void fetchDedupCandidatesAction(itemId, { includeLayer3 }).then((result) => {
+        setCandidateCache((cache) => ({
+          ...cache,
+          [itemId]: result.ok
+            ? { status: "loaded", data: result.data, includeLayer3 }
+            : { status: "error", message: result.message, includeLayer3 }
+        }));
+      });
+    },
+    []
+  );
+
+  const requestMatchPreview = useCallback((itemId: string, candidateId: string) => {
+    const cacheKey = matchPreviewCacheKey(itemId, candidateId);
+    setMatchPreviewCache((cache) => {
+      const existing = cache[cacheKey];
       if (existing?.status === "loading" || existing?.status === "loaded") {
         return cache;
       }
-      return { ...cache, [itemId]: { status: "loading" } };
+      return { ...cache, [cacheKey]: { status: "loading" } };
     });
 
-    void fetchDedupCandidatesAction(itemId).then((result) => {
-      setCandidateCache((cache) => ({
+    void fetchMatchPreviewAction(itemId, candidateId).then((result) => {
+      setMatchPreviewCache((cache) => ({
         ...cache,
-        [itemId]: result.ok
+        [cacheKey]: result.ok
           ? { status: "loaded", data: result.data }
           : { status: "error", message: result.message }
       }));
@@ -593,10 +647,13 @@ export function ReviewQueueClient({
           cards={discoveryCards}
           selectedCardKey={focusedDiscoveryCard?.key ?? null}
           candidateCache={candidateCache}
+          matchPreviewCache={matchPreviewCache}
           sourceRuns={data.sourceRuns}
           jurisdictionId={jurisdictionId}
           onSelect={setFocusedDiscoveryCardId}
           onRequestCandidates={requestDiscoveryCandidates}
+          onRequestMatchPreview={requestMatchPreview}
+          onOpenCreateNew={(card) => setCreateNewPrompt({ card })}
         />
       ) : groups.length === 0 ? (
         <div className="px-5 py-8">
@@ -643,6 +700,13 @@ export function ReviewQueueClient({
         </div>
       )}
 
+      {createNewPrompt ? (
+        <CreateNewConfirmModal
+          card={createNewPrompt.card}
+          onClose={() => setCreateNewPrompt(null)}
+        />
+      ) : null}
+
       {activeTab === "queue" ? (
         <div className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 px-5 py-3 backdrop-blur md:left-56">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -684,6 +748,10 @@ function ReviewTabLink({
       {label}
     </Link>
   );
+}
+
+function matchPreviewCacheKey(itemId: string, candidateId: string) {
+  return `${itemId}:${candidateId}`;
 }
 
 function ReviewedSelect({
@@ -808,18 +876,27 @@ function DiscoveryView({
   cards,
   selectedCardKey,
   candidateCache,
+  matchPreviewCache,
   sourceRuns,
   jurisdictionId,
   onSelect,
-  onRequestCandidates
+  onRequestCandidates,
+  onRequestMatchPreview,
+  onOpenCreateNew
 }: {
   cards: DiscoveryCard[];
   selectedCardKey: string | null;
   candidateCache: Record<string, CandidateCacheEntry>;
+  matchPreviewCache: Record<string, MatchPreviewCacheEntry>;
   sourceRuns: Record<string, ReviewSourceRunSummary>;
   jurisdictionId: string | null;
   onSelect: (cardKey: string) => void;
-  onRequestCandidates: (itemId: string) => void;
+  onRequestCandidates: (
+    itemId: string,
+    options?: { includeLayer3?: boolean; force?: boolean }
+  ) => void;
+  onRequestMatchPreview: (itemId: string, candidateId: string) => void;
+  onOpenCreateNew: (card: DiscoveryCard) => void;
 }) {
   const selectedCard = cards.find((card) => card.key === selectedCardKey) ?? cards[0] ?? null;
   if (!cards.length) {
@@ -878,11 +955,14 @@ function DiscoveryView({
           <DiscoveryCardShell
             card={selectedCard}
             candidatesEntry={candidateCache[selectedCard.item.id]}
+            matchPreviewCache={matchPreviewCache}
             sourceRun={
               selectedCard.item.sourceRunId ? sourceRuns[selectedCard.item.sourceRunId] : undefined
             }
             jurisdictionId={jurisdictionId}
             onRequestCandidates={onRequestCandidates}
+            onRequestMatchPreview={onRequestMatchPreview}
+            onOpenCreateNew={onOpenCreateNew}
           />
         ) : null}
       </section>
@@ -893,15 +973,24 @@ function DiscoveryView({
 function DiscoveryCardShell({
   card,
   candidatesEntry,
+  matchPreviewCache,
   sourceRun,
   jurisdictionId,
-  onRequestCandidates
+  onRequestCandidates,
+  onRequestMatchPreview,
+  onOpenCreateNew
 }: {
   card: DiscoveryCard;
   candidatesEntry: CandidateCacheEntry | undefined;
+  matchPreviewCache: Record<string, MatchPreviewCacheEntry>;
   sourceRun: ReviewSourceRunSummary | undefined;
   jurisdictionId: string | null;
-  onRequestCandidates: (itemId: string) => void;
+  onRequestCandidates: (
+    itemId: string,
+    options?: { includeLayer3?: boolean; force?: boolean }
+  ) => void;
+  onRequestMatchPreview: (itemId: string, candidateId: string) => void;
+  onOpenCreateNew: (card: DiscoveryCard) => void;
 }) {
   useEffect(() => {
     if (!candidatesEntry) {
@@ -913,15 +1002,23 @@ function DiscoveryCardShell({
     field: "matchLikelihood",
     direction: "desc"
   });
+  const [focusedCandidateId, setFocusedCandidateId] = useState<string | null>(null);
   const candidates = candidatesEntry?.status === "loaded" ? candidatesEntry.data : null;
   const sortedCandidates = useMemo(
     () => sortCandidates(candidates?.candidates ?? [], candidateSort),
     [candidateSort, candidates]
   );
+  const focusedCandidate =
+    sortedCandidates.find((candidate) => candidate.projectId === focusedCandidateId) ??
+    sortedCandidates[0] ??
+    null;
   const subject = candidates?.subject ?? card.subject;
   const potentialMatchCount = candidates?.candidates.length ?? card.potentialMatchCount;
   const newCandidateProbability =
     candidates?.newCandidateProbability ?? card.newCandidateProbability;
+  const focusedPreviewEntry = focusedCandidate
+    ? matchPreviewCache[matchPreviewCacheKey(card.item.id, focusedCandidate.projectId)]
+    : undefined;
   const onSort = (field: DiscoveryCandidateSortField) => {
     setCandidateSort((current) => {
       if (current.field === field) {
@@ -933,6 +1030,66 @@ function DiscoveryCardShell({
       return { field, direction: defaultCandidateSortDirection(field) };
     });
   };
+
+  useEffect(() => {
+    if (!focusedCandidate) {
+      return;
+    }
+    // Row 0 is the highest-ranked match candidate, so loading its preview on
+    // card open is intentional; later focus moves reuse the same preview cache.
+    const cacheKey = matchPreviewCacheKey(card.item.id, focusedCandidate.projectId);
+    if (matchPreviewCache[cacheKey]) {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      onRequestMatchPreview(card.item.id, focusedCandidate.projectId);
+    }, MATCH_PREVIEW_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [card.item.id, focusedCandidate, matchPreviewCache, onRequestMatchPreview]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT"
+      ) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (/^[1-9]$/.test(key)) {
+        const nextId = candidateFocusByNumber(sortedCandidates, key);
+        if (nextId) {
+          event.preventDefault();
+          setFocusedCandidateId(nextId);
+        }
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setFocusedCandidateId(
+          candidateFocusByOffset(sortedCandidates, focusedCandidate?.projectId ?? null, 1)
+        );
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setFocusedCandidateId(
+          candidateFocusByOffset(sortedCandidates, focusedCandidate?.projectId ?? null, -1)
+        );
+        return;
+      }
+      if (key === "n") {
+        event.preventDefault();
+        onOpenCreateNew(card);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [card, focusedCandidate, onOpenCreateNew, sortedCandidates]);
+
   return (
     <article className="rounded-md border border-slate-200 bg-white">
       <div className="border-b border-slate-200 px-4 py-3">
@@ -975,6 +1132,14 @@ function DiscoveryCardShell({
                   : "-"
               }
             />
+            <Button
+              type="button"
+              variant="outline"
+              className="col-span-2 h-8 text-xs"
+              onClick={() => onOpenCreateNew(card)}
+            >
+              Create new
+            </Button>
           </div>
         </div>
       </div>
@@ -1054,8 +1219,15 @@ function DiscoveryCardShell({
             {sortedCandidates.map((candidate, index) => (
               <CandidateRow
                 candidate={candidate}
+                isFocused={candidate.projectId === focusedCandidate?.projectId}
                 index={index}
                 key={candidate.projectId}
+                onFocus={() => setFocusedCandidateId(candidate.projectId)}
+                previewEntry={
+                  candidate.projectId === focusedCandidate?.projectId
+                    ? focusedPreviewEntry
+                    : undefined
+                }
                 subject={subject}
               />
             ))}
@@ -1064,7 +1236,15 @@ function DiscoveryCardShell({
         <CandidateTableSection
           entry={candidatesEntry}
           fallbackCard={card}
-          onRetry={() => onRequestCandidates(card.item.id)}
+          onRetry={() =>
+            onRequestCandidates(card.item.id, {
+              includeLayer3: candidatesEntry?.includeLayer3,
+              force: true
+            })
+          }
+          onShowLayer3={() =>
+            onRequestCandidates(card.item.id, { includeLayer3: true, force: true })
+          }
         />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 text-sm">
@@ -1125,20 +1305,31 @@ function CandidateHeaderCell({
 
 function CandidateRow({
   candidate,
+  isFocused,
   index,
+  onFocus,
+  previewEntry,
   subject
 }: {
   candidate: DiscoveryCandidate;
+  isFocused: boolean;
   index: number;
+  onFocus: () => void;
+  previewEntry: MatchPreviewCacheEntry | undefined;
   subject: DiscoverySubject;
 }) {
   const overlaps = computeCandidateOverlaps(subject, candidate);
   return (
     <tr
+      aria-selected={isFocused}
       className={cn(
-        "border-b border-l-4 border-b-slate-100 align-top last:border-b-0",
-        candidateBandClass(candidate)
+        "border-b border-l-4 border-b-slate-100 align-top outline-none last:border-b-0",
+        candidateBandClass(candidate),
+        isFocused && "ring-2 ring-inset ring-teal-500"
       )}
+      onClick={onFocus}
+      onFocus={onFocus}
+      tabIndex={0}
     >
       <CandidateValueCell
         overlap={overlaps.projectName}
@@ -1159,6 +1350,7 @@ function CandidateRow({
         <span className="mt-1 block text-xs text-slate-500">Layer {candidate.matchLayer}</span>
         <NearSubjectChip overlap={overlaps.lat} />
         <CandidateSignalChips candidate={candidate} />
+        {isFocused ? <MatchImpactPreview entry={previewEntry} /> : null}
       </td>
     </tr>
   );
@@ -1203,6 +1395,28 @@ function NearSubjectChip({ overlap }: { overlap?: DiscoveryOverlap }) {
         Near subject
       </span>
     </div>
+  );
+}
+
+function MatchImpactPreview({ entry }: { entry: MatchPreviewCacheEntry | undefined }) {
+  if (!entry || entry.status === "loading") {
+    return (
+      <p className="mt-2 rounded border border-slate-200 bg-white/70 px-2 py-1 text-[11px] text-slate-600">
+        Loading impact preview.
+      </p>
+    );
+  }
+  if (entry.status === "error") {
+    return (
+      <p className="mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-800">
+        {entry.message}
+      </p>
+    );
+  }
+  return (
+    <p className="mt-2 rounded border border-teal-200 bg-teal-50 px-2 py-1 text-[11px] text-teal-900">
+      {matchPreviewImpactText(entry.data)}
+    </p>
   );
 }
 
@@ -1283,11 +1497,13 @@ function defaultCandidateSortDirection(field: DiscoveryCandidateSortField): "asc
 function CandidateTableSection({
   entry,
   fallbackCard,
-  onRetry
+  onRetry,
+  onShowLayer3
 }: {
   entry: CandidateCacheEntry | undefined;
   fallbackCard: DiscoveryCard;
   onRetry: () => void;
+  onShowLayer3: () => void;
 }) {
   if (!entry || entry.status === "loading") {
     return (
@@ -1311,10 +1527,30 @@ function CandidateTableSection({
       <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
         <p className="font-medium text-slate-800">No candidate projects found.</p>
         <p className="mt-1">{searchedSummary(entry.data)}</p>
+        <Layer3Button entry={entry} onShowLayer3={onShowLayer3} />
       </div>
     );
   }
-  return null;
+  return <Layer3Button entry={entry} onShowLayer3={onShowLayer3} />;
+}
+
+function Layer3Button({
+  entry,
+  onShowLayer3
+}: {
+  entry: Extract<CandidateCacheEntry, { status: "loaded" }>;
+  onShowLayer3: () => void;
+}) {
+  if (!entry.data.layer3Available || entry.includeLayer3) {
+    return null;
+  }
+  return (
+    <div className="mt-3 flex justify-end">
+      <Button type="button" variant="outline" className="h-8 px-2 text-xs" onClick={onShowLayer3}>
+        Show broader sweep
+      </Button>
+    </div>
+  );
 }
 
 function DiscoveryMetric({ label, value }: { label: string; value: string }) {
@@ -1322,6 +1558,37 @@ function DiscoveryMetric({ label, value }: { label: string; value: string }) {
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
       <p className="text-xs text-slate-500">{label}</p>
       <p className="text-lg font-semibold text-slate-950">{value}</p>
+    </div>
+  );
+}
+
+function CreateNewConfirmModal({ card, onClose }: { card: DiscoveryCard; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/30 px-4">
+      <section
+        aria-labelledby="create-new-title"
+        className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-xl"
+        role="dialog"
+      >
+        <h2 id="create-new-title" className="text-base font-semibold text-slate-950">
+          Create new project
+        </h2>
+        <p className="mt-2 text-sm text-slate-600">
+          No match selected for {card.title}. Continue only when the subject is genuinely new.
+        </p>
+        <div className="mt-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+          <p className="font-medium text-slate-900">{card.title}</p>
+          <p className="mt-0.5 text-xs text-slate-500">{card.subtitle}</p>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="button" disabled title="Create write action lands in 5E.">
+            Continue
+          </Button>
+        </div>
+      </section>
     </div>
   );
 }

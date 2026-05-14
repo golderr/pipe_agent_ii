@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   buildDiscoveryCards,
   candidateBandTone,
+  candidateFocusByNumber,
+  candidateFocusByOffset,
   computeCandidateOverlaps,
   isDiscoveryItem,
   mapDedupCandidatesResponse,
+  mapMatchPreviewResponse,
+  matchPreviewImpactText,
   searchedSummary,
   sortCandidates,
   subjectForDiscoveryItem,
@@ -137,6 +141,20 @@ describe("review discovery helpers", () => {
     expect(searchedSummary(result)).toContain("threshold 0.12");
   });
 
+  it("maps match-preview API payloads into frontend discovery models", () => {
+    expect(
+      mapMatchPreviewResponse({
+        review_items_to_close: 3,
+        evidence_rows_to_reattach: 4,
+        value_change_items_that_would_be_queued: ["developer", null, "stories"]
+      })
+    ).toEqual({
+      reviewItemsToClose: 3,
+      evidenceRowsToReattach: 4,
+      valueChangeItemsThatWouldBeQueued: ["developer", "stories"]
+    });
+  });
+
   it("sorts candidates with match layer as the primary key", () => {
     const result = mapDedupCandidatesResponse({
       candidates: [
@@ -169,6 +187,23 @@ describe("review discovery helpers", () => {
         direction: "asc"
       }).map((candidate) => candidate.projectId)
     ).toEqual(["layer-1-alpha", "layer-1-low", "layer-2-high"]);
+  });
+
+  it("moves candidate focus by keyboard number and offset", () => {
+    const result = mapDedupCandidatesResponse({
+      candidates: [
+        candidatePayload("candidate-1"),
+        candidatePayload("candidate-2"),
+        candidatePayload("candidate-3")
+      ]
+    });
+
+    expect(candidateFocusByNumber(result.candidates, "2")).toBe("candidate-2");
+    expect(candidateFocusByNumber(result.candidates, "9")).toBeNull();
+    expect(candidateFocusByOffset(result.candidates, "candidate-2", 1)).toBe("candidate-3");
+    expect(candidateFocusByOffset(result.candidates, "candidate-2", -1)).toBe("candidate-1");
+    expect(candidateFocusByOffset(result.candidates, "candidate-3", 1)).toBe("candidate-3");
+    expect(candidateFocusByOffset(result.candidates, null, 1)).toBe("candidate-2");
   });
 
   it("keeps hidden signals in the data model and bands rows by layer/likelihood", () => {
@@ -318,6 +353,16 @@ describe("review discovery helpers", () => {
       matchedSubjectField: "lng",
       matchedValue: -118.25
     });
+  });
+
+  it("formats match-preview impact text", () => {
+    expect(
+      matchPreviewImpactText({
+        reviewItemsToClose: 2,
+        evidenceRowsToReattach: 1,
+        valueChangeItemsThatWouldBeQueued: ["developer", "stories"]
+      })
+    ).toBe("Would close 2 review items, reattach 1 evidence row, and queue 2 value-change reviews.");
   });
 });
 

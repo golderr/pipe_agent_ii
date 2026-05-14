@@ -425,7 +425,7 @@ Phase 4 — Dedup table (days 10-19)
   - [ ] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`. **5D-1 note:** read-only subject row now uses `/candidates` response subject when loaded; inline editing remains 5D-4/5E.
   - [x] Candidate table below (5D-1 raw table; chips/bands/sort landed in 5D-2; overlap landed in 5D-3)
   - [x] **Confident empty state** when no candidates returned: render the API response's `searched` block as a paragraph (e.g., "No candidates found within 1km. Searched by APN, CoStar Property ID, normalized address, name/address trigrams (threshold from `searched.layer_2.trigram_min_score`), and canonical developer match. None passed Layer 1 or Layer 2 thresholds."). Do not render a bare empty table — reviewers second-guess silent failure.
-  - [ ] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action.
+  - [x] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action. **5D-4 note:** modal shell is in place; the create write remains 5E.
 - [ ] **CandidateTable component:**
   - [x] Columns from the agreed list (5D-1 raw columns: project name, address, developer, total units, product type/age, status, building height, match likelihood; remaining unit split + lat/lng refinements land with 5D-2/5D-3 table work)
   - [x] Sortable by clicking column headers. Layer precedence remains primary for every sort so Layer 1 hard-signal candidates never get buried below Layer 2/3 rows.
@@ -436,17 +436,17 @@ Phase 4 — Dedup table (days 10-19)
     - [x] Building-height match within ±2 stories
   - [x] **Row color band by match-likelihood**, paired with (not replacing) the numeric percentage. Layer 1 candidates render with a green band; Layer 2 with a green-to-yellow-to-orange gradient by likelihood; Layer 3 with a neutral gray band. The band reads in <200ms; the number is still there for ties and precision.
   - [x] **Per-signal chips inline next to the match-likelihood column.** Render one chip per signal from `match_signals` (geographic, address, name, developer, units, product_type, identifier when present). Green chip when `contributed=true`; gray when searched but not contributed; omitted when the subject lacked the field. Each chip's tooltip shows the underlying `score` and `detail`. This is the "why it matched" surface — reviewer scans reasons in under a second.
-  - [ ] **Layer 3 "show more" affordance** using `include_layer3=true` (or `layer=3`) when the API returns `layer_3_available=true`.
+  - [x] **Layer 3 "show more" affordance** using `include_layer3=true` (or `layer=3`) when the API returns `layer_3_available=true`.
   - [ ] Per-row actions: `Match to this`, `Create new + link as ▾` (dropdown shows `phase` / `master_plan` / `counterpart` / `supersedes` — see §8.6 for the rationale on dropping `duplicate` from this dropdown).
-  - [ ] **Impact preview line** on the focused candidate row, fetched lazily from `GET /review/items/{item_id}/match-preview?candidate_id=...` (see §8.4). Renders as a single line ("This will close 3 open review items and reattach 4 evidence rows to project X.") above the per-row Match button so the reviewer sees the blast radius before committing.
+  - [x] **Impact preview line** on the focused candidate row, fetched lazily from `GET /review/items/{item_id}/match-preview?candidate_id=...` (see §8.4). Renders as a single line ("This will close 3 open review items and reattach 4 evidence rows to project X.") above the per-row Match button so the reviewer sees the blast radius before committing.
   - [ ] Pre-existing review-item badge `⚠ N open` (hover-popover lists them)
   - [ ] Match-likelihood column at right, sortable
   - [ ] Default sort: subject first, then by match likelihood DESC (Layer 1 candidates first)
 - [ ] **Keyboard navigation into the candidate table.** Extends the existing `[`/`]` queue navigation (C.k.1).
-  - [ ] `↑`/`↓` move focus between candidate rows on the active card.
-  - [ ] `1`–`9` quick-select the corresponding candidate row.
+  - [x] `↑`/`↓` move focus between candidate rows on the active card.
+  - [x] `1`–`9` quick-select the corresponding candidate row.
   - [ ] `m` triggers Match-to-this on the focused row (opens match-with-deltas modal if there are field disagreements with the subject; otherwise commits directly).
-  - [ ] `n` triggers the card-header Create-new flow — opens the confirm modal first, doesn't write on the keypress alone (matches the friction step above).
+  - [x] `n` triggers the card-header Create-new flow — opens the confirm modal first, doesn't write on the keypress alone (matches the friction step above).
   - [ ] `l` opens the relationship dropdown on the focused row's Create-new-link action.
 - [ ] **MapPopup component:** opened by a map icon button on the card header. Renders MapLibre map showing subject pin + numbered candidate pins corresponding to table row numbers. Click outside or close button dismisses.
 - [ ] **Match-with-deltas modal:** when reviewer clicks `Match to this` and the subject has any field values that disagree with the matched project's current values, show a confirm step listing the deltas with checkboxes for which to apply. Reuse the generalized ThreeFieldEditor value-change UI model for each delta row.
@@ -473,6 +473,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Frontend helper tests: per-signal chip visibility preserves `searched=false` in the data model but hides it from render lists
 - [x] Frontend helper tests: row color-band tone agrees with match layer / likelihood thresholds
 - [x] Frontend helper tests: cell-level overlap detection covers text substrings, cross-field unit equality, status/product exact matches, story proximity, and coordinate distance
+- [x] Frontend helper tests: candidate keyboard focus helpers and match-preview impact copy
 - [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
 - [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
 - [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
@@ -507,6 +508,11 @@ Phase 4 — Dedup table (days 10-19)
 **5D-3 lessons learned:**
 - Keep overlap detection as a pure helper returning rich metadata, not a render-only boolean. The same subject/candidate agreement signal can feed tooltips now and Match-with-deltas context later.
 - Use a distinct cell-level highlight tone from the row likelihood band. Row bands answer "how likely"; yellow cell tints answer "which values agree."
+
+**5D-4 lessons learned:**
+- Fetch impact previews on focused rows only, with a short debounce and a `(review_item, candidate)` cache. Hover-driven preview calls would turn normal table scanning into unnecessary API churn.
+- Keep the Create-new friction step parent-owned. The write action is still 5E, but modal ownership now lives beside focused-card state so auto-advance can close stale prompts cleanly when writes land.
+- Treat Layer 3 as an explicit reviewer expansion, not an empty-state-only fallback. The broader sweep can be useful even when Layer 1/2 produced plausible matches.
 
 **Deferred follow-ons:**
 

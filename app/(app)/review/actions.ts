@@ -2,7 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { requireApiBaseUrl } from "@/lib/env";
-import { mapDedupCandidatesResponse, type DiscoveryCandidateSearch } from "@/lib/review/discovery";
+import {
+  mapDedupCandidatesResponse,
+  mapMatchPreviewResponse,
+  type DiscoveryCandidateSearch,
+  type DiscoveryMatchPreview
+} from "@/lib/review/discovery";
 import {
   accessTokenForApi,
   apiBaseUrlForWrite,
@@ -29,8 +34,13 @@ export type DedupCandidatesActionResult =
   | { ok: true; data: DiscoveryCandidateSearch }
   | { ok: false; message: string; status?: number };
 
+export type MatchPreviewActionResult =
+  | { ok: true; data: DiscoveryMatchPreview }
+  | { ok: false; message: string; status?: number };
+
 export async function fetchDedupCandidatesAction(
-  reviewItemId: string
+  reviewItemId: string,
+  options: { includeLayer3?: boolean } = {}
 ): Promise<DedupCandidatesActionResult> {
   if (!reviewItemId) {
     return { ok: false, message: "Missing review item." };
@@ -39,7 +49,11 @@ export async function fetchDedupCandidatesAction(
   try {
     const apiBaseUrl = requireApiBaseUrl();
     const accessToken = await accessTokenForApi();
-    const response = await fetch(`${apiBaseUrl}/review/queue/${reviewItemId}/candidates`, {
+    const url = new URL(`${apiBaseUrl}/review/queue/${reviewItemId}/candidates`);
+    if (options.includeLayer3) {
+      url.searchParams.set("include_layer3", "true");
+    }
+    const response = await fetch(url.toString(), {
       headers: {
         Authorization: `Bearer ${accessToken}`
       },
@@ -62,6 +76,46 @@ export async function fetchDedupCandidatesAction(
     return {
       ok: false,
       message: error instanceof Error ? error.message : "Dedup candidates could not be loaded."
+    };
+  }
+}
+
+export async function fetchMatchPreviewAction(
+  reviewItemId: string,
+  candidateId: string
+): Promise<MatchPreviewActionResult> {
+  if (!reviewItemId || !candidateId) {
+    return { ok: false, message: "Missing review item or candidate." };
+  }
+
+  try {
+    const apiBaseUrl = requireApiBaseUrl();
+    const accessToken = await accessTokenForApi();
+    const url = new URL(`${apiBaseUrl}/review/items/${reviewItemId}/match-preview`);
+    url.searchParams.set("candidate_id", candidateId);
+    const response = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        message: await responseErrorMessage(response, "Match preview could not be loaded.")
+      };
+    }
+
+    return {
+      ok: true,
+      data: mapMatchPreviewResponse(await response.json())
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Match preview could not be loaded."
     };
   }
 }
