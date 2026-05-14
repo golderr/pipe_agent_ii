@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildDiscoveryCards, isDiscoveryItem, subjectForDiscoveryItem } from "./discovery";
+import {
+  buildDiscoveryCards,
+  isDiscoveryItem,
+  mapDedupCandidatesResponse,
+  searchedSummary,
+  subjectForDiscoveryItem
+} from "./discovery";
 import type { ReviewQueueItem } from "./types";
 
 describe("review discovery helpers", () => {
@@ -69,6 +75,62 @@ describe("review discovery helpers", () => {
     });
     expect(cards[0].newCandidateProbability).toBeCloseTo(0.3);
     expect(cards[1].newCandidateProbability).toBe(1);
+  });
+
+  it("maps dedup candidate API payloads into frontend discovery models", () => {
+    const result = mapDedupCandidatesResponse({
+      subject: {
+        project_name: "Fig Tower",
+        canonical_address: "100 Fig St",
+        units_total: 140,
+        building_height_stories: 8
+      },
+      candidates: [
+        {
+          project_id: "project-1",
+          project_name: "Fig Tower",
+          canonical_address: "100 Fig St",
+          units_total: 100,
+          match_likelihood: 0.82,
+          match_layer: 1,
+          distance_meters: 12.5,
+          open_review_item_count: 2,
+          match_signals: {
+            address: {
+              score: 1,
+              contributed: true,
+              searched: true,
+              label: "Address",
+              detail: "exact address",
+              weight: 0.25
+            }
+          }
+        }
+      ],
+      layer_3_available: true,
+      new_candidate_probability: 0.18,
+      searched: {
+        layer_1: [{ signal: "address", searched: true, criteria: "exact canonical_address" }],
+        layer_2: { searched: true, trigram_min_score: 0.12 }
+      }
+    });
+
+    expect(result.subject).toMatchObject({
+      projectName: "Fig Tower",
+      canonicalAddress: "100 Fig St",
+      totalUnits: 140,
+      stories: 8
+    });
+    expect(result.candidates[0]).toMatchObject({
+      projectId: "project-1",
+      matchLayer: 1,
+      matchLikelihood: 0.82,
+      openReviewItemCount: 2
+    });
+    expect(result.candidates[0].matchSignals.address.contributed).toBe(true);
+    expect(result.layer3Available).toBe(true);
+    expect(result.newCandidateProbability).toBe(0.18);
+    expect(searchedSummary(result)).toContain("threshold 0.12");
   });
 });
 

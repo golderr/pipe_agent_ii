@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, useTransition, type MouseEvent } from "react";
 import {
   commitReviewDecisionsAction,
+  fetchDedupCandidatesAction,
   stageReviewDecisionAction,
   unstageReviewDecisionAction
 } from "./actions";
@@ -62,6 +63,9 @@ import {
 import {
   buildDiscoveryCards,
   isDiscoveryItem,
+  searchedSummary,
+  type DiscoveryCandidate,
+  type DiscoveryCandidateSearch,
   type DiscoveryCard
 } from "@/lib/review/discovery";
 import { compactStatus, statusStyle } from "@/lib/status";
@@ -111,6 +115,11 @@ type Banner = {
   tone: "success" | "error";
   message: string;
 } | null;
+
+type CandidateCacheEntry =
+  | { status: "loading" }
+  | { status: "loaded"; data: DiscoveryCandidateSearch }
+  | { status: "error"; message: string };
 
 type SourceFamily = "news" | "permit" | "costar" | "pipedream" | "other";
 type SourceFilter = "all" | SourceFamily | "multiple";
@@ -169,6 +178,7 @@ export function ReviewQueueClient({
   const [focusedDiscoveryCardId, setFocusedDiscoveryCardId] = useState<string | null>(
     initialDiscoveryCardId
   );
+  const [candidateCache, setCandidateCache] = useState<Record<string, CandidateCacheEntry>>({});
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner>(null);
   const [isPending, startTransition] = useTransition();
@@ -343,6 +353,25 @@ export function ReviewQueueClient({
       }
     });
   }, [jurisdictionId, router, stagedMineCount]);
+
+  const requestDiscoveryCandidates = useCallback((itemId: string) => {
+    setCandidateCache((cache) => {
+      const existing = cache[itemId];
+      if (existing?.status === "loading" || existing?.status === "loaded") {
+        return cache;
+      }
+      return { ...cache, [itemId]: { status: "loading" } };
+    });
+
+    void fetchDedupCandidatesAction(itemId).then((result) => {
+      setCandidateCache((cache) => ({
+        ...cache,
+        [itemId]: result.ok
+          ? { status: "loaded", data: result.data }
+          : { status: "error", message: result.message }
+      }));
+    });
+  }, []);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -555,9 +584,11 @@ export function ReviewQueueClient({
         <DiscoveryView
           cards={discoveryCards}
           selectedCardKey={focusedDiscoveryCard?.key ?? null}
+          candidateCache={candidateCache}
           sourceRuns={data.sourceRuns}
           jurisdictionId={jurisdictionId}
           onSelect={setFocusedDiscoveryCardId}
+          onRequestCandidates={requestDiscoveryCandidates}
         />
       ) : groups.length === 0 ? (
         <div className="px-5 py-8">
@@ -768,15 +799,19 @@ function ReviewedDecisionListRow({
 function DiscoveryView({
   cards,
   selectedCardKey,
+  candidateCache,
   sourceRuns,
   jurisdictionId,
-  onSelect
+  onSelect,
+  onRequestCandidates
 }: {
   cards: DiscoveryCard[];
   selectedCardKey: string | null;
+  candidateCache: Record<string, CandidateCacheEntry>;
   sourceRuns: Record<string, ReviewSourceRunSummary>;
   jurisdictionId: string | null;
   onSelect: (cardKey: string) => void;
+  onRequestCandidates: (itemId: string) => void;
 }) {
   const selectedCard = cards.find((card) => card.key === selectedCardKey) ?? cards[0] ?? null;
   if (!cards.length) {
@@ -822,7 +857,8 @@ function DiscoveryView({
                   </span>
                 </div>
                 <p className="mt-1 text-[11px] text-slate-500">
-                  {humanize(card.item.itemType)} - {newCandidateProbabilityLabel(card)}
+                  {humanize(card.item.itemType)} -{" "}
+                  {newCandidateProbabilityLabel(card.newCandidateProbability)}
                 </p>
               </button>
             ))}
@@ -833,10 +869,12 @@ function DiscoveryView({
         {selectedCard ? (
           <DiscoveryCardShell
             card={selectedCard}
+            candidatesEntry={candidateCache[selectedCard.item.id]}
             sourceRun={
               selectedCard.item.sourceRunId ? sourceRuns[selectedCard.item.sourceRunId] : undefined
             }
             jurisdictionId={jurisdictionId}
+            onRequestCandidates={onRequestCandidates}
           />
         ) : null}
       </section>
@@ -846,14 +884,28 @@ function DiscoveryView({
 
 function DiscoveryCardShell({
   card,
+  candidatesEntry,
   sourceRun,
-  jurisdictionId
+  jurisdictionId,
+  onRequestCandidates
 }: {
   card: DiscoveryCard;
+  candidatesEntry: CandidateCacheEntry | undefined;
   sourceRun: ReviewSourceRunSummary | undefined;
   jurisdictionId: string | null;
+  onRequestCandidates: (itemId: string) => void;
 }) {
-  const subject = card.subject;
+  useEffect(() => {
+    if (!candidatesEntry) {
+      onRequestCandidates(card.item.id);
+    }
+  }, [card.item.id, candidatesEntry, onRequestCandidates]);
+
+  const candidates = candidatesEntry?.status === "loaded" ? candidatesEntry.data : null;
+  const subject = candidates?.subject ?? card.subject;
+  const potentialMatchCount = candidates?.candidates.length ?? card.potentialMatchCount;
+  const newCandidateProbability =
+    candidates?.newCandidateProbability ?? card.newCandidateProbability;
   return (
     <article className="rounded-md border border-slate-200 bg-white">
       <div className="border-b border-slate-200 px-4 py-3">
@@ -887,12 +939,12 @@ function DiscoveryCardShell({
             </div>
           </div>
           <div className="grid min-w-44 grid-cols-2 gap-2 text-sm">
-            <DiscoveryMetric label="Matches" value={card.potentialMatchCount.toLocaleString()} />
+            <DiscoveryMetric label="Matches" value={potentialMatchCount.toLocaleString()} />
             <DiscoveryMetric
               label="New %"
               value={
-                card.newCandidateProbability !== null
-                  ? `${Math.round(card.newCandidateProbability * 100)}`
+                newCandidateProbability !== null
+                  ? `${Math.round(newCandidateProbability * 100)}`
                   : "-"
               }
             />
@@ -900,7 +952,7 @@ function DiscoveryCardShell({
         </div>
       </div>
       <div className="overflow-x-auto px-4 py-3">
-        <table className="w-full min-w-[58rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[64rem] table-fixed text-left text-sm">
           <thead>
             <tr className="border-b border-slate-200 text-xs font-medium uppercase tracking-normal text-slate-500">
               <th className="w-44 py-2 pr-3">Project</th>
@@ -910,6 +962,7 @@ function DiscoveryCardShell({
               <th className="w-32 py-2 pr-3">Product</th>
               <th className="w-32 py-2 pr-3">Status</th>
               <th className="w-24 py-2 pr-3">Stories</th>
+              <th className="w-24 py-2 pr-3">Match</th>
             </tr>
           </thead>
           <tbody>
@@ -921,14 +974,23 @@ function DiscoveryCardShell({
               <SubjectCell value={subject.productType ?? subject.ageRestriction} />
               <SubjectCell value={subject.pipelineStatus} />
               <SubjectCell value={subject.stories} />
+              <td className="py-3 pr-3 text-slate-500">Subject</td>
             </tr>
+            {candidates?.candidates.map((candidate, index) => (
+              <CandidateRow candidate={candidate} index={index} key={candidate.projectId} />
+            ))}
           </tbody>
         </table>
+        <CandidateTableSection
+          entry={candidatesEntry}
+          fallbackCard={card}
+          onRetry={() => onRequestCandidates(card.item.id)}
+        />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 text-sm">
         <div className="text-slate-600">
-          Potential matches: {card.potentialMatchCount.toLocaleString()} -{" "}
-          {newCandidateProbabilityLabel(card)}
+          Potential matches: {potentialMatchCount.toLocaleString()} -{" "}
+          {newCandidateProbabilityLabel(newCandidateProbability)}
         </div>
         <Link
           className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
@@ -946,6 +1008,67 @@ function SubjectCell({ value }: { value: unknown }) {
   return <td className="break-words py-3 pr-3 text-slate-800">{formatValue(value)}</td>;
 }
 
+function CandidateRow({
+  candidate,
+  index
+}: {
+  candidate: DiscoveryCandidate;
+  index: number;
+}) {
+  return (
+    <tr className="border-b border-slate-100 align-top last:border-b-0">
+      <SubjectCell value={`${index + 1}. ${candidate.projectName ?? "Unnamed project"}`} />
+      <SubjectCell value={candidate.canonicalAddress} />
+      <SubjectCell value={candidate.developer} />
+      <SubjectCell value={candidate.totalUnits} />
+      <SubjectCell value={candidate.productType ?? candidate.ageRestriction} />
+      <SubjectCell value={candidate.pipelineStatus} />
+      <SubjectCell value={candidate.stories} />
+      <td className="py-3 pr-3 text-slate-800">
+        <span className="font-medium">{Math.round(candidate.matchLikelihood * 100)}%</span>
+        <span className="mt-1 block text-xs text-slate-500">Layer {candidate.matchLayer}</span>
+      </td>
+    </tr>
+  );
+}
+
+function CandidateTableSection({
+  entry,
+  fallbackCard,
+  onRetry
+}: {
+  entry: CandidateCacheEntry | undefined;
+  fallbackCard: DiscoveryCard;
+  onRetry: () => void;
+}) {
+  if (!entry || entry.status === "loading") {
+    return (
+      <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+        Loading candidates for {fallbackCard.title}.
+      </div>
+    );
+  }
+  if (entry.status === "error") {
+    return (
+      <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+        <span>{entry.message}</span>
+        <Button type="button" variant="outline" className="h-8 px-2 text-xs" onClick={onRetry}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (entry.data.candidates.length === 0) {
+    return (
+      <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
+        <p className="font-medium text-slate-800">No candidate projects found.</p>
+        <p className="mt-1">{searchedSummary(entry.data)}</p>
+      </div>
+    );
+  }
+  return null;
+}
+
 function DiscoveryMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
@@ -955,11 +1078,11 @@ function DiscoveryMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function newCandidateProbabilityLabel(card: DiscoveryCard) {
-  if (card.newCandidateProbability === null) {
+function newCandidateProbabilityLabel(value: number | null) {
+  if (value === null) {
     return "New probability unavailable";
   }
-  return `New probability ${Math.round(card.newCandidateProbability * 100)}%`;
+  return `New probability ${Math.round(value * 100)}%`;
 }
 
 function ProjectSection({

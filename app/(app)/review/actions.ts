@@ -1,7 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { requireApiBaseUrl } from "@/lib/env";
+import { mapDedupCandidatesResponse, type DiscoveryCandidateSearch } from "@/lib/review/discovery";
 import {
+  accessTokenForApi,
   apiBaseUrlForWrite,
   jsonHeadersForApi,
   responseErrorMessage
@@ -21,6 +24,47 @@ export type ReviewMutationResult = {
   message: string;
   status?: number;
 };
+
+export type DedupCandidatesActionResult =
+  | { ok: true; data: DiscoveryCandidateSearch }
+  | { ok: false; message: string; status?: number };
+
+export async function fetchDedupCandidatesAction(
+  reviewItemId: string
+): Promise<DedupCandidatesActionResult> {
+  if (!reviewItemId) {
+    return { ok: false, message: "Missing review item." };
+  }
+
+  try {
+    const apiBaseUrl = requireApiBaseUrl();
+    const accessToken = await accessTokenForApi();
+    const response = await fetch(`${apiBaseUrl}/review/queue/${reviewItemId}/candidates`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        message: await responseErrorMessage(response, "Dedup candidates could not be loaded.")
+      };
+    }
+
+    return {
+      ok: true,
+      data: mapDedupCandidatesResponse(await response.json())
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Dedup candidates could not be loaded."
+    };
+  }
+}
 
 export async function stageReviewDecisionAction(
   input: StageReviewDecisionInput
