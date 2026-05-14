@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-14 (Item 5 kickoff)
+> **Last updated:** 2026-05-14 (Item 5A ready for review; dedup-UI lessons wired into 5B–5F)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -337,46 +337,47 @@ Phase 4 — Dedup table (days 10-19)
 
 **Reviewable sub-phases:**
 
-1. **5A — Backend retrieval + indexes:** pg_trgm migration, PostGIS index verification, similarity helpers, layered candidate retrieval, backend tests.
-2. **5B — Candidate API endpoint:** `GET /review/queue/{item_id}/candidates`, subject payload normalization, response schemas, API tests.
+1. **5A — Backend retrieval + indexes:** pg_trgm migration, PostGIS index verification, similarity helpers emitting per-signal `{score, contributed, searched, label, detail, weight}`, layered candidate retrieval with a top-level `searched` descriptor for the confident empty state, backend tests covering per-signal contributions and `searched` content.
+2. **5B — Candidate API endpoint:** `GET /review/queue/{item_id}/candidates` returning the per-signal payload + `searched` block + `new_candidate_probability`; separate `GET /review/items/{item_id}/match-preview?candidate_id=...` endpoint for the row-focused impact-preview line; subject payload normalization; response schemas; API tests.
 3. **5C — Discovery tab shell:** tab routing/state, discovery item grouping, empty/loading/error states, basic card shell.
-4. **5D — Candidate table + overlap:** subject row editor, candidate table, sorting, overlap highlighting, map popup.
-5. **5E — Match/Create actions:** atomic `edits`, match-with-deltas confirm step, create/link actions, audit/change-log behavior, action tests.
-6. **5F — End-to-end validation:** synthetic and real queue walkthroughs, live-update behavior, performance check, docs/roadmap completion.
+4. **5D — Candidate table + overlap:** subject-row editor, candidate table with sortable columns, cell-level overlap highlighting, per-row signal chips rendering `match_signals` (green/gray/hidden), row color band by likelihood (paired with the numeric percentage, not replacing it), confident empty state rendering the `searched` block, keyboard navigation into the table (`1`–`9` row select, `m` Match, `n` Create-new with confirm modal, `l` link-dropdown), map popup.
+5. **5E — Match/Create actions:** atomic `edits` write path, match-with-deltas confirm step (reusing the generalized ThreeFieldEditor UI model), create/link actions with `relationship_type ∈ {phase, master_plan, counterpart, supersedes}` (no `duplicate`), Create-new confirm modal, audit/change-log entries with "absorbed reference X from source S" framing, focused-row impact-preview line backed by the match-preview endpoint, action tests.
+6. **5F — End-to-end validation:** synthetic and real queue walkthroughs (including a no-candidate card to validate the confident empty state, a multi-signal Layer-1 card to validate chip rendering, and a 1000+ unit project to keep the Item 3 number-formatting regression closed), live-update behavior, performance check (<500ms per card), docs/roadmap completion, promote ROADMAP row to `done`.
 
 **Sub-tasks:**
 
 ### 8.1 Schema + indexes
-- [ ] **Migration** adds two GIN indexes:
+- [x] **Migration** adds two GIN indexes:
   ```sql
   CREATE INDEX ix_projects_canonical_address_trgm ON projects USING GIN (canonical_address gin_trgm_ops);
   CREATE INDEX ix_projects_project_name_trgm ON projects USING GIN (project_name gin_trgm_ops);
   ```
-- [ ] Verify PostGIS GIST index on `projects.location` exists (from B.0a). Add if missing.
+- [x] Verify PostGIS GIST index on `projects.location` exists (from B.0a). Add if missing.
 
 ### 8.2 Backend retrieval (`matching/candidates.py`)
-- [ ] **Layer 1 — hard signals.** Query returns all rows matching any of:
+- [x] **Layer 1 — hard signals.** Query returns all rows matching any of:
   - Geographic: `ST_DWithin(location, subject_point, 250)` (~250m)
   - APN: matching `project_identifiers.value` where `kind='apn'`
   - CoStar Property ID: matching `project_identifiers.value` where `kind='costar_property_id'`
   - Canonical address: exact match on `canonical_address` (normalized)
   - Developer + any other secondary signal: canonical_developer match AND (within 1km OR product_type match OR partial address)
-- [ ] **Layer 2 — soft signals.** Top 20 by weighted likelihood score (see formula in §8.3). Query uses pg_trgm `similarity()` function for name and address.
-- [ ] **Layer 3 — broader sweep.** Behind explicit "show more" parameter. Returns all projects within 1km OR any matching trigram token.
-- [ ] **Performance constraint:** Layer 1 + Layer 2 capped to 25 total rows per response. Layer 3 capped to 100.
+- [x] **Layer 2 — soft signals.** Top 20 by weighted likelihood score (see formula in §8.3). Query uses pg_trgm `similarity()` function for name and address.
+- [x] **Layer 3 — broader sweep.** Behind explicit "show more" parameter. Returns all projects within 1km OR any matching trigram token.
+- [x] **Performance constraint:** Layer 1 + Layer 2 capped to 25 total rows per response. Layer 3 capped to 100.
 
 ### 8.3 Match-likelihood formula
-- [ ] Implement in `matching/similarity.py`:
+- [x] Implement in `matching/similarity.py`:
   ```
   likelihood = 0.30 * geographic_proximity_score        # exponential falloff from 0 at 1km to 1.0 at 0m
              + 0.25 * address_similarity                 # pg_trgm similarity(canonical_address, subject_address)
-             + 0.20 * name_similarity                    # pg_trgm similarity(project_name, subject_name) — null subject_name → 0
-             + 0.10 * developer_match                    # 1.0 exact-canonical, 0.7 fuzzy ≥0.85 ratio, else 0
+             + 0.20 * developer_match                    # 1.0 exact-canonical, 0.7 fuzzy ≥0.85 ratio, else 0
+             + 0.10 * name_similarity                    # pg_trgm similarity(project_name, subject_name) — null subject_name → 0
              + 0.10 * unit_count_proximity               # 1.0 within ±5%, exponential falloff
              + 0.05 * product_type_match                 # 1.0 exact, 0 else
   ```
-- [ ] Each component returns 0.0–1.0; missing subject fields → that component contributes 0 weight (rebalance weights proportionally so the total still scales to 0–1).
-- [ ] Total returned as percentage in API + UI.
+- [x] Each component returns 0.0–1.0; missing subject fields → that component contributes 0 weight (rebalance weights proportionally so the total still scales to 0–1).
+- [x] Total returned as normalized 0.0-1.0 for API/UI to format as a percentage.
+- [ ] **Recency weighting is deferred** — see Deferred follow-ons below. The v1 formula does not include any recency component. Cycle 1 calibration will tell us whether stale candidates clutter the top of result lists; if so, add a small (~5%) weight on `Project.updated_at` or `last_evidence_at` as a follow-up.
 
 ### 8.4 API endpoint
 - [ ] `GET /review/queue/{item_id}/candidates?layer={1|2|3}&include_layer3=false`
@@ -390,16 +391,28 @@ Phase 4 — Dedup table (days 10-19)
         units_market, units_affordable, units_workforce, product_type,
         age_restriction, pipeline_status, building_height_stories, lat, lng,
         match_likelihood: 0.0–1.0,
-        match_signals: { geographic, address, name, developer, units, product_type },
+        match_signals: {
+          identifier?: {score, contributed, searched, label, detail, weight},
+          geographic: {score, contributed, searched, label, detail, weight},
+          address: {score, contributed, searched, label, detail, weight},
+          name: {score, contributed, searched, label, detail, weight},
+          developer: {score, contributed, searched, label, detail, weight},
+          units: {score, contributed, searched, label, detail, weight},
+          product_type: {score, contributed, searched, label, detail, weight},
+        },
         match_layer: 1 | 2 | 3,
         distance_meters: float | null,
         open_review_item_count: int,
       },
       ...
     ],
+    searched: { layer_1: [...], layer_2: {...}, layer_3: {...} },
+    new_candidate_probability: 0.0–1.0,
     layer_3_available: bool,    // hints frontend to show "show more" affordance
   }
   ```
+- [x] **`searched` block contents.** Backend retrieval (`matching/candidates.py`) emits this descriptor on every response so the empty-state UI can explain itself. Shape: `layer_1` is the list of hard-signal probes tried (`apn`, `costar_property_id`, `address_exact`, `geo_250m`, `developer_plus_secondary`); `layer_2` records the trigram thresholds + weight set used; `layer_3` records whether broader sweep is reachable from this query. Each entry includes a human-readable label so the frontend renders without translation tables.
+- [ ] **`GET /review/items/{item_id}/match-preview?candidate_id=...`** — separate lightweight endpoint returning `{review_items_to_close: int, evidence_rows_to_reattach: int, value_change_items_that_would_be_queued: [field_name, ...]}` for the focused candidate row. Called on row focus/hover before the reviewer commits Match. Kept off the main `/candidates` response so we don't pay the preview cost for all 25 candidates on every card load.
 
 ### 8.5 Frontend Discovery tab
 - [ ] **Tab UI** on `/review` page. State persisted in URL query param (`?tab=discovery`).
@@ -408,7 +421,8 @@ Phase 4 — Dedup table (days 10-19)
   - [ ] Header: source name (small), project name (if extracted), project address, `Potential matches: N` and `New candidate probability: X%` indicators
   - [ ] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`.
   - [ ] Candidate table below
-  - [ ] Header action `Create new` (no modal confirmation)
+  - [ ] **Confident empty state** when no candidates returned: render the API response's `searched` block as a paragraph (e.g., "No candidates found within 1km. Searched by APN, CoStar Property ID, normalized address, name/address trigrams (threshold from `searched.layer_2.trigram_min_score`), and canonical developer match. None passed Layer 1 or Layer 2 thresholds."). Do not render a bare empty table — reviewers second-guess silent failure.
+  - [ ] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action.
 - [ ] **CandidateTable component:**
   - [ ] Columns from the agreed list (project name, address, developer, units total/market/affordable/workforce, product type, age restriction, status, building height, lat, lng, match likelihood)
   - [ ] Sortable by clicking column headers
@@ -417,10 +431,19 @@ Phase 4 — Dedup table (days 10-19)
     - Cross-field numeric equality for unit counts (subject's "312 affordable" highlights candidate's "312 total" too)
     - Distance-threshold highlight for lat/lng (within ~250m subject lat/lng)
     - Building-height match within ±2 stories
-  - [ ] Per-row actions: `Match to this`, `Create new + link as ▾` (dropdown shows relationship types)
+  - [ ] **Row color band by match-likelihood**, paired with (not replacing) the numeric percentage. Layer 1 candidates render with a green band; Layer 2 with a green-to-yellow-to-orange gradient by likelihood; Layer 3 with a neutral gray band. The band reads in <200ms; the number is still there for ties and precision.
+  - [ ] **Per-signal chips inline next to the match-likelihood column.** Render one chip per signal from `match_signals` (geographic, address, name, developer, units, product_type, identifier when present). Green chip when `contributed=true`; gray when searched but not contributed; omitted when the subject lacked the field. Each chip's tooltip shows the underlying `score` and `detail`. This is the "why it matched" surface — reviewer scans reasons in under a second.
+  - [ ] Per-row actions: `Match to this`, `Create new + link as ▾` (dropdown shows `phase` / `master_plan` / `counterpart` / `supersedes` — see §8.6 for the rationale on dropping `duplicate` from this dropdown).
+  - [ ] **Impact preview line** on the focused candidate row, fetched lazily from `GET /review/items/{item_id}/match-preview?candidate_id=...` (see §8.4). Renders as a single line ("This will close 3 open review items and reattach 4 evidence rows to project X.") above the per-row Match button so the reviewer sees the blast radius before committing.
   - [ ] Pre-existing review-item badge `⚠ N open` (hover-popover lists them)
   - [ ] Match-likelihood column at right, sortable
   - [ ] Default sort: subject first, then by match likelihood DESC (Layer 1 candidates first)
+- [ ] **Keyboard navigation into the candidate table.** Extends the existing `[`/`]` queue navigation (C.k.1).
+  - [ ] `↑`/`↓` move focus between candidate rows on the active card.
+  - [ ] `1`–`9` quick-select the corresponding candidate row.
+  - [ ] `m` triggers Match-to-this on the focused row (opens match-with-deltas modal if there are field disagreements with the subject; otherwise commits directly).
+  - [ ] `n` triggers the card-header Create-new flow — opens the confirm modal first, doesn't write on the keypress alone (matches the friction step above).
+  - [ ] `l` opens the relationship dropdown on the focused row's Create-new-link action.
 - [ ] **MapPopup component:** opened by a map icon button on the card header. Renders MapLibre map showing subject pin + numbered candidate pins corresponding to table row numbers. Click outside or close button dismisses.
 - [ ] **Match-with-deltas modal:** when reviewer clicks `Match to this` and the subject has any field values that disagree with the matched project's current values, show a confirm step listing the deltas with checkboxes for which to apply. Reuse the generalized ThreeFieldEditor value-change UI model for each delta row.
 - [ ] **Live updates after match/create:**
@@ -429,15 +452,23 @@ Phase 4 — Dedup table (days 10-19)
 
 ### 8.6 Backend write actions
 - [ ] **Write payload convention:** `edits` always targets the source/reference row (`news_project_references.candidate_*` or the analogous permit subject payload) before the reviewer commits the action. `project_fields` is the create-shape for the new `Project`; for create flows it may include corrected subject values, but it does not replace the source-row correction audit.
-- [ ] **`POST /review/items/{item_id}/match`** — body: `{matched_project_id, edits: {...}, accept_deltas: [field_name, ...]}`. Applies subject edits atomically, updates `news_project_references.matched_project_id` (or analogous for permits), closes review item, optionally writes value-change review items for non-accepted deltas (so they queue for normal review). Audit row in `change_log`.
-- [ ] **`POST /review/items/{item_id}/create-and-link`** — body: `{relationship_type, related_project_id, project_fields, edits: {...}}`. Applies subject edits atomically, creates Project, creates `project_relationships` row, closes review item. Audit rows.
+- [ ] **Relationship-type vocabulary for the Discovery flow** is `{phase, master_plan, counterpart, supersedes}`. **`duplicate` is intentionally NOT in this set.** The Discovery flow operates on `article → existing-project` or `article → new-project`; "Create new + link as duplicate" is a semantic contradiction (if the subject is the same underlying project as N, the right action is Match-to-this, not Create). Project-to-project duplicate marking is a separate decision that operates on two already-persisted projects and is deferred to a future `UX.project-merge` workflow (see Deferred follow-ons below and the ROADMAP row).
+- [ ] **`POST /review/items/{item_id}/match`** — body: `{matched_project_id, edits: {...}, accept_deltas: [field_name, ...]}`. Applies subject edits atomically, updates `news_project_references.matched_project_id` (or analogous for permits), closes review item, optionally writes value-change review items for non-accepted deltas (so they queue for normal review). Audit row in `change_log` with explicit "absorbed reference X from source S on date D by user U" framing — both the surviving project's Activity tab and the audit trail need to be able to point at the source reference after the merge.
+- [ ] **`POST /review/items/{item_id}/create-and-link`** — body: `{relationship_type, related_project_id, project_fields, edits: {...}}` where `relationship_type ∈ {phase, master_plan, counterpart, supersedes}`. Applies subject edits atomically, creates Project, creates `project_relationships` row, closes review item. Audit rows.
 - [ ] **`POST /review/items/{item_id}/create`** — body: `{project_fields, edits: {...}}`. Applies subject edits atomically, creates Project (unlinked), closes review item. Audit row.
 
 ### 8.7 Tests
-- [ ] Backend retrieval: fixtures exercise each Layer; ordering correct; overlap signals correctly computed
-- [ ] Backend match-likelihood: each component returns 0-1; missing-field rebalancing works
-- [ ] Backend action endpoints: each writes the correct rows + closes the item
+- [x] Backend retrieval: fixtures exercise each Layer; ordering correct; overlap signals correctly computed
+- [x] Backend match-likelihood: each component returns 0-1; missing-field rebalancing works
+- [x] Backend retrieval: `searched` block emitted with the expected probes per layer; per-signal `contributed` flag agrees with score threshold
+- [ ] Backend action endpoints: each writes the correct rows + closes the item; Match-to-this `change_log` row contains "absorbed reference X from source S" framing
+- [ ] Backend action endpoints: `relationship_type` validator rejects `duplicate` for create-and-link
+- [ ] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
 - [ ] Frontend: component tests for DedupCard / SubjectRow / CandidateTable / MapPopup
+- [ ] Frontend: per-signal chip renders green-when-contributed / gray-when-searched / hidden-when-absent
+- [ ] Frontend: row color band agrees with match-likelihood band thresholds
+- [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
+- [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
 - [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
 
 ### 8.8 Smoke validation
@@ -446,6 +477,18 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] Verify a Match-to-this + Match-with-deltas flow on a fixture.
 
 **Acceptance:** Discovery tab loads with all open discovery items, candidate tables populate quickly (<500ms per card), overlap highlighting visible, match/create flows work end-to-end, live updates work in-session, no duplicate projects created during a curated stress test of 5+ articles about the same potential project.
+
+**5A lessons learned:**
+- Shape retrieval metadata before the API layer: "why it matched" chips and confident empty states require per-signal scores, `contributed` flags, and a `searched` summary from the backend retrieval module.
+- Developer is a stronger cycle-1 dedup signal than project name; the initial weights now use developer 0.20 and name 0.10.
+
+**Deferred follow-ons:**
+
+- **`UX.project-merge` — project-to-project duplicate marking + record combination.** When two already-persisted projects describe the same underlying real-world project, the reviewer needs a way to merge them: pick a survivor, re-attach evidence rows to the survivor, write a `project_relationships` row of type `duplicate`, soft-delete or status-flag the loser, leave an audit trail. Most natural surface is the pipeline tab's project-detail view, not the Discovery tab — Discovery operates on incoming `article → project` decisions, not on `project → project` decisions. Reuse the match-with-deltas component infrastructure shipped in Item 5 (the generalized ThreeFieldEditor value-change UI model handles project-vs-project deltas the same way it handles subject-vs-candidate). Estimated effort: ~1 week given Item 5 infrastructure. See ROADMAP row `UX.project-merge`.
+- **Recency weighting in match-likelihood (`§8.3`).** Add a small (~5%) weight on `Project.updated_at` or `last_evidence_at` if cycle 1 reveals stale candidates cluttering the top of result lists. Skip in v1 because the existing hard signals (APN, address, geo, identifier) already do the heavy lifting and adding recency would mostly affect tiebreaking among already-strong candidates. Defer the calibration decision until real reviewer feedback is available.
+- **Canonical developer lookup index.** `_add_developer_secondary_hard_signals` currently scopes to the market and normalizes non-null developer names in Python. This is acceptable for Los Angeles cycle 1 scale; Phase H or multi-market volume should add a `projects.canonical_developer` column (trigger/backfill populated) with a btree index so developer-secondary hard matches become SQL equality.
+- **Layer 2 weight/threshold calibration.** Calibrate `MATCH_SIGNAL_WEIGHTS` and `TRIGRAM_MIN_SCORE` after cycle 1's first real walkthrough surfaces ranking complaints. Skip pre-calibration guesswork until the Discovery tab is running against organic queue items.
+- **Audit-the-survivor surface on project detail.** Lesson from CRM merge UIs: when Match-to-this lands, the surviving project's Activity tab should render "Absorbed reference X from source S on date D by user U" as a discoverable history entry. Item 5's `change_log` row carries the data; verify the existing Activity feed renders it usefully and add an explicit row template if not.
 
 ---
 
