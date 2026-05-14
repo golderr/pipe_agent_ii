@@ -723,6 +723,52 @@ def test_resolve_status_emits_regression_candidate_for_lower_ranked_evidence() -
     assert candidate["terminal_state_dropped"] is False
 
 
+def test_resolve_status_matches_ladbs_status_desc_case_insensitively() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={"status_desc": "cancelled"},
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    assert resolution.metadata["regression_candidate_count"] == 1
+    candidate = resolution.metadata["regression_candidates"][0]
+    assert candidate["proposed_status"] == PipelineStatus.APPROVED.value
+    assert candidate["evidence_ids"] == [str(permit_evidence.id)]
+    assert "suppressed_regression_candidates" not in resolution.metadata
+
+
+def test_resolve_status_matches_ladbs_additive_status_desc_case_insensitively() -> None:
+    project = _build_project()
+    project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
+    permit_evidence = _build_evidence(
+        source_type="ladbs_permit",
+        source_tier=1,
+        evidence_date=date(2026, 3, 15),
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None},
+        },
+        raw_data={"status_desc": "issued"},
+    )
+
+    resolution = resolve_status([permit_evidence], project)
+
+    assert resolution.value == PipelineStatus.UNDER_CONSTRUCTION
+    assert resolution.metadata.get("regression_candidate_count", 0) == 0
+    suppressed = resolution.metadata.get("suppressed_regression_candidates", [])
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppression_reason"] == "ladbs_additive_paperwork"
+    assert suppressed[0]["proposed_status"] == PipelineStatus.APPROVED.value
+
+
 def test_resolve_status_enumerates_lower_ranked_candidate_when_higher_evidence_wins() -> None:
     # Cancelled permit on a UC project (with inspection evidence supporting UC)
     # still emits a regression candidate — the higher-ranked inspection wins

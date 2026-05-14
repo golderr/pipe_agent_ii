@@ -25,6 +25,11 @@ from tcg_pipeline.db.models import Evidence
 
 logger = logging.getLogger(__name__)
 
+
+def _status_desc_key(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
 # Source types treated as LADBS source family for this filter.
 LADBS_SOURCE_TYPES: frozenset[str] = frozenset(
     {
@@ -63,6 +68,14 @@ LADBS_REGRESSION_STATUS_DESC: frozenset[str] = frozenset(
         "Plan Check Cancelled",
     }
 )
+# Module-private normalized membership keys; rebuilt from the display sets so
+# the reader-facing allowlists and comparison keys cannot drift.
+_LADBS_ADDITIVE_STATUS_DESC_KEYS: frozenset[str] = frozenset(
+    _status_desc_key(value) for value in LADBS_ADDITIVE_STATUS_DESC
+)
+_LADBS_REGRESSION_STATUS_DESC_KEYS: frozenset[str] = frozenset(
+    _status_desc_key(value) for value in LADBS_REGRESSION_STATUS_DESC
+)
 
 LADBS_UNKNOWN_STATUS_ALERT_KEY = "ladbs_unknown_permit_status"
 
@@ -91,9 +104,10 @@ def is_benign_ladbs_additive_paperwork(
     # would reintroduce false-positive regression cards for real corroboration.
     raw = evidence.raw_data if isinstance(evidence.raw_data, dict) else {}
     status_desc = (raw.get("status_desc") or "").strip()
-    if status_desc in LADBS_REGRESSION_STATUS_DESC:
+    status_desc_key = _status_desc_key(status_desc)
+    if status_desc_key in _LADBS_REGRESSION_STATUS_DESC_KEYS:
         return False, None
-    if status_desc in LADBS_ADDITIVE_STATUS_DESC:
+    if status_desc_key in _LADBS_ADDITIVE_STATUS_DESC_KEYS:
         return True, None
     return True, _unknown_ladbs_status_alert(
         status_desc=status_desc,
