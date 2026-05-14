@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13 (Phase 1 hardening Item zeta ready for review; items 1, 4, 2 shipped)
+> **Last updated:** 2026-05-13 (Item 6 elevation scope corrected; LADBS deferred)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -211,7 +211,6 @@ Phase 4 — Dedup table (days 10-19)
 - News integrator: include the new field when writing evidence rows
 - `src/tcg_pipeline/ingesters/costar.py` — map CoStar's `Number Of Stories` column
 - `src/tcg_pipeline/ingesters/pipedream.py` — map Pipedream's `Elevation` column (DataStorage col 48)
-- `src/tcg_pipeline/source_adapters/ladbs.py` — map `stories_proposed` from LADBS Socrata
 - New: `src/tcg_pipeline/resolution/fields/elevation.py` — resolver
 - `src/tcg_pipeline/resolution/engine.py` — wire the new resolver in
 - Frontend project detail Snapshot: add the field to the Snapshot panel labelled "Elevation (stories)"
@@ -220,7 +219,7 @@ Phase 4 — Dedup table (days 10-19)
 **Sub-tasks:**
 
 - [x] **Field name decision.** `elevation` (integer, nullable, number of stories). Per Q3 resolution, matches Pipedream researcher terminology. Add a column comment / model docstring: "Building height in stories. Named `elevation` to match Pipedream's existing column and researcher mental model; not ground elevation."
-- [x] **Source field names confirmed.** CoStar export: `Number Of Stories` (both MF and Commercial workbooks). Pipedream DataStorage: `Elevation` at col 48 (header in row 3). LADBS Socrata: `stories_proposed` (verify in Socrata docs at first map — actual prod schema TBD; treat as `stories_proposed` with sentinel fallback).
+- [x] **Source field names confirmed.** CoStar export: `Number Of Stories` (both MF and Commercial workbooks). Pipedream DataStorage: `Elevation` at col 48 (header in row 3). LADBS `pi9x-tg5x` active feed exposes `height` as text / decimal feet, not stories, so LADBS is dropped from the Item 6 source list. See deferred follow-on below.
 - [ ] **Write the Alembic migration.** Adds one nullable integer column `elevation` to `projects` + `candidate_elevation` to `news_project_references`. No backfill needed.
 - [ ] **Update db/models.py** for both Project and NewsProjectReference.
 - [ ] **Run migration locally + verify in staging Supabase.** Per `docs/ops/migration_runbook.md` discipline: `pg_dump` backup first.
@@ -228,8 +227,7 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **Update news integrator** to include the new field when writing reference rows and to thread it into the evidence row's `extracted_fields`.
 - [ ] **Update CoStar import** to map the stories column.
 - [ ] **Update Pipedream import** to map the stories column.
-- [ ] **Update LADBS adapter** to map `stories_proposed`.
-- [ ] **Write the resolver.** New file `resolution/fields/building_height.py`. Rule: most recent explicit value wins, with source-priority tiebreak for same-date matches (Pipedream > LADBS > CoStar > news_article). Treat null as "no evidence" — null Project value remains null if no evidence has the field.
+- [ ] **Write the resolver.** New file `resolution/fields/elevation.py`. Rule: most recent explicit value wins, with source-priority tiebreak for same-date matches (Pipedream > CoStar > news_article). Treat null as "no evidence" — null Project value remains null if no evidence has the field.
 - [ ] **Wire into resolution_engine.** Register the new resolver alongside the existing six (status, units, delivery, developer, product_type, age_restriction).
 - [ ] **Update project detail Snapshot UI.** Add the field with a "Building height" label.
 - [ ] **Tests:**
@@ -237,12 +235,19 @@ Phase 4 — Dedup table (days 10-19)
   - [ ] News extraction: prompt produces `candidate_building_height_stories` from a fixture
   - [ ] CoStar import: maps stories column correctly
   - [ ] Pipedream import: same
-  - [ ] LADBS adapter: same
   - [ ] Resolver: most-recent-wins, source-priority tiebreak, null handling
 - [ ] **Apply migration in production.** Backup + apply per migration runbook. Record in Decision Log.
 - [ ] **Commit + push.**
 
-**Acceptance:** Migration applied to production, all four sources can populate the field, resolver writes the correct value, project-detail Snapshot shows the field.
+**Acceptance:** Migration applied to production, CoStar / Pipedream / news can populate the field, resolver writes the correct value, project-detail Snapshot shows the field.
+
+**Deferred follow-ons:**
+
+- [ ] **Investigate LADBS height-to-stories semantics.** `pi9x-tg5x` exposes `height` as decimal feet; deprecated `cpkv-aajs` / `hbkd-qubn` expose `of_stories`. A live-feed mapping requires per-product-type feet-per-story rules and an evidence-quality decision. Park as a separate source-data investigation, not Phase 2 scope.
+
+**Lessons learned:**
+
+- Verify the actual source schema against a live API call before adding it to a multi-source resolver. Documentation hedges like "TBD, verify at first map" should be treated as work-not-yet-done, not as a placeholder to code against.
 
 ---
 
