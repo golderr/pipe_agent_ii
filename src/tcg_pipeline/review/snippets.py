@@ -142,7 +142,7 @@ def render_costar_snippet(
     value = _field_value(evidence, field_name)
     raw_data = _mapping(evidence.raw_data)
     costar_property_id = _text(
-        _first_value(raw_data, "costar_property_id", "Property ID", "property_id")
+        _first_value(raw_data, "costar_property_id", "Property ID", "PropertyID", "property_id")
     )
     upload_date = _text(
         _first_value(raw_data, "upload_date", "uploaded_at", "as_of_date")
@@ -162,7 +162,6 @@ def render_costar_snippet(
         source_fields={
             "costar_property_id": costar_property_id or evidence.source_record_id,
             "upload_date": upload_date,
-            "source_field": field_name,
         },
     )
 

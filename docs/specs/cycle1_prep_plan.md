@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-13 (Phase 1 hardening Item epsilon ready to ship; items 1, 4, 2 shipped)
+> **Last updated:** 2026-05-13 (Phase 1 hardening Item zeta ready for review; items 1, 4, 2 shipped)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -170,16 +170,32 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **Extend `LadbsPermitSnippet`** (or whatever the class is called) to include:
   - `permit_number`, `permit_type` (e.g., 'Bldg-New'), `action_code` if present, `status_desc` (the in-force/cancelled status)
 - [ ] **Extend `CostarSnippet`** to include:
-  - `costar_property_id`, `upload_date`, `source_field_for_proposed_value` (which CoStar column drove the proposed value)
+  - `costar_property_id`, `upload_date`
+  - Defer `source_field_for_proposed_value` until Item 5 defines raw-column resolution for `source_fields`; do not emit the canonical resolver field name as if it were the raw CoStar column.
 - [ ] **Update the renderer functions** to populate the new fields from `evidence.raw_data`.
 - [ ] **Update frontend review-card component(s)** to render the new fields on permit + CoStar cards. Visual placement: a small subheader row beneath the existing supporting-evidence area, formatted as a labeled inline list (e.g., `Permit: Bldg-New #19010-10000-00001 · Status: Issued`).
 - [ ] **Tests:**
   - [ ] Backend: `test_ladbs_permit_snippet_includes_permit_number_type_action_status`
-  - [ ] Backend: `test_costar_snippet_includes_property_id_upload_date_source_field`
+  - [ ] Backend: `test_costar_snippet_surfaces_property_id_aliases`
   - [ ] Frontend: snapshot test for the regression card with a permit-source fixture
 - [ ] **Commit + push.**
 
 **Acceptance:** Re-viewing the LADBS regression card `5eeb3658` (still in the queue as staged-deferred until `AGENT.reset` wipes it) now shows permit type + number + status_desc on the card surface.
+
+**Phase 1 hardening sub-tasks:**
+
+- [x] **Item zeta: CoStar `PropertyID` lookup + misleading `source_field` cleanup.** CoStar source fields now accept the source-native `PropertyID` key in addition to existing aliases. The snippet payload omits `source_field` until Item 5 can decide whether to reintroduce it with true raw-column resolution.
+
+**Deferred follow-ons:**
+
+- [ ] **Per-source allowed-key schema for `source_fields`.** Wait until Item 5 (`UX.dedup-table`) defines its source-fields use cases, then add a per-source API serialization schema.
+- [ ] **Extract `SourceFieldsInline` to a shared component.** Wait until Item 3 (`UX.3-field-review`) reshapes review-card components; extract during that refactor.
+- [ ] **Investigate LADBS `action_code`.** Track as a separate source-data investigation, not Phase 1 cleanup.
+- [ ] **Reintroduce CoStar raw source field only with raw-column resolution.** Item 5 should decide whether `source_field_for_proposed_value` is useful once the system can map canonical fields back to the actual CoStar column name.
+
+**Lessons learned:**
+
+- Do not surface canonical resolver field names as source-native metadata. If a review card labels a field as source detail, it needs to reflect the raw source record or stay omitted.
 
 ---
 

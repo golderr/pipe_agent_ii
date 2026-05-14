@@ -380,7 +380,8 @@ def test_ladbs_permit_snippet_skips_blank_permit_number_values() -> None:
     assert snippet.source_fields["permit_number"] == "permit-nbr-value"
 
 
-def test_costar_snippet_surfaces_source_fields() -> None:
+@pytest.mark.parametrize("property_id_key", ["costar_property_id", "PropertyID"])
+def test_costar_snippet_surfaces_property_id_aliases(property_id_key: str) -> None:
     """UX.card-source-detail: CoStar snippets carry costar_property_id and
     upload_date in source_fields."""
     evidence = _evidence(
@@ -388,7 +389,7 @@ def test_costar_snippet_surfaces_source_fields() -> None:
         source_tier=3,
         source_record_id="costar-row-7",
         evidence_date=date(2026, 5, 1),
-        raw_data={"costar_property_id": "1234567"},
+        raw_data={property_id_key: "1234567"},
         extracted_fields={"total_units": {"value": 140, "confidence": None}},
     )
 
@@ -396,6 +397,7 @@ def test_costar_snippet_surfaces_source_fields() -> None:
 
     assert snippet.source_fields["costar_property_id"] == "1234567"
     assert "upload_date" in snippet.source_fields
+    assert "source_field" not in snippet.source_fields
 
 
 def test_source_fields_omits_null_or_empty_values() -> None:
