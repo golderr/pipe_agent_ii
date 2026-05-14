@@ -14,6 +14,7 @@ from tcg_pipeline.db.models import (
     Project,
     ResolutionLog,
     StatusHistory,
+    SystemAlert,
 )
 from tcg_pipeline.resolution import resolve_project
 
@@ -301,6 +302,66 @@ def test_resolve_project_logs_suppressed_status_regression_audit(
     assert len(suppressed) == 1
     assert suppressed[0]["suppression_reason"] == "ladbs_additive_paperwork"
     assert suppressed[0]["evidence_ids"] == [str(permit.id)]
+
+
+def test_resolve_project_raises_system_alert_for_unknown_ladbs_status_desc(
+    postgres_session: Session,
+) -> None:
+    if not inspect(postgres_session.bind).has_table("evidence"):
+        pytest.skip("Apply the evidence layer migration before running resolution tests.")
+    if not inspect(postgres_session.bind).has_table("system_alerts"):
+        pytest.skip("Apply the system_alerts migration before running this test.")
+    column_names = {
+        column["name"] for column in inspect(postgres_session.bind).get_columns("resolution_log")
+    }
+    if "metadata" not in column_names:
+        pytest.skip("Apply the status regression metadata migration before running this test.")
+
+    unknown_status = "Beta Review Unknown Status"
+    project = Project(
+        canonical_address="906 ALERT WAY LOS ANGELES CA 90012",
+        raw_addresses=["906 Alert Way"],
+        market="los_angeles",
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        pipeline_status=PipelineStatus.UNDER_CONSTRUCTION,
+    )
+    postgres_session.add(project)
+    postgres_session.flush()
+    permit = Evidence(
+        project_id=project.id,
+        source_type="ladbs_permit",
+        source_record_id="24010-10000-00002",
+        source_tier=1,
+        ingest_method="scheduled_collector",
+        collected_at=datetime(2026, 4, 7, tzinfo=UTC),
+        evidence_date=date(2026, 4, 7),
+        raw_data={"permit_type": "Bldg-New", "status_desc": unknown_status},
+        extracted_fields={
+            "status_evidence_type": {"value": "building_permit_issued", "confidence": None}
+        },
+    )
+    postgres_session.add(permit)
+    postgres_session.flush()
+
+    resolve_project(
+        project.id,
+        postgres_session,
+        apply=False,
+        write_resolution_log=True,
+    )
+    postgres_session.flush()
+
+    alert = postgres_session.execute(
+        select(SystemAlert).where(
+            SystemAlert.alert_key == "ladbs_unknown_permit_status",
+            SystemAlert.scope == {"status_desc": unknown_status},
+        )
+    ).scalar_one()
+    assert alert.severity == "info"
+    assert alert.detail == {"evidence_id": str(permit.id)}
+    assert unknown_status in alert.message
 
 
 def test_resolve_project_value_change_with_regression_candidate_persists_metadata(

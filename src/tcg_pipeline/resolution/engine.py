@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import logging
 import uuid
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -36,6 +37,8 @@ from tcg_pipeline.resolution.fields.status import resolve_status
 from tcg_pipeline.resolution.fields.units import resolve_unit_split, resolve_units
 from tcg_pipeline.resolution.likelihood import compute_likelihood
 from tcg_pipeline.review.contradictions import detect_project_contradictions
+
+logger = logging.getLogger(__name__)
 
 LOGGED_FIELDS = {
     "pipeline_status",
@@ -215,6 +218,12 @@ def resolve_project(
 
     changed_fields: list[str] = []
     log_entries_created = 0
+    # Gate alert side effects on the same toggle that gates resolution_log writes:
+    # both are persistence side effects, and shadow-mode / dry-run callers
+    # intentionally avoid both. If we ever need an alert-but-don't-log mode,
+    # split the gate.
+    if write_resolution_log:
+        _drain_pending_system_alerts(session, field_resolutions)
     for field_name, resolution in field_resolutions.items():
         current_value = getattr(project, field_name)
         if normalize_comparable(current_value) == normalize_comparable(resolution.value):
@@ -418,6 +427,46 @@ def _regression_candidate_evidence_ids(candidates: list[Any]) -> list[uuid.UUID]
             evidence_ids.append(evidence_id)
             seen.add(evidence_id)
     return evidence_ids
+
+
+def _drain_pending_system_alerts(
+    session: Session,
+    field_resolutions: dict[str, FieldResolution],
+) -> None:
+    # Local import keeps resolver/engine import paths free of worker
+    # dependencies unless a side-effecting write is actually needed.
+    from tcg_pipeline.workers.news_jobs import raise_system_alert
+
+    for resolution in field_resolutions.values():
+        pending_alerts = resolution.metadata.pop("pending_system_alerts", None)
+        if not isinstance(pending_alerts, list):
+            continue
+        for pending_alert in pending_alerts:
+            if not isinstance(pending_alert, dict):
+                continue
+            alert_key = pending_alert.get("alert_key")
+            severity = pending_alert.get("severity")
+            message = pending_alert.get("message")
+            if not (
+                isinstance(alert_key, str)
+                and isinstance(severity, str)
+                and isinstance(message, str)
+            ):
+                logger.warning("Skipping malformed pending system alert: %r", pending_alert)
+                continue
+            scope = pending_alert.get("scope")
+            detail = pending_alert.get("detail")
+            try:
+                raise_system_alert(
+                    session,
+                    alert_key=alert_key,
+                    severity=severity,
+                    message=message,
+                    scope=scope if isinstance(scope, dict) else None,
+                    detail=detail if isinstance(detail, dict) else None,
+                )
+            except Exception:  # noqa: BLE001 - alert failure must not block resolve
+                logger.exception("Failed to raise pending system alert %s", alert_key)
 
 
 def _clear_superseded_system_overrides(

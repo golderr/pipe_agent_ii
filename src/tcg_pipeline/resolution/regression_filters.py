@@ -3,7 +3,7 @@
 The resolver's slice-2 regression-candidate enumeration emits one candidate per
 lower-ranked observation, which catches genuine regressions but produces false
 positives when a new LADBS permit issuance lands on a project that is already
-Under Construction or Complete from earlier LADBS evidence — that's normal
+Under Construction or Complete from earlier LADBS evidence. That is normal
 additive paperwork, not a lifecycle regression.
 
 This module owns the allowlists and the suppression predicate so the rule lives
@@ -19,15 +19,9 @@ is clearer than a single generic one.
 from __future__ import annotations
 
 import logging
-import uuid
-from typing import TYPE_CHECKING
-
-from sqlalchemy.orm import Session
+from typing import Any
 
 from tcg_pipeline.db.models import Evidence
-
-if TYPE_CHECKING:  # pragma: no cover - import-time only
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -75,75 +69,54 @@ LADBS_UNKNOWN_STATUS_ALERT_KEY = "ladbs_unknown_permit_status"
 
 def is_benign_ladbs_additive_paperwork(
     evidence: Evidence,
-    *,
-    session: Session | None = None,
-) -> bool:
-    """Return True when this LADBS evidence is benign additive paperwork.
+) -> tuple[bool, dict[str, Any] | None]:
+    """Return whether this LADBS evidence is benign additive paperwork.
 
-    Benign additive paperwork should NOT emit a status-regression candidate even
+    Benign additive paperwork should not emit a status-regression candidate even
     when the evidence maps to a lower-ranked status than the project's current
     status. Example: a `Bldg-New` permit with `status_desc='Issued'` lands on an
-    Under Construction project; without this filter it would emit a UC→Approved
-    regression candidate, which is a false positive.
+    Under Construction project; without this filter it would emit a
+    UC-to-Approved regression candidate, which is a false positive.
 
     Unknown ``status_desc`` values are treated as additive (fail-additive
-    sentinel) and raise a `ladbs_unknown_permit_status` system_alert scoped by
-    the unknown value so operators can extend the allowlist. The alert is
-    upserted on `(alert_key, scope)` so duplicate raises within the same day
-    merge into a single active row.
+    sentinel) and return a pending `ladbs_unknown_permit_status` alert payload
+    so the session-owning engine can raise the alert without making this
+    predicate perform database side effects.
     """
     if evidence.source_type not in LADBS_SOURCE_TYPES:
-        return False
+        return False, None
     raw = evidence.raw_data if isinstance(evidence.raw_data, dict) else {}
     status_desc = (raw.get("status_desc") or "").strip()
     if status_desc in LADBS_REGRESSION_STATUS_DESC:
-        return False
+        return False, None
     if status_desc in LADBS_ADDITIVE_STATUS_DESC:
-        return True
-    _log_unknown_ladbs_status(
+        return True, None
+    return True, _unknown_ladbs_status_alert(
         status_desc=status_desc,
         evidence_id=evidence.id,
-        session=session,
     )
-    return True
 
 
-def _log_unknown_ladbs_status(
+def _unknown_ladbs_status_alert(
     *,
     status_desc: str,
-    evidence_id: uuid.UUID,
-    session: Session | None,
-) -> None:
-    """Emit a per-value system_alert for an unknown LADBS status_desc.
-
-    The alert is scoped by the unknown value, so repeated occurrences of the
-    same unknown value merge into a single active alert via the existing
-    upsert-on-conflict pattern in ``raise_system_alert``.
-    """
+    evidence_id: Any,
+) -> dict[str, Any]:
     logger.warning(
         "LADBS unknown status_desc=%r treated as additive (evidence_id=%s)",
         status_desc,
         evidence_id,
     )
-    if session is None:
-        return
-    # Local import to avoid a regression-filters -> workers import cycle.
-    from tcg_pipeline.workers.news_jobs import raise_system_alert
-
-    try:
-        raise_system_alert(
-            session,
-            alert_key=LADBS_UNKNOWN_STATUS_ALERT_KEY,
-            severity="info",
-            message=(
-                f"LADBS evidence has unknown status_desc={status_desc!r}; "
-                "treating as additive paperwork (no regression candidate "
-                "emitted). Extend the allowlist in "
-                "src/tcg_pipeline/resolution/regression_filters.py if this "
-                "value should drive a regression."
-            ),
-            scope={"status_desc": status_desc},
-            detail={"evidence_id": str(evidence_id)},
-        )
-    except Exception:  # noqa: BLE001 - alert failure must not block resolve
-        logger.exception("Failed to raise ladbs_unknown_permit_status alert")
+    return {
+        "alert_key": LADBS_UNKNOWN_STATUS_ALERT_KEY,
+        "severity": "info",
+        "message": (
+            f"LADBS evidence has unknown status_desc={status_desc!r}; "
+            "treating as additive paperwork (no regression candidate emitted). "
+            "Extend the allowlist in "
+            "src/tcg_pipeline/resolution/regression_filters.py if this value "
+            "should drive a regression."
+        ),
+        "scope": {"status_desc": status_desc},
+        "detail": {"evidence_id": str(evidence_id)},
+    }

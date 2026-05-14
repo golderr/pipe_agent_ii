@@ -1030,9 +1030,7 @@ def test_resolve_status_does_not_suppress_news_regression_signals() -> None:
 def test_resolve_status_unknown_ladbs_status_desc_treated_as_additive() -> None:
     """Fail-additive sentinel: unknown status_desc values are treated as
     additive (no candidate emitted) on the assumption that we'd rather miss
-    a regression than spam the queue. The system_alert side-effect is tested
-    separately in the resolution.regression_filters unit suite where a
-    session is available."""
+    a regression than spam the queue."""
     project = _build_project()
     project.pipeline_status = PipelineStatus.UNDER_CONSTRUCTION
     permit_evidence = _build_evidence(
@@ -1051,6 +1049,12 @@ def test_resolve_status_unknown_ladbs_status_desc_treated_as_additive() -> None:
     assert resolution.metadata.get("regression_candidate_count", 0) == 0
     suppressed = resolution.metadata.get("suppressed_regression_candidates", [])
     assert len(suppressed) == 1
+    pending_alerts = resolution.metadata.get("pending_system_alerts", [])
+    assert len(pending_alerts) == 1
+    assert pending_alerts[0]["alert_key"] == "ladbs_unknown_permit_status"
+    assert pending_alerts[0]["scope"] == {
+        "status_desc": "Something New And Unrecognized"
+    }
 
 
 

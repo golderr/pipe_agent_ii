@@ -232,6 +232,9 @@ def _apply_status_override(
         "regression_candidates",
         "regression_candidate_count",
         "regression_audit_rule_applied",
+        "suppressed_regression_candidates",
+        "suppressed_regression_candidate_count",
+        "pending_system_alerts",
     ):
         if key in candidate.metadata:
             resolution.metadata[key] = candidate.metadata[key]
@@ -248,12 +251,18 @@ def _status_regression_metadata(
 
     candidates: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
+    pending_system_alerts: list[dict[str, Any]] = []
     for proposed_status, observations in candidate_observations.items():
         proposed_rank = STATUS_PROGRESS_ORDER.get(proposed_status)
         if proposed_rank is None or proposed_rank >= current_rank:
             continue
         for observation in observations:
-            if is_benign_ladbs_additive_paperwork(observation.evidence):
+            is_benign, pending_alert = is_benign_ladbs_additive_paperwork(
+                observation.evidence
+            )
+            if pending_alert is not None:
+                pending_system_alerts.append(pending_alert)
+            if is_benign:
                 # LADBS additive paperwork (issued permit, plan-check progress,
                 # CofO issued/pending) on an already-higher-status project is
                 # noise, not regression. Record in audit metadata so the
@@ -294,6 +303,8 @@ def _status_regression_metadata(
     if suppressed:
         metadata["suppressed_regression_candidates"] = suppressed
         metadata["suppressed_regression_candidate_count"] = len(suppressed)
+    if pending_system_alerts:
+        metadata["pending_system_alerts"] = pending_system_alerts
     return metadata
 
 
