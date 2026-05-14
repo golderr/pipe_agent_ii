@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-14 (Item 3 shipped)
+> **Last updated:** 2026-05-14 (Item 5 kickoff)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -15,9 +15,9 @@ Six pre-cycle-1 items must land before `AGENT.reset` cycle 1 begins:
 |---|---|---|---|---|
 | 1 | Resolver-level suppression of benign LADBS follow-on permits | `UX.regression-suppression` | ✅ Shipped 2026-05-13 | `e4c37c4` |
 | 2 | Card source-detail rendering for permit + CoStar regression cards | `UX.card-source-detail` | ✅ Shipped 2026-05-13 | `93e8648` |
-| 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | ✅ Shipped 2026-05-14 | — |
+| 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | ✅ Shipped 2026-05-14 | `aee2b26` |
 | 4 | Narrative descriptiveness (name permit types + news sources) | `UX.narrative-detail` | ✅ Shipped 2026-05-13 | `c111433` |
-| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | 🔜 Phase 4 (~1.5-2 weeks) | — |
+| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | 🚧 In progress | — |
 | 6 | Building height / stories resolver support (canonical field `stories`) | `UX.building-height` | ✅ Shipped 2026-05-13 | `7ce99af` |
 
 **Total:** ~2.5-3 weeks at single-threaded execution; ~2 weeks if independent backends + frontends can overlap.
@@ -298,7 +298,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] **Server actions:**
   - [x] Confirm action accepts the Result value and writes a `review_decisions` row + applies the override / change_log entry through the existing review-workflow helpers.
   - [x] Defer action just marks the item deferred without applying.
-- [ ] **Tests:**
+- [x] **Tests:**
   - [x] Backend: serialization test per real value-change item type
   - [x] Backend: metadata drift test for resolver-owned scalar review fields
   - [x] Frontend: payload helper tests for unified value-change defaults and Result coercion by field type
@@ -328,6 +328,21 @@ Phase 4 — Dedup table (days 10-19)
 - Frontend: new Discovery tab on `/review` page
 - Frontend: new components — DedupCard, SubjectRow, CandidateTable, MapPopup, RelationshipPickerInline
 - Tests
+
+**Pre-flight decisions (resolved 2026-05-14):**
+
+- **Match-with-deltas component reuse:** reuse the Item 3 `<ThreeFieldEditor>` presentation, but generalize its prop boundary to a plain value-change UI model (`fieldName`, `fieldLabel`, `fieldType`, `currentValue`, `evidenceValue`, `defaultResultValue`, `constraints`). Real review items and project-vs-project delta rows both adapt into that shape; match deltas do not pretend to be persisted review items.
+- **Match-with-deltas API body:** keep v1 narrow: `accept_deltas` is a list of field names, not per-delta edited values. Inline value editing happens on the subject row before Match/Create; post-match disagreements that are not accepted become normal value-change review items.
+- **Subject-row inline edit write path:** no direct PATCH endpoint in v1. Keep subject edits client-local and bundle them into Match/Create requests as `edits: {...}` so source-reference correction and match/create decision apply atomically. This avoids a window where candidate/reference state diverges from extracted source state before the reviewer commits an action.
+
+**Reviewable sub-phases:**
+
+1. **5A — Backend retrieval + indexes:** pg_trgm migration, PostGIS index verification, similarity helpers, layered candidate retrieval, backend tests.
+2. **5B — Candidate API endpoint:** `GET /review/queue/{item_id}/candidates`, subject payload normalization, response schemas, API tests.
+3. **5C — Discovery tab shell:** tab routing/state, discovery item grouping, empty/loading/error states, basic card shell.
+4. **5D — Candidate table + overlap:** subject row editor, candidate table, sorting, overlap highlighting, map popup.
+5. **5E — Match/Create actions:** atomic `edits`, match-with-deltas confirm step, create/link actions, audit/change-log behavior, action tests.
+6. **5F — End-to-end validation:** synthetic and real queue walkthroughs, live-update behavior, performance check, docs/roadmap completion.
 
 **Sub-tasks:**
 
@@ -391,7 +406,7 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **List view** shows discovery items grouped by source (one card per article or per LADBS permit).
 - [ ] **DedupCard component:**
   - [ ] Header: source name (small), project name (if extracted), project address, `Potential matches: N` and `New candidate probability: X%` indicators
-  - [ ] Subject row: editable cells inline (text, number, dropdown depending on field type)
+  - [ ] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`.
   - [ ] Candidate table below
   - [ ] Header action `Create new` (no modal confirmation)
 - [ ] **CandidateTable component:**
@@ -407,15 +422,16 @@ Phase 4 — Dedup table (days 10-19)
   - [ ] Match-likelihood column at right, sortable
   - [ ] Default sort: subject first, then by match likelihood DESC (Layer 1 candidates first)
 - [ ] **MapPopup component:** opened by a map icon button on the card header. Renders MapLibre map showing subject pin + numbered candidate pins corresponding to table row numbers. Click outside or close button dismisses.
-- [ ] **Match-with-deltas modal:** when reviewer clicks `Match to this` and the subject has any field values that disagree with the matched project's current values, show a confirm step listing the deltas with checkboxes for which to apply.
+- [ ] **Match-with-deltas modal:** when reviewer clicks `Match to this` and the subject has any field values that disagree with the matched project's current values, show a confirm step listing the deltas with checkboxes for which to apply. Reuse the generalized ThreeFieldEditor value-change UI model for each delta row.
 - [ ] **Live updates after match/create:**
   - [ ] On successful Create or Create+link, push the new project onto the local candidate cache so subsequent cards see it
   - [ ] On Match-to-this, mark the matched project in the cache so subsequent cards can sort it higher
 
 ### 8.6 Backend write actions
-- [ ] **`POST /review/items/{item_id}/match`** — body: `{matched_project_id, accept_deltas: [field_name, ...]}`. Updates `news_project_references.matched_project_id` (or analogous for permits), closes review item, optionally writes value-change review items for non-accepted deltas (so they queue for normal review). Audit row in `change_log`.
-- [ ] **`POST /review/items/{item_id}/create-and-link`** — body: `{relationship_type, related_project_id, project_fields}`. Creates Project, creates `project_relationships` row, closes review item. Audit rows.
-- [ ] **`POST /review/items/{item_id}/create`** — body: `{project_fields}`. Creates Project (unlinked), closes review item. Audit row.
+- [ ] **Write payload convention:** `edits` always targets the source/reference row (`news_project_references.candidate_*` or the analogous permit subject payload) before the reviewer commits the action. `project_fields` is the create-shape for the new `Project`; for create flows it may include corrected subject values, but it does not replace the source-row correction audit.
+- [ ] **`POST /review/items/{item_id}/match`** — body: `{matched_project_id, edits: {...}, accept_deltas: [field_name, ...]}`. Applies subject edits atomically, updates `news_project_references.matched_project_id` (or analogous for permits), closes review item, optionally writes value-change review items for non-accepted deltas (so they queue for normal review). Audit row in `change_log`.
+- [ ] **`POST /review/items/{item_id}/create-and-link`** — body: `{relationship_type, related_project_id, project_fields, edits: {...}}`. Applies subject edits atomically, creates Project, creates `project_relationships` row, closes review item. Audit rows.
+- [ ] **`POST /review/items/{item_id}/create`** — body: `{project_fields, edits: {...}}`. Applies subject edits atomically, creates Project (unlinked), closes review item. Audit row.
 
 ### 8.7 Tests
 - [ ] Backend retrieval: fixtures exercise each Layer; ordering correct; overlap signals correctly computed
