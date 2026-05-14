@@ -63,15 +63,18 @@ import {
 import {
   buildDiscoveryCards,
   candidateBandTone,
+  computeCandidateOverlaps,
   isDiscoveryItem,
   searchedSummary,
   sortCandidates,
   visibleMatchSignals,
   type DiscoveryCandidate,
+  type DiscoveryOverlap,
   type DiscoveryCandidateSort,
   type DiscoveryCandidateSortField,
   type DiscoveryCandidateSearch,
-  type DiscoveryCard
+  type DiscoveryCard,
+  type DiscoverySubject
 } from "@/lib/review/discovery";
 import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
@@ -1049,7 +1052,12 @@ function DiscoveryCardShell({
               <td className="py-3 pr-3 text-slate-500">Subject</td>
             </tr>
             {sortedCandidates.map((candidate, index) => (
-              <CandidateRow candidate={candidate} index={index} key={candidate.projectId} />
+              <CandidateRow
+                candidate={candidate}
+                index={index}
+                key={candidate.projectId}
+                subject={subject}
+              />
             ))}
           </tbody>
         </table>
@@ -1117,11 +1125,14 @@ function CandidateHeaderCell({
 
 function CandidateRow({
   candidate,
-  index
+  index,
+  subject
 }: {
   candidate: DiscoveryCandidate;
   index: number;
+  subject: DiscoverySubject;
 }) {
+  const overlaps = computeCandidateOverlaps(subject, candidate);
   return (
     <tr
       className={cn(
@@ -1129,19 +1140,69 @@ function CandidateRow({
         candidateBandClass(candidate)
       )}
     >
-      <SubjectCell value={`${index + 1}. ${candidate.projectName ?? "Unnamed project"}`} />
-      <SubjectCell value={candidate.canonicalAddress} />
-      <SubjectCell value={candidate.developer} />
-      <SubjectCell value={candidate.totalUnits} />
-      <SubjectCell value={candidate.productType ?? candidate.ageRestriction} />
-      <SubjectCell value={candidate.pipelineStatus} />
-      <SubjectCell value={candidate.stories} />
+      <CandidateValueCell
+        overlap={overlaps.projectName}
+        prefix={`${index + 1}. `}
+        value={candidate.projectName ?? "Unnamed project"}
+      />
+      <CandidateValueCell overlap={overlaps.canonicalAddress} value={candidate.canonicalAddress} />
+      <CandidateValueCell overlap={overlaps.developer} value={candidate.developer} />
+      <CandidateValueCell overlap={overlaps.totalUnits} value={candidate.totalUnits} />
+      <CandidateValueCell
+        overlap={overlaps.productType}
+        value={candidate.productType ?? candidate.ageRestriction}
+      />
+      <CandidateValueCell overlap={overlaps.pipelineStatus} value={candidate.pipelineStatus} />
+      <CandidateValueCell overlap={overlaps.stories} value={candidate.stories} />
       <td className="py-3 pr-3 text-slate-800">
         <span className="font-medium">{Math.round(candidate.matchLikelihood * 100)}%</span>
         <span className="mt-1 block text-xs text-slate-500">Layer {candidate.matchLayer}</span>
+        <NearSubjectChip overlap={overlaps.lat} />
         <CandidateSignalChips candidate={candidate} />
       </td>
     </tr>
+  );
+}
+
+function CandidateValueCell({
+  value,
+  overlap,
+  prefix = ""
+}: {
+  value: unknown;
+  overlap?: DiscoveryOverlap;
+  prefix?: string;
+}) {
+  const label = `${prefix}${formatValue(value)}`;
+  return (
+    <td className="break-words py-3 pr-3 text-slate-800">
+      {overlap ? (
+        <span
+          className="rounded bg-yellow-100/90 px-1 py-0.5 text-slate-950 ring-1 ring-yellow-300"
+          title={overlapTooltip(overlap)}
+        >
+          {label}
+        </span>
+      ) : (
+        label
+      )}
+    </td>
+  );
+}
+
+function NearSubjectChip({ overlap }: { overlap?: DiscoveryOverlap }) {
+  if (!overlap) {
+    return null;
+  }
+  return (
+    <div className="mt-2">
+      <span
+        className="rounded border border-yellow-300 bg-yellow-100/90 px-1.5 py-0.5 text-[11px] font-medium text-yellow-900"
+        title={overlapTooltip(overlap)}
+      >
+        Near subject
+      </span>
+    </div>
   );
 }
 
@@ -1174,6 +1235,28 @@ function signalTooltip(signal: DiscoveryCandidate["matchSignals"][string]) {
   const score = `score ${signal.score.toFixed(2)}`;
   const weight = signal.weight !== null ? `weight ${signal.weight.toFixed(2)}` : null;
   return [score, weight, signal.detail].filter(Boolean).join(" - ");
+}
+
+function overlapTooltip(overlap: DiscoveryOverlap) {
+  const fieldLabel = humanize(camelToToken(overlap.matchedSubjectField));
+  const value = formatValue(overlap.matchedValue);
+  if (overlap.kind === "cross-field-unit-match") {
+    return `Matches subject ${fieldLabel} (${value})`;
+  }
+  if (overlap.kind === "stories-proximity") {
+    return `Within 2 stories (subject: ${value})`;
+  }
+  if (overlap.kind === "distance-threshold") {
+    return overlap.detail ?? `Near subject ${fieldLabel} (${value})`;
+  }
+  if (overlap.kind === "text-substring") {
+    return `Overlaps subject ${fieldLabel} (${value})`;
+  }
+  return `Matches subject ${fieldLabel} (${value})`;
+}
+
+function camelToToken(value: string) {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
 }
 
 function candidateBandClass(candidate: DiscoveryCandidate) {

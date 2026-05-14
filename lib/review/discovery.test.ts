@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDiscoveryCards,
   candidateBandTone,
+  computeCandidateOverlaps,
   isDiscoveryItem,
   mapDedupCandidatesResponse,
   searchedSummary,
@@ -216,6 +217,107 @@ describe("review discovery helpers", () => {
     expect(candidateBandTone(result.candidates[0])).toBe("medium");
     expect(candidateBandTone(result.candidates[1])).toBe("hard");
     expect(candidateBandTone(result.candidates[2])).toBe("broad");
+  });
+
+  it("computes candidate cell overlaps for text, units, product, status, and stories", () => {
+    const result = mapDedupCandidatesResponse({
+      subject: {
+        project_name: "Fig Tower",
+        canonical_address: "100 Fig St",
+        developer: "Atlas Development",
+        units_affordable: 312,
+        product_type: "Apartment",
+        pipeline_status: "Under Construction",
+        building_height_stories: 10
+      },
+      candidates: [
+        candidatePayload("candidate-1", {
+          project_name: "Fig Tower Phase 2",
+          canonical_address: "100 Fig St, Los Angeles",
+          developer: "Atlas Development LLC",
+          units_total: 312,
+          product_type: "Apartment",
+          pipeline_status: "under construction",
+          building_height_stories: 12
+        })
+      ]
+    });
+
+    const overlaps = computeCandidateOverlaps(result.subject, result.candidates[0]);
+
+    expect(overlaps.projectName).toMatchObject({
+      kind: "text-substring",
+      matchedSubjectField: "projectName",
+      matchedValue: "Fig Tower"
+    });
+    expect(overlaps.canonicalAddress).toMatchObject({
+      kind: "text-substring",
+      matchedSubjectField: "canonicalAddress",
+      matchedValue: "100 Fig St"
+    });
+    expect(overlaps.developer).toMatchObject({
+      kind: "text-substring",
+      matchedSubjectField: "developer",
+      matchedValue: "Atlas Development"
+    });
+    expect(overlaps.totalUnits).toMatchObject({
+      kind: "cross-field-unit-match",
+      matchedSubjectField: "affordableUnits",
+      matchedValue: 312
+    });
+    expect(overlaps.productType).toMatchObject({
+      kind: "exact-match",
+      matchedSubjectField: "productType",
+      matchedValue: "Apartment"
+    });
+    expect(overlaps.pipelineStatus).toMatchObject({
+      kind: "exact-match",
+      matchedSubjectField: "pipelineStatus",
+      matchedValue: "Under Construction"
+    });
+    expect(overlaps.stories).toMatchObject({
+      kind: "stories-proximity",
+      matchedSubjectField: "stories",
+      matchedValue: 10
+    });
+  });
+
+  it("computes coordinate overlap without highlighting unrelated short text", () => {
+    const result = mapDedupCandidatesResponse({
+      subject: {
+        developer: "LLC",
+        units_total: 100,
+        building_height_stories: 10,
+        lat: 34.05,
+        lng: -118.25
+      },
+      candidates: [
+        candidatePayload("candidate-1", {
+          developer: "LLC Holdings",
+          units_total: 125,
+          building_height_stories: 14,
+          lat: 34.051,
+          lng: -118.251,
+          distance_meters: 140
+        })
+      ]
+    });
+
+    const overlaps = computeCandidateOverlaps(result.subject, result.candidates[0]);
+
+    expect(overlaps.developer).toBeUndefined();
+    expect(overlaps.totalUnits).toBeUndefined();
+    expect(overlaps.stories).toBeUndefined();
+    expect(overlaps.lat).toMatchObject({
+      kind: "distance-threshold",
+      matchedSubjectField: "lat",
+      matchedValue: 34.05
+    });
+    expect(overlaps.lng).toMatchObject({
+      kind: "distance-threshold",
+      matchedSubjectField: "lng",
+      matchedValue: -118.25
+    });
   });
 });
 

@@ -88,6 +88,37 @@ export type DiscoveryCandidateSort = {
   direction: "asc" | "desc";
 };
 
+export type DiscoveryOverlapField =
+  | "projectName"
+  | "canonicalAddress"
+  | "developer"
+  | "totalUnits"
+  | "marketRateUnits"
+  | "affordableUnits"
+  | "workforceUnits"
+  | "productType"
+  | "ageRestriction"
+  | "pipelineStatus"
+  | "stories"
+  | "lat"
+  | "lng";
+
+export type DiscoveryOverlapKind =
+  | "text-substring"
+  | "exact-match"
+  | "cross-field-unit-match"
+  | "stories-proximity"
+  | "distance-threshold";
+
+export type DiscoveryOverlap = {
+  kind: DiscoveryOverlapKind;
+  matchedSubjectField: DiscoveryOverlapField;
+  matchedValue: string | number;
+  detail?: string;
+};
+
+export type DiscoveryOverlapMap = Partial<Record<DiscoveryOverlapField, DiscoveryOverlap>>;
+
 const SIGNAL_DISPLAY_ORDER = [
   "identifier",
   "geographic",
@@ -100,6 +131,16 @@ const SIGNAL_DISPLAY_ORDER = [
 
 const STRONG_LIKELIHOOD_THRESHOLD = 0.7;
 const MEDIUM_LIKELIHOOD_THRESHOLD = 0.4;
+const MIN_TEXT_OVERLAP_LENGTH = 4;
+const STORIES_PROXIMITY_THRESHOLD = 2;
+const COORDINATE_OVERLAP_DISTANCE_METERS = 250;
+const UNIT_FIELDS = [
+  "totalUnits",
+  "marketRateUnits",
+  "affordableUnits",
+  "workforceUnits"
+] as const;
+type DiscoveryUnitField = (typeof UNIT_FIELDS)[number];
 
 export const DISCOVERY_ITEM_TYPES = new Set(["new_candidate", "possible_match"]);
 
@@ -254,6 +295,33 @@ export function candidateBandTone(candidate: DiscoveryCandidate) {
   return "weak";
 }
 
+export function computeCandidateOverlaps(
+  subject: DiscoverySubject,
+  candidate: DiscoveryCandidate
+): DiscoveryOverlapMap {
+  const overlaps: DiscoveryOverlapMap = {};
+  addTextOverlap(overlaps, "projectName", subject.projectName, candidate.projectName);
+  addTextOverlap(
+    overlaps,
+    "canonicalAddress",
+    subject.canonicalAddress,
+    candidate.canonicalAddress
+  );
+  addTextOverlap(overlaps, "developer", subject.developer, candidate.developer);
+  addUnitOverlaps(overlaps, subject, candidate);
+  addProductOverlap(overlaps, subject, candidate);
+  addExactTextOverlap(
+    overlaps,
+    "pipelineStatus",
+    "pipelineStatus",
+    subject.pipelineStatus,
+    candidate.pipelineStatus
+  );
+  addStoriesOverlap(overlaps, subject, candidate);
+  addCoordinateOverlap(overlaps, subject, candidate);
+  return overlaps;
+}
+
 function subjectFromApi(payload: unknown): DiscoverySubject {
   const row = asRecord(payload) ?? {};
   return {
@@ -362,6 +430,163 @@ function compareSortValues(
     return (left - right) * multiplier;
   }
   return String(left).localeCompare(String(right)) * multiplier;
+}
+
+function addTextOverlap(
+  overlaps: DiscoveryOverlapMap,
+  candidateField: DiscoveryOverlapField,
+  subjectValue: string | null,
+  candidateValue: string | null
+) {
+  const subjectText = comparableText(subjectValue);
+  const candidateText = comparableText(candidateValue);
+  if (!subjectText || !candidateText) {
+    return;
+  }
+  if (
+    subjectText.length < MIN_TEXT_OVERLAP_LENGTH ||
+    candidateText.length < MIN_TEXT_OVERLAP_LENGTH
+  ) {
+    return;
+  }
+  if (!subjectText.includes(candidateText) && !candidateText.includes(subjectText)) {
+    return;
+  }
+  overlaps[candidateField] = {
+    kind: "text-substring",
+    matchedSubjectField: candidateField,
+    matchedValue: subjectValue ?? ""
+  };
+}
+
+function addExactTextOverlap(
+  overlaps: DiscoveryOverlapMap,
+  candidateField: DiscoveryOverlapField,
+  subjectField: DiscoveryOverlapField,
+  subjectValue: string | null,
+  candidateValue: string | null
+) {
+  const subjectText = comparableText(subjectValue);
+  const candidateText = comparableText(candidateValue);
+  if (!subjectText || !candidateText || subjectText !== candidateText) {
+    return;
+  }
+  overlaps[candidateField] = {
+    kind: "exact-match",
+    matchedSubjectField: subjectField,
+    matchedValue: subjectValue ?? ""
+  };
+}
+
+function addProductOverlap(
+  overlaps: DiscoveryOverlapMap,
+  subject: DiscoverySubject,
+  candidate: DiscoveryCandidate
+) {
+  const subjectField = subject.productType ? "productType" : "ageRestriction";
+  const candidateValue = candidate.productType ?? candidate.ageRestriction;
+  const subjectValue = subject.productType ?? subject.ageRestriction;
+  addExactTextOverlap(overlaps, "productType", subjectField, subjectValue, candidateValue);
+}
+
+function addUnitOverlaps(
+  overlaps: DiscoveryOverlapMap,
+  subject: DiscoverySubject,
+  candidate: DiscoveryCandidate
+) {
+  for (const candidateField of UNIT_FIELDS) {
+    const candidateValue = candidate[candidateField];
+    if (candidateValue === null) {
+      continue;
+    }
+    const match = matchingSubjectUnit(subject, candidateField, candidateValue);
+    if (!match) {
+      continue;
+    }
+    overlaps[candidateField] = {
+      kind: match.field === candidateField ? "exact-match" : "cross-field-unit-match",
+      matchedSubjectField: match.field,
+      matchedValue: match.value
+    };
+  }
+}
+
+function matchingSubjectUnit(
+  subject: DiscoverySubject,
+  preferredField: DiscoveryUnitField,
+  candidateValue: number
+) {
+  const orderedFields = [
+    preferredField,
+    ...UNIT_FIELDS.filter((field) => field !== preferredField)
+  ];
+  for (const field of orderedFields) {
+    const subjectValue = subject[field];
+    if (subjectValue !== null && subjectValue === candidateValue) {
+      return { field, value: subjectValue };
+    }
+  }
+  return null;
+}
+
+function addStoriesOverlap(
+  overlaps: DiscoveryOverlapMap,
+  subject: DiscoverySubject,
+  candidate: DiscoveryCandidate
+) {
+  if (subject.stories === null || candidate.stories === null) {
+    return;
+  }
+  if (Math.abs(subject.stories - candidate.stories) > STORIES_PROXIMITY_THRESHOLD) {
+    return;
+  }
+  overlaps.stories = {
+    kind: "stories-proximity",
+    matchedSubjectField: "stories",
+    matchedValue: subject.stories,
+    detail: `within ${STORIES_PROXIMITY_THRESHOLD} stories`
+  };
+}
+
+function addCoordinateOverlap(
+  overlaps: DiscoveryOverlapMap,
+  subject: DiscoverySubject,
+  candidate: DiscoveryCandidate
+) {
+  // distanceMeters is API-computed against the loaded subject. Once subject-row
+  // edits ship, recompute this client-side for edited coordinates before render.
+  if (
+    subject.lat === null ||
+    subject.lng === null ||
+    candidate.lat === null ||
+    candidate.lng === null ||
+    candidate.distanceMeters === null ||
+    candidate.distanceMeters > COORDINATE_OVERLAP_DISTANCE_METERS
+  ) {
+    return;
+  }
+  const detail = `${Math.round(candidate.distanceMeters)}m from subject coordinates`;
+  overlaps.lat = {
+    kind: "distance-threshold",
+    matchedSubjectField: "lat",
+    matchedValue: subject.lat,
+    detail
+  };
+  overlaps.lng = {
+    kind: "distance-threshold",
+    matchedSubjectField: "lng",
+    matchedValue: subject.lng,
+    detail
+  };
+}
+
+function comparableText(value: string | null) {
+  return value
+    ?.trim()
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function newCandidateProbabilityForItem(item: ReviewQueueItem) {

@@ -423,17 +423,17 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **DedupCard component:**
   - [x] Header: source name (small), project name (if extracted), project address, `Potential matches: N` and `New candidate probability: X%` indicators
   - [ ] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`. **5D-1 note:** read-only subject row now uses `/candidates` response subject when loaded; inline editing remains 5D-4/5E.
-  - [x] Candidate table below (5D-1 raw table; chips/bands/sort/overlap land in later 5D slices)
+  - [x] Candidate table below (5D-1 raw table; chips/bands/sort landed in 5D-2; overlap landed in 5D-3)
   - [x] **Confident empty state** when no candidates returned: render the API response's `searched` block as a paragraph (e.g., "No candidates found within 1km. Searched by APN, CoStar Property ID, normalized address, name/address trigrams (threshold from `searched.layer_2.trigram_min_score`), and canonical developer match. None passed Layer 1 or Layer 2 thresholds."). Do not render a bare empty table — reviewers second-guess silent failure.
   - [ ] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action.
 - [ ] **CandidateTable component:**
   - [x] Columns from the agreed list (5D-1 raw columns: project name, address, developer, total units, product type/age, status, building height, match likelihood; remaining unit split + lat/lng refinements land with 5D-2/5D-3 table work)
   - [x] Sortable by clicking column headers. Layer precedence remains primary for every sort so Layer 1 hard-signal candidates never get buried below Layer 2/3 rows.
-  - [ ] Cell-level overlap highlighting:
-    - Substring match for name / address / developer (case-insensitive)
-    - Cross-field numeric equality for unit counts (subject's "312 affordable" highlights candidate's "312 total" too)
-    - Distance-threshold highlight for lat/lng (within ~250m subject lat/lng)
-    - Building-height match within ±2 stories
+  - [x] Cell-level overlap highlighting:
+    - [x] Substring match for name / address / developer (case-insensitive)
+    - [x] Cross-field numeric equality for unit counts (subject's "312 affordable" highlights candidate's "312 total" too)
+    - [x] Distance-threshold overlap for lat/lng computed in the shared helper (visible rendering waits on the lat/lng column/map refinement)
+    - [x] Building-height match within ±2 stories
   - [x] **Row color band by match-likelihood**, paired with (not replacing) the numeric percentage. Layer 1 candidates render with a green band; Layer 2 with a green-to-yellow-to-orange gradient by likelihood; Layer 3 with a neutral gray band. The band reads in <200ms; the number is still there for ties and precision.
   - [x] **Per-signal chips inline next to the match-likelihood column.** Render one chip per signal from `match_signals` (geographic, address, name, developer, units, product_type, identifier when present). Green chip when `contributed=true`; gray when searched but not contributed; omitted when the subject lacked the field. Each chip's tooltip shows the underlying `score` and `detail`. This is the "why it matched" surface — reviewer scans reasons in under a second.
   - [ ] **Layer 3 "show more" affordance** using `include_layer3=true` (or `layer=3`) when the API returns `layer_3_available=true`.
@@ -472,6 +472,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Frontend helper tests for Discovery item filtering, one-card-per-review-item grouping, and subject normalization
 - [x] Frontend helper tests: per-signal chip visibility preserves `searched=false` in the data model but hides it from render lists
 - [x] Frontend helper tests: row color-band tone agrees with match layer / likelihood thresholds
+- [x] Frontend helper tests: cell-level overlap detection covers text substrings, cross-field unit equality, status/product exact matches, story proximity, and coordinate distance
 - [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
 - [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
 - [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
@@ -502,6 +503,10 @@ Phase 4 — Dedup table (days 10-19)
 **5D-2 lessons learned:**
 - Keep candidate sorting in `lib/review/discovery.ts` so layer precedence, column sorting, and future overlap highlighting share one ordering contract.
 - Filter `searched=false` match signals at render time, not while mapping the API response. The complete signal dict remains available for debugging and future UI while the visible chips stay clean.
+
+**5D-3 lessons learned:**
+- Keep overlap detection as a pure helper returning rich metadata, not a render-only boolean. The same subject/candidate agreement signal can feed tooltips now and Match-with-deltas context later.
+- Use a distinct cell-level highlight tone from the row likelihood band. Row bands answer "how likely"; yellow cell tints answer "which values agree."
 
 **Deferred follow-ons:**
 
