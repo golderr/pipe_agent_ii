@@ -4,11 +4,15 @@ import {
   candidateBandTone,
   candidateFocusByNumber,
   candidateFocusByOffset,
+  applyDiscoverySubjectEdits,
+  computeCandidateDeltas,
   computeCandidateOverlaps,
+  discoverySubjectEditsPayload,
   isDiscoveryItem,
   mapDedupCandidatesResponse,
   mapMatchPreviewResponse,
   matchPreviewImpactText,
+  projectFieldsFromDiscoverySubject,
   searchedSummary,
   sortCandidates,
   subjectForDiscoveryItem,
@@ -314,6 +318,87 @@ describe("review discovery helpers", () => {
       kind: "stories-proximity",
       matchedSubjectField: "stories",
       matchedValue: 10
+    });
+  });
+
+  it("computes subject/candidate deltas for match-with-deltas", () => {
+    const result = mapDedupCandidatesResponse({
+      subject: {
+        project_name: "Fig Tower",
+        canonical_address: "100 Fig St",
+        developer: "Atlas Development",
+        units_total: 312,
+        building_height_stories: 10,
+        pipeline_status: "Under Construction"
+      },
+      candidates: [
+        candidatePayload("candidate-1", {
+          project_name: "Fig Tower",
+          canonical_address: "100 Fig St",
+          developer: "Old Developer",
+          units_total: 300,
+          building_height_stories: 10,
+          pipeline_status: "Approved"
+        })
+      ]
+    });
+
+    const deltas = computeCandidateDeltas(result.subject, result.candidates[0]);
+
+    expect(deltas.map((delta) => delta.fieldName)).toEqual([
+      "developer",
+      "total_units",
+      "pipeline_status"
+    ]);
+    expect(deltas[0].valueChange).toMatchObject({
+      fieldLabel: "Developer",
+      currentValue: "Old Developer",
+      evidenceValue: "Atlas Development",
+      defaultResultValue: "Atlas Development"
+    });
+    expect(deltas[1].valueChange).toMatchObject({
+      fieldType: "integer",
+      currentValue: 300,
+      evidenceValue: 312
+    });
+  });
+
+  it("applies and serializes local subject edits for atomic write payloads", () => {
+    const subject = mapDedupCandidatesResponse({
+      subject: {
+        project_name: "Fig Tower",
+        canonical_address: "100 Fig St",
+        units_total: 140,
+        building_height_stories: 8
+      }
+    }).subject;
+
+    const editedSubject = applyDiscoverySubjectEdits(subject, {
+      projectName: "Fig Tower Revised",
+      totalUnits: "1,400",
+      stories: ""
+    });
+
+    expect(editedSubject).toMatchObject({
+      projectName: "Fig Tower Revised",
+      totalUnits: 1400,
+      stories: null
+    });
+    expect(
+      discoverySubjectEditsPayload({
+        projectName: "Fig Tower Revised",
+        totalUnits: "1,400",
+        stories: ""
+      })
+    ).toEqual({
+      project_name: "Fig Tower Revised",
+      total_units: 1400,
+      stories: null
+    });
+    expect(projectFieldsFromDiscoverySubject(editedSubject)).toMatchObject({
+      project_name: "Fig Tower Revised",
+      canonical_address: "100 Fig St",
+      total_units: 1400
     });
   });
 

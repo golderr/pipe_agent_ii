@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,20 +18,36 @@ from tcg_pipeline.api.schemas import (
     ReviewDecisionStageResponse,
     ReviewDecisionSummary,
     ReviewDedupCandidatesResponse,
+    ReviewDedupCreateAndLinkRequest,
+    ReviewDedupCreateRequest,
+    ReviewDedupMatchRequest,
+    ReviewDedupWriteResponse,
     ReviewEvidenceSummary,
     ReviewMatchPreviewResponse,
     ReviewQueueItemResponse,
 )
+from tcg_pipeline.db.evidence import serialize_json
 from tcg_pipeline.db.models import (
+    AgeRestriction,
+    ChangeLog,
+    ChangeType,
     Evidence,
+    NewsMatchStatus,
     NewsProjectReference,
+    PipelineStatus,
     Priority,
+    ProductType,
     Project,
+    ProjectRelationship,
+    RelationshipType,
     ReviewDecision,
+    ReviewDecisionAction,
     ReviewItem,
+    ReviewItemStatus,
     ReviewItemType,
 )
 from tcg_pipeline.db.review_workflow import (
+    CHANGELOG_PRIORITY_BY_FIELD,
     REVIEW_DECISION_STATE_COMMITTED,
     REVIEW_DECISION_STATE_STAGED,
     REVIEW_ITEM_STATE_COMMITTED,
@@ -46,8 +63,10 @@ from tcg_pipeline.db.review_workflow import (
 from tcg_pipeline.db.review_workflow import (
     unstage_review_decision as unstage_review_decision_value,
 )
+from tcg_pipeline.ingesters._common import build_location
 from tcg_pipeline.matching.candidates import (
     DedupSubject,
+    FieldDelta,
     compute_subject_candidate_deltas,
     find_dedup_candidates,
     subject_from_news_reference,
@@ -57,7 +76,9 @@ from tcg_pipeline.review.decision_cards import (
     evidence_ids_for_payload,
     field_name_for_payload,
     proposed_value_for_payload,
+    upsert_decision_card_review_item,
 )
+from tcg_pipeline.review.field_metadata import field_metadata_for_review
 from tcg_pipeline.review.human_summary import human_summary_for_payload
 from tcg_pipeline.review.snippets import render_snippet
 from tcg_pipeline.review.value_changes import value_change_payload_for_review_item
@@ -69,6 +90,36 @@ DISCOVERY_ITEM_TYPES = {
     ReviewItemType.NEW_CANDIDATE.value,
     ReviewItemType.POSSIBLE_MATCH.value,
 }
+DISCOVERY_RELATIONSHIP_TYPES = {
+    RelationshipType.PHASE,
+    RelationshipType.MASTER_PLAN,
+    RelationshipType.COUNTERPART,
+    RelationshipType.SUPERSEDES,
+}
+REFERENCE_EDIT_FIELD_MAP = {
+    "project_name": "candidate_name",
+    "canonical_address": "candidate_address",
+    "developer": "candidate_developer",
+    "total_units": "candidate_unit_total",
+    "market_rate_units": "candidate_unit_market_rate",
+    "affordable_units": "candidate_unit_affordable",
+    "workforce_units": "candidate_unit_workforce",
+    "stories": "candidate_stories",
+    "product_type": "candidate_product_type",
+    "age_restriction": "candidate_age_restriction",
+    "pipeline_status": "candidate_status_signal",
+    "lat": "candidate_lat",
+    "lng": "candidate_lng",
+    "city": "candidate_city",
+}
+INTEGER_PROJECT_FIELDS = {
+    "total_units",
+    "market_rate_units",
+    "affordable_units",
+    "workforce_units",
+    "stories",
+}
+FLOAT_PROJECT_FIELDS = {"lat", "lng"}
 
 
 @router.get("/queue")
@@ -178,6 +229,106 @@ def get_review_item_match_preview(
         evidence_rows_to_reattach=evidence_rows_to_reattach,
         value_change_items_that_would_be_queued=[delta.field_name for delta in deltas],
     )
+
+
+@router.post("/items/{item_id}/match")
+def match_review_item_to_project(
+    item_id: uuid.UUID,
+    payload: ReviewDedupMatchRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ReviewDedupWriteResponse:
+    review_item = _load_review_item_for_discovery(session, item_id)
+    project = session.get(Project, payload.matched_project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Matched project not found.")
+
+    try:
+        with session.begin_nested():
+            return _apply_discovery_match(
+                session,
+                review_item=review_item,
+                project=project,
+                edits=payload.edits,
+                accept_deltas=set(payload.accept_deltas),
+                user=user,
+            )
+    except ValueError as exc:
+        _raise_workflow_error(exc)
+
+
+@router.post("/items/{item_id}/create")
+def create_project_from_review_item(
+    item_id: uuid.UUID,
+    payload: ReviewDedupCreateRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ReviewDedupWriteResponse:
+    review_item = _load_review_item_for_discovery(session, item_id)
+    try:
+        with session.begin_nested():
+            project = _create_project_from_discovery_subject(
+                session,
+                review_item=review_item,
+                edits=payload.edits,
+                project_fields=payload.project_fields,
+                user=user,
+            )
+            return _apply_discovery_match(
+                session,
+                review_item=review_item,
+                project=project,
+                edits={},
+                accept_deltas=set(),
+                user=user,
+                source="discovery_create",
+            )
+    except ValueError as exc:
+        _raise_workflow_error(exc)
+
+
+@router.post("/items/{item_id}/create-and-link")
+def create_project_and_link_from_review_item(
+    item_id: uuid.UUID,
+    payload: ReviewDedupCreateAndLinkRequest,
+    user: AuthenticatedUser = AUTH_USER,
+    session: Session = DB_SESSION,
+) -> ReviewDedupWriteResponse:
+    review_item = _load_review_item_for_discovery(session, item_id)
+    relationship_type = _coerce_discovery_relationship_type(payload.relationship_type)
+    related_project = session.get(Project, payload.related_project_id)
+    if related_project is None:
+        raise HTTPException(status_code=404, detail="Related project not found.")
+    try:
+        with session.begin_nested():
+            project = _create_project_from_discovery_subject(
+                session,
+                review_item=review_item,
+                edits=payload.edits,
+                project_fields=payload.project_fields,
+                user=user,
+            )
+            relationship = ProjectRelationship(
+                project_id=project.id,
+                related_project_id=related_project.id,
+                relationship_type=relationship_type,
+            )
+            session.add(relationship)
+            result = _apply_discovery_match(
+                session,
+                review_item=review_item,
+                project=project,
+                edits={},
+                accept_deltas=set(),
+                user=user,
+                source="discovery_create",
+                relationship=relationship,
+                related_project=related_project,
+            )
+            result.relationship_id = relationship.id
+            return result
+    except ValueError as exc:
+        _raise_workflow_error(exc)
 
 
 @router.post("/{item_id}/decide")
@@ -441,6 +592,624 @@ def _new_candidate_probability_for_payload(candidates: list[dict[str, Any]]) -> 
     )
 
 
+def _apply_discovery_match(
+    session: Session,
+    *,
+    review_item: ReviewItem,
+    project: Project,
+    edits: dict[str, Any],
+    accept_deltas: set[str],
+    user: AuthenticatedUser,
+    source: str = "discovery_match",
+    relationship: ProjectRelationship | None = None,
+    related_project: Project | None = None,
+) -> ReviewDedupWriteResponse:
+    now = datetime.now(UTC)
+    actor = _actor_for_audit(user)
+    _validate_reference_edit_fields(edits)
+    reference = _news_reference_for_review_item(session, review_item)
+    if reference is not None:
+        _apply_reference_edits(reference, edits, user=user, timestamp=now)
+
+    subject, reference = _dedup_subject_for_review_item(session, review_item)
+    deltas = compute_subject_candidate_deltas(subject, project)
+    accepted_delta_fields = {delta.field_name for delta in deltas} & accept_deltas
+    value_change_items_queued: list[str] = []
+    change_log_entries_created = 0
+
+    for delta in deltas:
+        if delta.field_name in accepted_delta_fields:
+            change_log_entries_created += _apply_delta_to_project(
+                session,
+                project=project,
+                review_item=review_item,
+                delta=delta,
+                source=source,
+                actor=actor,
+                user=user,
+                timestamp=now,
+            )
+        elif source != "discovery_create":
+            _queue_delta_review_item(
+                session,
+                project=project,
+                review_item=review_item,
+                delta=delta,
+            )
+            value_change_items_queued.append(delta.field_name)
+
+    evidence_rows_reattached = 0
+    if reference is not None:
+        _mark_reference_matched(
+            reference,
+            project=project,
+            user=user,
+            timestamp=now,
+            source=source,
+        )
+        evidence_rows_reattached = _reattach_reference_evidence(
+            session,
+            reference_id=reference.id,
+            project_id=project.id,
+        )
+
+    closed_review_items = _close_discovery_review_items(
+        session,
+        review_item=review_item,
+        reference=reference,
+        project=project,
+        user=user,
+        timestamp=now,
+        decision_type="create_new" if source == "discovery_create" else "match_to_existing",
+    )
+    change_log_entries_created += _write_discovery_absorb_change_log(
+        session,
+        project=project,
+        review_item=review_item,
+        reference=reference,
+        actor=actor,
+        user=user,
+        timestamp=now,
+        source=source,
+    )
+    if relationship is not None and related_project is not None:
+        change_log_entries_created += _write_discovery_relationship_change_log(
+            session,
+            project=project,
+            relationship=relationship,
+            related_project=related_project,
+            actor=actor,
+            user=user,
+            timestamp=now,
+        )
+    project.last_reviewed_by = actor[:50]
+    project.last_reviewed_date = now.date()
+    project.last_editor = actor[:50]
+    project.last_edit_date = now.date()
+    session.flush()
+    return ReviewDedupWriteResponse(
+        review_item_id=review_item.id,
+        project_id=project.id,
+        reference_id=reference.id if reference is not None else None,
+        closed_review_items=closed_review_items,
+        evidence_rows_reattached=evidence_rows_reattached,
+        value_change_items_queued=value_change_items_queued,
+        change_log_entries_created=change_log_entries_created,
+        relationship_id=relationship.id if relationship is not None else None,
+    )
+
+
+def _create_project_from_discovery_subject(
+    session: Session,
+    *,
+    review_item: ReviewItem,
+    edits: dict[str, Any],
+    project_fields: dict[str, Any],
+    user: AuthenticatedUser,
+) -> Project:
+    now = datetime.now(UTC)
+    _validate_reference_edit_fields(edits)
+    reference = _news_reference_for_review_item(session, review_item)
+    if reference is not None:
+        _apply_reference_edits(reference, edits, user=user, timestamp=now)
+    subject, _reference = _dedup_subject_for_review_item(session, review_item)
+    fields = dict(project_fields or {})
+    canonical_address = _first_text(fields.get("canonical_address"), subject.canonical_address)
+    if canonical_address is None:
+        raise ValueError("Cannot create a project without canonical_address.")
+    source_obj = getattr(getattr(reference, "article", None), "source", None) if reference else None
+    source_run = review_item.source_run
+    jurisdiction = getattr(source_obj, "jurisdiction", None) or getattr(
+        source_run, "jurisdiction", None
+    )
+    market = getattr(source_obj, "market", None) or getattr(jurisdiction, "market", None)
+    actor = _actor_for_audit(user)
+    lat = _coerce_float(fields.get("lat"), subject.lat)
+    lng = _coerce_float(fields.get("lng"), subject.lng)
+    market_slug = _first_text(
+        fields.get("market"),
+        getattr(market, "slug", None),
+        getattr(source_run, "market", None),
+    )
+    city = _first_text(
+        fields.get("city"),
+        getattr(reference, "candidate_city", None),
+        getattr(jurisdiction, "display_name", None),
+        getattr(jurisdiction, "name", None),
+        getattr(market, "display_name", None),
+        getattr(market, "name", None),
+    )
+    state = _first_text(
+        fields.get("state"),
+        getattr(jurisdiction, "state", None),
+        getattr(market, "state", None),
+    )
+    county = _first_text(
+        fields.get("county"),
+        getattr(market, "display_name", None),
+        getattr(market, "name", None),
+        city,
+    )
+    if market_slug is None or city is None or state is None or county is None:
+        raise ValueError(
+            "Cannot create a project without market, city, state, and county. "
+            "Provide project_fields or attach source_run market metadata."
+        )
+    project = Project(
+        canonical_address=canonical_address,
+        raw_addresses=_unique_texts([fields.get("raw_address"), canonical_address]),
+        lat=lat,
+        lng=lng,
+        location=build_location(lat, lng) if lat is not None and lng is not None else None,
+        market=market_slug,
+        market_id=getattr(market, "id", None) or getattr(jurisdiction, "market_id", None),
+        city=city,
+        state=state,
+        county=county,
+        zip=_first_text(fields.get("zip")),
+        jurisdiction=getattr(jurisdiction, "name", None),
+        jurisdiction_id=getattr(jurisdiction, "id", None),
+        project_name=_first_text(fields.get("project_name"), subject.project_name),
+        developer=_first_text(fields.get("developer"), subject.developer),
+        total_units=_coerce_int(fields.get("total_units"), subject.total_units),
+        market_rate_units=_coerce_int(fields.get("market_rate_units"), subject.market_rate_units),
+        affordable_units=_coerce_int(fields.get("affordable_units"), subject.affordable_units),
+        workforce_units=_coerce_int(fields.get("workforce_units"), subject.workforce_units),
+        stories=_coerce_int(fields.get("stories"), subject.building_height_stories),
+        product_type=_coerce_product_type(
+            _first_text(fields.get("product_type"), subject.product_type)
+        ),
+        age_restriction=_coerce_age_restriction(
+            _first_text(fields.get("age_restriction"), subject.age_restriction)
+        ),
+        pipeline_status=_coerce_pipeline_status(
+            _first_text(fields.get("pipeline_status"), subject.pipeline_status)
+        ),
+        created_by=actor,
+        last_editor=actor[:50],
+        last_edit_date=now.date(),
+        last_reviewed_by=actor[:50],
+        last_reviewed_date=now.date(),
+    )
+    session.add(project)
+    session.flush()
+    return project
+
+
+def _apply_reference_edits(
+    reference: NewsProjectReference,
+    edits: dict[str, Any],
+    *,
+    user: AuthenticatedUser,
+    timestamp: datetime,
+) -> None:
+    # Caller must run _validate_reference_edit_fields(edits) first; this trusts the keys.
+    for field_name, raw_value in (edits or {}).items():
+        target = REFERENCE_EDIT_FIELD_MAP[str(field_name)]
+        setattr(reference, target, _coerce_reference_value(target, raw_value))
+    reference.manual_relink_by_user_id = user.user_id
+    reference.manual_relink_at = timestamp
+    reference.manual_relink_note = "Discovery reviewer subject edits applied."
+
+
+def _validate_reference_edit_fields(edits: dict[str, Any]) -> None:
+    unknown_fields = sorted(
+        str(field_name)
+        for field_name in (edits or {})
+        if str(field_name) not in REFERENCE_EDIT_FIELD_MAP
+    )
+    if unknown_fields:
+        allowed = ", ".join(sorted(REFERENCE_EDIT_FIELD_MAP))
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "edits contains unsupported field(s): "
+                f"{', '.join(unknown_fields)}. Allowed fields: {allowed}."
+            ),
+        )
+
+
+def _coerce_reference_value(target: str, value: Any) -> Any:
+    if target in {
+        "candidate_unit_total",
+        "candidate_unit_market_rate",
+        "candidate_unit_affordable",
+        "candidate_unit_workforce",
+        "candidate_stories",
+    }:
+        return _coerce_int(value)
+    if target in {"candidate_lat", "candidate_lng"}:
+        return _coerce_float(value)
+    return _first_text(value)
+
+
+def _mark_reference_matched(
+    reference: NewsProjectReference,
+    *,
+    project: Project,
+    user: AuthenticatedUser,
+    timestamp: datetime,
+    source: str,
+) -> None:
+    reference.matched_project_id = project.id
+    reference.match_status = (
+        NewsMatchStatus.CONFIRMED.value
+        if source == "discovery_create"
+        else NewsMatchStatus.MANUAL_RELINK.value
+    )
+    reference.match_confidence = 1.0
+    reference.match_reason = source
+    reference.match_decision_at = timestamp
+    reference.manual_relink_by_user_id = user.user_id
+    reference.manual_relink_at = timestamp
+
+
+def _reattach_reference_evidence(
+    session: Session,
+    *,
+    reference_id: uuid.UUID,
+    project_id: uuid.UUID,
+) -> int:
+    rows = (
+        session.execute(
+            select(Evidence).where(
+                Evidence.source_type == "news_article",
+                Evidence.source_record_id == str(reference_id),
+                Evidence.superseded_at.is_(None),
+                or_(Evidence.project_id.is_(None), Evidence.project_id != project_id),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in rows:
+        row.project_id = project_id
+    return len(rows)
+
+
+def _apply_delta_to_project(
+    session: Session,
+    *,
+    project: Project,
+    review_item: ReviewItem,
+    delta: FieldDelta,
+    source: str,
+    actor: str,
+    user: AuthenticatedUser,
+    timestamp: datetime,
+) -> int:
+    old_value = _json_safe_project_value(getattr(project, delta.field_name))
+    new_value = _coerce_project_field_value(delta.field_name, delta.evidence_value)
+    if old_value == _json_safe_project_value(new_value):
+        return 0
+    setattr(project, delta.field_name, new_value)
+    session.add(
+        ChangeLog(
+            project_id=project.id,
+            review_item_id=review_item.id,
+            timestamp=timestamp,
+            source=source,
+            field=delta.field_name,
+            old_value=serialize_json(old_value),
+            new_value=serialize_json(_json_safe_project_value(new_value)),
+            change_type=ChangeType.RESEARCHER_CONFIRMED,
+            priority=CHANGELOG_PRIORITY_BY_FIELD.get(delta.field_name, Priority.MEDIUM),
+            reviewed_by=actor[:50],
+            reviewed_by_user_id=user.user_id,
+            reviewed_by_email=user.email,
+        )
+    )
+    return 1
+
+
+def _queue_delta_review_item(
+    session: Session,
+    *,
+    project: Project,
+    review_item: ReviewItem,
+    delta: FieldDelta,
+) -> None:
+    metadata = field_metadata_for_review(delta.field_name)
+    payload_mapping = review_item.payload if isinstance(review_item.payload, dict) else {}
+    payload = {
+        "origin": "discovery_match_delta",
+        "source_review_item_id": str(review_item.id),
+        "source_record_id": payload_mapping.get("source_record_id"),
+        "field_name": delta.field_name,
+        "field_label": metadata.label,
+        "current_value": delta.current_value,
+        "proposed_value": delta.evidence_value,
+        "changes": [
+            {
+                "field": delta.field_name,
+                "old_value": delta.current_value,
+                "new_value": delta.evidence_value,
+            }
+        ],
+        "match": payload_mapping.get("match"),
+        "evidence_ids": [str(review_item.winning_evidence_id)]
+        if review_item.winning_evidence_id is not None
+        else [],
+    }
+    upsert_decision_card_review_item(
+        session,
+        project_id=project.id,
+        source_run_id=review_item.source_run_id,
+        item_type=ReviewItemType.STATUS_CHANGE,
+        field_name=delta.field_name,
+        priority=CHANGELOG_PRIORITY_BY_FIELD.get(delta.field_name, Priority.MEDIUM),
+        payload=payload,
+        proposed_value=delta.evidence_value,
+        match_confidence=review_item.match_confidence,
+        winning_evidence_id=review_item.winning_evidence_id,
+    )
+
+
+def _close_discovery_review_items(
+    session: Session,
+    *,
+    review_item: ReviewItem,
+    reference: NewsProjectReference | None,
+    project: Project,
+    user: AuthenticatedUser,
+    timestamp: datetime,
+    decision_type: str,
+) -> int:
+    items = (
+        _same_reference_open_review_items(session, reference.id)
+        if reference is not None
+        else [review_item]
+    )
+    actor = _actor_for_audit(user)
+    decision_value = serialize_json(
+        {
+            "project_id": str(project.id),
+            "reference_id": str(reference.id) if reference is not None else None,
+        }
+    )
+    for item in items:
+        item.project_id = project.id
+        item.status = ReviewItemStatus.ACCEPTED
+        item.state = REVIEW_ITEM_STATE_COMMITTED
+        item.resolved_by = actor[:50]
+        item.resolved_at = timestamp
+        existing_decision = _active_staged_decision(session, item.id)
+        if existing_decision is not None:
+            existing_decision.state = REVIEW_DECISION_STATE_COMMITTED
+            existing_decision.committed_at = timestamp
+            existing_decision.committed_by = user.user_id
+            existing_decision.committed_by_email = user.email
+            existing_decision.decision_type = decision_type
+            existing_decision.decision_value = decision_value
+            existing_decision.action = ReviewDecisionAction.ACCEPT
+            continue
+        session.add(
+            ReviewDecision(
+                review_item_id=item.id,
+                action=ReviewDecisionAction.ACCEPT,
+                actor=actor[:50],
+                state=REVIEW_DECISION_STATE_COMMITTED,
+                decision_type=decision_type,
+                staged_at=timestamp,
+                staged_by=user.user_id,
+                staged_by_email=user.email,
+                committed_at=timestamp,
+                committed_by=user.user_id,
+                committed_by_email=user.email,
+                decision_value=decision_value,
+            )
+        )
+    return len(items)
+
+
+def _same_reference_open_review_items(
+    session: Session,
+    reference_id: uuid.UUID,
+) -> list[ReviewItem]:
+    reference_text = str(reference_id)
+    return (
+        session.execute(
+            select(ReviewItem)
+            .where(
+                ReviewItem.state.in_([REVIEW_ITEM_STATE_OPEN, REVIEW_ITEM_STATE_STAGED]),
+                ReviewItem.item_type != ReviewItemType.STATUS_CHANGE,
+                or_(
+                    ReviewItem.payload["source_record_id"].astext == reference_text,
+                    ReviewItem.payload["reference_id"].astext == reference_text,
+                    ReviewItem.payload["news_context"]["reference_id"].astext == reference_text,
+                ),
+            )
+            .order_by(ReviewItem.created_at.asc(), ReviewItem.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _active_staged_decision(session: Session, review_item_id: uuid.UUID) -> ReviewDecision | None:
+    return session.execute(
+        select(ReviewDecision).where(
+            ReviewDecision.review_item_id == review_item_id,
+            ReviewDecision.state == REVIEW_DECISION_STATE_STAGED,
+        )
+    ).scalar_one_or_none()
+
+
+def _write_discovery_absorb_change_log(
+    session: Session,
+    *,
+    project: Project,
+    review_item: ReviewItem,
+    reference: NewsProjectReference | None,
+    actor: str,
+    user: AuthenticatedUser,
+    timestamp: datetime,
+    source: str,
+) -> int:
+    source_label = _source_label_for_review_item(review_item)
+    reference_id = str(reference.id) if reference is not None else None
+    session.add(
+        ChangeLog(
+            project_id=project.id,
+            review_item_id=review_item.id,
+            timestamp=timestamp,
+            source=source,
+            field="source_reference",
+            old_value=None,
+            new_value=serialize_json(
+                {
+                    "summary": (
+                        f"Absorbed reference {reference_id or review_item.id} "
+                        f"from source {source_label} on {timestamp.date().isoformat()} by {actor}."
+                    ),
+                    "reference_id": reference_id,
+                    "review_item_id": str(review_item.id),
+                    "source": source_label,
+                }
+            ),
+            change_type=ChangeType.RESEARCHER_CONFIRMED,
+            priority=Priority.LOW,
+            reviewed_by=actor[:50],
+            reviewed_by_user_id=user.user_id,
+            reviewed_by_email=user.email,
+        )
+    )
+    return 1
+
+
+def _write_discovery_relationship_change_log(
+    session: Session,
+    *,
+    project: Project,
+    relationship: ProjectRelationship,
+    related_project: Project,
+    actor: str,
+    user: AuthenticatedUser,
+    timestamp: datetime,
+) -> int:
+    session.add(
+        ChangeLog(
+            project_id=project.id,
+            timestamp=timestamp,
+            source="discovery_create",
+            field="relationships",
+            old_value=None,
+            new_value=serialize_json(
+                {
+                    "relationship_type": relationship.relationship_type.value,
+                    "related_project_id": str(related_project.id),
+                    "related_project_name": related_project.project_name
+                    or related_project.canonical_address,
+                    "notes": None,
+                }
+            ),
+            change_type=ChangeType.RESEARCHER_CONFIRMED,
+            priority=Priority.LOW,
+            reviewed_by=actor[:50],
+            reviewed_by_user_id=user.user_id,
+            reviewed_by_email=user.email,
+        )
+    )
+    return 1
+
+
+def _coerce_discovery_relationship_type(value: str) -> RelationshipType:
+    try:
+        relationship_type = RelationshipType(value.strip())
+    except ValueError as exc:
+        allowed = ", ".join(sorted(item.value for item in DISCOVERY_RELATIONSHIP_TYPES))
+        raise HTTPException(
+            status_code=422,
+            detail=f"relationship_type must be one of: {allowed}.",
+        ) from exc
+    if relationship_type not in DISCOVERY_RELATIONSHIP_TYPES:
+        allowed = ", ".join(sorted(item.value for item in DISCOVERY_RELATIONSHIP_TYPES))
+        raise HTTPException(
+            status_code=422,
+            detail=f"relationship_type must be one of: {allowed}.",
+        )
+    return relationship_type
+
+
+def _coerce_project_field_value(field_name: str, value: Any) -> Any:
+    if field_name in INTEGER_PROJECT_FIELDS:
+        return _coerce_int(value)
+    if field_name in FLOAT_PROJECT_FIELDS:
+        return _coerce_float(value)
+    if field_name == "pipeline_status":
+        return _coerce_pipeline_status(_first_text(value))
+    if field_name == "product_type":
+        return _coerce_product_type(_first_text(value))
+    if field_name == "age_restriction":
+        return _coerce_age_restriction(_first_text(value))
+    return _first_text(value)
+
+
+def _coerce_pipeline_status(value: str | None) -> PipelineStatus:
+    if value is None:
+        return PipelineStatus.PROPOSED
+    return PipelineStatus(value)
+
+
+def _coerce_product_type(value: str | None) -> ProductType:
+    if value is None:
+        return ProductType.UNKNOWN
+    return ProductType(value)
+
+
+def _coerce_age_restriction(value: str | None) -> AgeRestriction:
+    if value is None:
+        return AgeRestriction.UNKNOWN
+    return AgeRestriction(value)
+
+
+def _json_safe_project_value(value: Any) -> Any:
+    enum_value = getattr(value, "value", None)
+    return enum_value if enum_value is not None else value
+
+
+def _actor_for_audit(user: AuthenticatedUser) -> str:
+    return user.email or str(user.user_id)
+
+
+def _source_label_for_review_item(review_item: ReviewItem) -> str:
+    if review_item.source_run is not None:
+        return review_item.source_run.source_name
+    return "review_discovery"
+
+
+def _unique_texts(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _first_text(value)
+        if text is None or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
 def _identifier_mapping(value: Any) -> dict[str, list[str]]:
     if not isinstance(value, dict):
         return {}
@@ -474,6 +1243,10 @@ def _first_int(*values: Any) -> int | None:
     return None
 
 
+def _coerce_int(*values: Any) -> int | None:
+    return _first_int(*values)
+
+
 def _first_float(*values: Any) -> float | None:
     for value in values:
         if value is None or isinstance(value, bool):
@@ -483,6 +1256,10 @@ def _first_float(*values: Any) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _coerce_float(*values: Any) -> float | None:
+    return _first_float(*values)
 
 
 def _serialize_review_item(

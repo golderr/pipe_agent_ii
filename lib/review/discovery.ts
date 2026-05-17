@@ -6,7 +6,7 @@ import {
   candidateProjectIdsForItem,
   humanize
 } from "./payload";
-import type { ReviewQueueItem } from "./types";
+import type { ReviewQueueItem, ReviewValueChangePayload } from "./types";
 
 export type DiscoverySubject = {
   projectName: string | null;
@@ -79,6 +79,22 @@ export type DiscoveryMatchPreview = {
   valueChangeItemsThatWouldBeQueued: string[];
 };
 
+export type DiscoveryFieldDelta = {
+  fieldName: string;
+  valueChange: ReviewValueChangePayload;
+};
+
+export type DiscoverySubjectEditField =
+  | "projectName"
+  | "canonicalAddress"
+  | "developer"
+  | "totalUnits"
+  | "productType"
+  | "pipelineStatus"
+  | "stories";
+
+export type DiscoverySubjectEdits = Partial<Record<DiscoverySubjectEditField, string>>;
+
 export type DiscoveryCandidateSortField =
   | "matchLikelihood"
   | "projectName"
@@ -147,6 +163,148 @@ const UNIT_FIELDS = [
   "workforceUnits"
 ] as const;
 type DiscoveryUnitField = (typeof UNIT_FIELDS)[number];
+type DiscoveryDeltaFieldConfig = {
+  fieldName: string;
+  fieldLabel: string;
+  fieldType: string;
+  subjectValue: (subject: DiscoverySubject) => unknown;
+  candidateValue: (candidate: DiscoveryCandidate) => unknown;
+  constraints?: ReviewValueChangePayload["constraints"];
+};
+
+const PIPELINE_STATUS_VALUES = [
+  "Conceptual",
+  "Proposed",
+  "Pending",
+  "Approved",
+  "Under Construction",
+  "Pre-Leasing/Pre-Selling",
+  "Complete",
+  "Stalled",
+  "Inactive"
+];
+const PRODUCT_TYPE_VALUES = [
+  "Apartment",
+  "Condo",
+  "Single-Family",
+  "Townhome",
+  "Micro/Co-Living",
+  "Other",
+  "Unknown"
+];
+const AGE_RESTRICTION_VALUES = ["Non Age-Restricted", "Senior", "Student", "Unknown"];
+const DELTA_FIELD_CONFIGS: DiscoveryDeltaFieldConfig[] = [
+  {
+    fieldName: "project_name",
+    fieldLabel: "Project name",
+    fieldType: "text",
+    subjectValue: (subject) => subject.projectName,
+    candidateValue: (candidate) => candidate.projectName
+  },
+  {
+    fieldName: "canonical_address",
+    fieldLabel: "Address",
+    fieldType: "text",
+    subjectValue: (subject) => subject.canonicalAddress,
+    candidateValue: (candidate) => candidate.canonicalAddress
+  },
+  {
+    fieldName: "developer",
+    fieldLabel: "Developer",
+    fieldType: "developer",
+    subjectValue: (subject) => subject.developer,
+    candidateValue: (candidate) => candidate.developer
+  },
+  {
+    fieldName: "total_units",
+    fieldLabel: "Total units",
+    fieldType: "integer",
+    constraints: { min: 0 },
+    subjectValue: (subject) => subject.totalUnits,
+    candidateValue: (candidate) => candidate.totalUnits
+  },
+  {
+    fieldName: "market_rate_units",
+    fieldLabel: "Market-rate units",
+    fieldType: "integer",
+    constraints: { min: 0 },
+    subjectValue: (subject) => subject.marketRateUnits,
+    candidateValue: (candidate) => candidate.marketRateUnits
+  },
+  {
+    fieldName: "affordable_units",
+    fieldLabel: "Affordable units",
+    fieldType: "integer",
+    constraints: { min: 0 },
+    subjectValue: (subject) => subject.affordableUnits,
+    candidateValue: (candidate) => candidate.affordableUnits
+  },
+  {
+    fieldName: "workforce_units",
+    fieldLabel: "Workforce units",
+    fieldType: "integer",
+    constraints: { min: 0 },
+    subjectValue: (subject) => subject.workforceUnits,
+    candidateValue: (candidate) => candidate.workforceUnits
+  },
+  {
+    fieldName: "product_type",
+    fieldLabel: "Product type",
+    fieldType: "product_type",
+    constraints: { enumValues: PRODUCT_TYPE_VALUES },
+    subjectValue: (subject) => subject.productType,
+    candidateValue: (candidate) => candidate.productType
+  },
+  {
+    fieldName: "age_restriction",
+    fieldLabel: "Age restriction",
+    fieldType: "age_restriction",
+    constraints: { enumValues: AGE_RESTRICTION_VALUES },
+    subjectValue: (subject) => subject.ageRestriction,
+    candidateValue: (candidate) => candidate.ageRestriction
+  },
+  {
+    fieldName: "pipeline_status",
+    fieldLabel: "Status",
+    fieldType: "status_enum",
+    constraints: { enumValues: PIPELINE_STATUS_VALUES },
+    subjectValue: (subject) => subject.pipelineStatus,
+    candidateValue: (candidate) => candidate.pipelineStatus
+  },
+  {
+    fieldName: "stories",
+    fieldLabel: "Stories",
+    fieldType: "integer",
+    constraints: { min: 0 },
+    subjectValue: (subject) => subject.stories,
+    candidateValue: (candidate) => candidate.stories
+  }
+];
+
+const SUBJECT_EDIT_FIELD_CONFIG: Record<
+  DiscoverySubjectEditField,
+  {
+    subjectField: keyof DiscoverySubject;
+    payloadField: string;
+    kind: "text" | "integer";
+  }
+> = {
+  projectName: { subjectField: "projectName", payloadField: "project_name", kind: "text" },
+  canonicalAddress: {
+    subjectField: "canonicalAddress",
+    payloadField: "canonical_address",
+    kind: "text"
+  },
+  developer: { subjectField: "developer", payloadField: "developer", kind: "text" },
+  totalUnits: { subjectField: "totalUnits", payloadField: "total_units", kind: "integer" },
+  productType: { subjectField: "productType", payloadField: "product_type", kind: "text" },
+  pipelineStatus: {
+    subjectField: "pipelineStatus",
+    payloadField: "pipeline_status",
+    kind: "text"
+  },
+  stories: { subjectField: "stories", payloadField: "stories", kind: "integer" }
+};
 
 export const DISCOVERY_ITEM_TYPES = new Set(["new_candidate", "possible_match"]);
 
@@ -341,6 +499,100 @@ export function computeCandidateOverlaps(
   addStoriesOverlap(overlaps, subject, candidate);
   addCoordinateOverlap(overlaps, subject, candidate);
   return overlaps;
+}
+
+export function computeCandidateDeltas(
+  subject: DiscoverySubject,
+  candidate: DiscoveryCandidate
+): DiscoveryFieldDelta[] {
+  return DELTA_FIELD_CONFIGS.flatMap((config) => {
+    const evidenceValue = deltaValue(config.subjectValue(subject));
+    if (evidenceValue === null) {
+      return [];
+    }
+    const currentValue = deltaValue(config.candidateValue(candidate));
+    if (currentValue === evidenceValue) {
+      return [];
+    }
+    return [
+      {
+        fieldName: config.fieldName,
+        valueChange: {
+          fieldName: config.fieldName,
+          fieldLabel: config.fieldLabel,
+          fieldType: config.fieldType,
+          currentValue,
+          evidenceValue,
+          agentRecommendedValue: null,
+          defaultResultValue: evidenceValue,
+          constraints: config.constraints ?? {},
+          supportingEvidenceIds: [],
+          dissentingEvidenceIds: [],
+          humanSummary: null
+        }
+      }
+    ];
+  });
+}
+
+export function applyDiscoverySubjectEdits(
+  subject: DiscoverySubject,
+  edits: DiscoverySubjectEdits
+): DiscoverySubject {
+  const nextSubject = { ...subject };
+  for (const [field, value] of Object.entries(edits) as Array<
+    [DiscoverySubjectEditField, string]
+  >) {
+    const config = SUBJECT_EDIT_FIELD_CONFIG[field];
+    const nextValue = config.kind === "integer" ? integerEditValue(value) : textEditValue(value);
+    switch (field) {
+      case "projectName":
+        nextSubject.projectName = nextValue as string | null;
+        break;
+      case "canonicalAddress":
+        nextSubject.canonicalAddress = nextValue as string | null;
+        break;
+      case "developer":
+        nextSubject.developer = nextValue as string | null;
+        break;
+      case "totalUnits":
+        nextSubject.totalUnits = nextValue as number | null;
+        break;
+      case "productType":
+        nextSubject.productType = nextValue as string | null;
+        break;
+      case "pipelineStatus":
+        nextSubject.pipelineStatus = nextValue as string | null;
+        break;
+      case "stories":
+        nextSubject.stories = nextValue as number | null;
+        break;
+    }
+  }
+  return nextSubject;
+}
+
+export function discoverySubjectEditsPayload(edits: DiscoverySubjectEdits) {
+  const payload: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(edits) as Array<
+    [DiscoverySubjectEditField, string]
+  >) {
+    const config = SUBJECT_EDIT_FIELD_CONFIG[field];
+    payload[config.payloadField] =
+      config.kind === "integer" ? integerEditValue(value) : textEditValue(value);
+  }
+  return payload;
+}
+
+export function projectFieldsFromDiscoverySubject(subject: DiscoverySubject) {
+  const fields: Record<string, unknown> = {};
+  for (const config of Object.values(SUBJECT_EDIT_FIELD_CONFIG)) {
+    const value = subject[config.subjectField];
+    if (value !== null && value !== "") {
+      fields[config.payloadField] = value;
+    }
+  }
+  return fields;
 }
 
 export function candidateFocusByOffset(
@@ -645,6 +897,31 @@ function comparableText(value: string | null) {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function deltaValue(value: unknown) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  return value;
+}
+
+function textEditValue(value: string) {
+  const text = value.trim();
+  return text || null;
+}
+
+function integerEditValue(value: string) {
+  const text = value.trim().replace(/,/g, "");
+  if (!text) {
+    return null;
+  }
+  const parsed = Number.parseInt(text, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function newCandidateProbabilityForItem(item: ReviewQueueItem) {

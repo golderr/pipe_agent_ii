@@ -241,6 +241,35 @@ class ReviewMatchPreviewResponse(BaseModel):
     value_change_items_that_would_be_queued: list[str]
 
 
+class ReviewDedupMatchRequest(BaseModel):
+    matched_project_id: uuid.UUID
+    edits: dict[str, Any] = Field(default_factory=dict)
+    accept_deltas: list[str] = Field(default_factory=list)
+
+
+class ReviewDedupCreateRequest(BaseModel):
+    project_fields: dict[str, Any] = Field(default_factory=dict)
+    edits: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewDedupCreateAndLinkRequest(BaseModel):
+    relationship_type: str = Field(min_length=1, max_length=50)
+    related_project_id: uuid.UUID
+    project_fields: dict[str, Any] = Field(default_factory=dict)
+    edits: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewDedupWriteResponse(BaseModel):
+    review_item_id: uuid.UUID
+    project_id: uuid.UUID
+    reference_id: uuid.UUID | None
+    closed_review_items: int
+    evidence_rows_reattached: int
+    value_change_items_queued: list[str]
+    change_log_entries_created: int
+    relationship_id: uuid.UUID | None = None
+
+
 class ReviewCommitRequest(BaseModel):
     jurisdiction_id: uuid.UUID | None = None
     dry_run: bool = False

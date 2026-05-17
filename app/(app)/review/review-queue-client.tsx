@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ExternalLink,
   GitCompareArrows,
+  Link2,
   ListChecks,
   Newspaper,
   RotateCcw,
@@ -19,8 +20,11 @@ import {
 import { useCallback, useEffect, useMemo, useState, useTransition, type MouseEvent } from "react";
 import {
   commitReviewDecisionsAction,
+  createAndLinkDiscoveryProjectAction,
+  createDiscoveryProjectAction,
   fetchDedupCandidatesAction,
   fetchMatchPreviewAction,
+  matchDiscoveryCandidateAction,
   stageReviewDecisionAction,
   unstageReviewDecisionAction
 } from "./actions";
@@ -66,20 +70,27 @@ import {
   candidateBandTone,
   candidateFocusByNumber,
   candidateFocusByOffset,
+  applyDiscoverySubjectEdits,
+  computeCandidateDeltas,
   computeCandidateOverlaps,
+  discoverySubjectEditsPayload,
   isDiscoveryItem,
   matchPreviewImpactText,
+  projectFieldsFromDiscoverySubject,
   searchedSummary,
   sortCandidates,
   visibleMatchSignals,
   type DiscoveryCandidate,
+  type DiscoveryFieldDelta,
   type DiscoveryOverlap,
   type DiscoveryCandidateSort,
   type DiscoveryCandidateSortField,
   type DiscoveryCandidateSearch,
   type DiscoveryCard,
   type DiscoveryMatchPreview,
-  type DiscoverySubject
+  type DiscoverySubject,
+  type DiscoverySubjectEdits,
+  type DiscoverySubjectEditField
 } from "@/lib/review/discovery";
 import { compactStatus, statusStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
@@ -141,6 +152,15 @@ type MatchPreviewCacheEntry =
 
 type CreateNewPrompt = {
   card: DiscoveryCard;
+  edits: Record<string, unknown>;
+  projectFields: Record<string, unknown>;
+} | null;
+
+type MatchDeltasPrompt = {
+  card: DiscoveryCard;
+  candidate: DiscoveryCandidate;
+  deltas: DiscoveryFieldDelta[];
+  edits: Record<string, unknown>;
 } | null;
 
 type SourceFamily = "news" | "permit" | "costar" | "pipedream" | "other";
@@ -180,6 +200,32 @@ const SOURCE_FILTER_OPTIONS: Array<{ value: SourceFilter; label: string }> = [
 ];
 
 const MATCH_PREVIEW_DEBOUNCE_MS = 150;
+const DISCOVERY_RELATIONSHIP_OPTIONS = [
+  { value: "phase", label: "Phase sibling" },
+  { value: "master_plan", label: "Master project" },
+  { value: "counterpart", label: "Counterpart" },
+  { value: "supersedes", label: "Supersedes" }
+];
+const SUBJECT_PIPELINE_STATUS_OPTIONS = [
+  "Conceptual",
+  "Proposed",
+  "Pending",
+  "Approved",
+  "Under Construction",
+  "Pre-Leasing/Pre-Selling",
+  "Complete",
+  "Stalled",
+  "Inactive"
+];
+const SUBJECT_PRODUCT_TYPE_OPTIONS = [
+  "Apartment",
+  "Condo",
+  "Single-Family",
+  "Townhome",
+  "Micro/Co-Living",
+  "Other",
+  "Unknown"
+];
 
 export function ReviewQueueClient({
   activeTab,
@@ -207,6 +253,7 @@ export function ReviewQueueClient({
     {}
   );
   const [createNewPrompt, setCreateNewPrompt] = useState<CreateNewPrompt>(null);
+  const [matchDeltasPrompt, setMatchDeltasPrompt] = useState<MatchDeltasPrompt>(null);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner>(null);
   const [isPending, startTransition] = useTransition();
@@ -435,6 +482,115 @@ export function ReviewQueueClient({
     });
   }, []);
 
+  const completeDiscoveryWrite = useCallback(
+    (card: DiscoveryCard, message: string) => {
+      const nextCardKey = nextDiscoveryCardKey(discoveryCards, card.key);
+      setCreateNewPrompt(null);
+      setMatchDeltasPrompt(null);
+      setCandidateCache({});
+      setMatchPreviewCache({});
+      if (nextCardKey) {
+        setFocusedDiscoveryCardId(nextCardKey);
+      }
+      setBanner({ tone: "success", message });
+      router.refresh();
+    },
+    [discoveryCards, router]
+  );
+
+  const runMatchDiscoveryCandidate = useCallback(
+    (
+      card: DiscoveryCard,
+      candidate: DiscoveryCandidate,
+      input: { edits: Record<string, unknown>; acceptDeltas: string[] }
+    ) => {
+      setPendingItemId(card.item.id);
+      setBanner(null);
+      startTransition(async () => {
+        const result = await matchDiscoveryCandidateAction({
+          reviewItemId: card.item.id,
+          matchedProjectId: candidate.projectId,
+          edits: input.edits,
+          acceptDeltas: input.acceptDeltas
+        });
+        setPendingItemId(null);
+        if (!result.ok) {
+          setBanner({ tone: "error", message: result.message });
+          return;
+        }
+        completeDiscoveryWrite(card, result.message);
+      });
+    },
+    [completeDiscoveryWrite]
+  );
+
+  const handleMatchDiscoveryCandidate = useCallback(
+    (
+      card: DiscoveryCard,
+      candidate: DiscoveryCandidate,
+      subject: DiscoverySubject,
+      edits: Record<string, unknown>
+    ) => {
+      const deltas = computeCandidateDeltas(subject, candidate);
+      if (deltas.length > 0) {
+        setMatchDeltasPrompt({ card, candidate, deltas, edits });
+        return;
+      }
+      runMatchDiscoveryCandidate(card, candidate, { edits, acceptDeltas: [] });
+    },
+    [runMatchDiscoveryCandidate]
+  );
+
+  const handleCreateDiscoveryProject = useCallback(
+    (prompt: Exclude<CreateNewPrompt, null>) => {
+      setPendingItemId(prompt.card.item.id);
+      setBanner(null);
+      startTransition(async () => {
+        const result = await createDiscoveryProjectAction({
+          reviewItemId: prompt.card.item.id,
+          edits: prompt.edits,
+          projectFields: prompt.projectFields
+        });
+        setPendingItemId(null);
+        if (!result.ok) {
+          setBanner({ tone: "error", message: result.message });
+          return;
+        }
+        completeDiscoveryWrite(prompt.card, result.message);
+      });
+    },
+    [completeDiscoveryWrite]
+  );
+
+  const handleCreateAndLinkDiscoveryProject = useCallback(
+    (
+      card: DiscoveryCard,
+      candidate: DiscoveryCandidate,
+      relationshipType: string,
+      edits: Record<string, unknown>,
+      projectFields: Record<string, unknown>
+    ) => {
+      setPendingItemId(card.item.id);
+      setBanner(null);
+      startTransition(async () => {
+        const result = await createAndLinkDiscoveryProjectAction({
+          reviewItemId: card.item.id,
+          relatedProjectId: candidate.projectId,
+          relationshipType,
+          edits,
+          projectFields
+        });
+        setPendingItemId(null);
+        if (!result.ok) {
+          setBanner({ tone: "error", message: result.message });
+          return;
+        }
+        completeDiscoveryWrite(card, result.message);
+      });
+    },
+    [completeDiscoveryWrite]
+  );
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
@@ -653,7 +809,12 @@ export function ReviewQueueClient({
           onSelect={setFocusedDiscoveryCardId}
           onRequestCandidates={requestDiscoveryCandidates}
           onRequestMatchPreview={requestMatchPreview}
-          onOpenCreateNew={(card) => setCreateNewPrompt({ card })}
+          onOpenCreateNew={(card, edits, projectFields) =>
+            setCreateNewPrompt({ card, edits, projectFields })
+          }
+          onMatchCandidate={handleMatchDiscoveryCandidate}
+          onCreateAndLink={handleCreateAndLinkDiscoveryProject}
+          isPending={isPending}
         />
       ) : groups.length === 0 ? (
         <div className="px-5 py-8">
@@ -704,6 +865,22 @@ export function ReviewQueueClient({
         <CreateNewConfirmModal
           card={createNewPrompt.card}
           onClose={() => setCreateNewPrompt(null)}
+          onConfirm={() => handleCreateDiscoveryProject(createNewPrompt)}
+          pending={pendingItemId === createNewPrompt.card.item.id || isPending}
+        />
+      ) : null}
+
+      {matchDeltasPrompt ? (
+        <MatchDeltasModal
+          prompt={matchDeltasPrompt}
+          onClose={() => setMatchDeltasPrompt(null)}
+          onConfirm={(acceptDeltas) =>
+            runMatchDiscoveryCandidate(matchDeltasPrompt.card, matchDeltasPrompt.candidate, {
+              edits: matchDeltasPrompt.edits,
+              acceptDeltas
+            })
+          }
+          pending={pendingItemId === matchDeltasPrompt.card.item.id || isPending}
         />
       ) : null}
 
@@ -882,7 +1059,10 @@ function DiscoveryView({
   onSelect,
   onRequestCandidates,
   onRequestMatchPreview,
-  onOpenCreateNew
+  onOpenCreateNew,
+  onMatchCandidate,
+  onCreateAndLink,
+  isPending
 }: {
   cards: DiscoveryCard[];
   selectedCardKey: string | null;
@@ -896,7 +1076,25 @@ function DiscoveryView({
     options?: { includeLayer3?: boolean; force?: boolean }
   ) => void;
   onRequestMatchPreview: (itemId: string, candidateId: string) => void;
-  onOpenCreateNew: (card: DiscoveryCard) => void;
+  onOpenCreateNew: (
+    card: DiscoveryCard,
+    edits: Record<string, unknown>,
+    projectFields: Record<string, unknown>
+  ) => void;
+  onMatchCandidate: (
+    card: DiscoveryCard,
+    candidate: DiscoveryCandidate,
+    subject: DiscoverySubject,
+    edits: Record<string, unknown>
+  ) => void;
+  onCreateAndLink: (
+    card: DiscoveryCard,
+    candidate: DiscoveryCandidate,
+    relationshipType: string,
+    edits: Record<string, unknown>,
+    projectFields: Record<string, unknown>
+  ) => void;
+  isPending: boolean;
 }) {
   const selectedCard = cards.find((card) => card.key === selectedCardKey) ?? cards[0] ?? null;
   if (!cards.length) {
@@ -955,6 +1153,7 @@ function DiscoveryView({
           <DiscoveryCardShell
             card={selectedCard}
             candidatesEntry={candidateCache[selectedCard.item.id]}
+            key={selectedCard.key}
             matchPreviewCache={matchPreviewCache}
             sourceRun={
               selectedCard.item.sourceRunId ? sourceRuns[selectedCard.item.sourceRunId] : undefined
@@ -963,6 +1162,9 @@ function DiscoveryView({
             onRequestCandidates={onRequestCandidates}
             onRequestMatchPreview={onRequestMatchPreview}
             onOpenCreateNew={onOpenCreateNew}
+            onMatchCandidate={onMatchCandidate}
+            onCreateAndLink={onCreateAndLink}
+            isPending={isPending}
           />
         ) : null}
       </section>
@@ -978,7 +1180,10 @@ function DiscoveryCardShell({
   jurisdictionId,
   onRequestCandidates,
   onRequestMatchPreview,
-  onOpenCreateNew
+  onOpenCreateNew,
+  onMatchCandidate,
+  onCreateAndLink,
+  isPending
 }: {
   card: DiscoveryCard;
   candidatesEntry: CandidateCacheEntry | undefined;
@@ -990,7 +1195,25 @@ function DiscoveryCardShell({
     options?: { includeLayer3?: boolean; force?: boolean }
   ) => void;
   onRequestMatchPreview: (itemId: string, candidateId: string) => void;
-  onOpenCreateNew: (card: DiscoveryCard) => void;
+  onOpenCreateNew: (
+    card: DiscoveryCard,
+    edits: Record<string, unknown>,
+    projectFields: Record<string, unknown>
+  ) => void;
+  onMatchCandidate: (
+    card: DiscoveryCard,
+    candidate: DiscoveryCandidate,
+    subject: DiscoverySubject,
+    edits: Record<string, unknown>
+  ) => void;
+  onCreateAndLink: (
+    card: DiscoveryCard,
+    candidate: DiscoveryCandidate,
+    relationshipType: string,
+    edits: Record<string, unknown>,
+    projectFields: Record<string, unknown>
+  ) => void;
+  isPending: boolean;
 }) {
   useEffect(() => {
     if (!candidatesEntry) {
@@ -1003,6 +1226,9 @@ function DiscoveryCardShell({
     direction: "desc"
   });
   const [focusedCandidateId, setFocusedCandidateId] = useState<string | null>(null);
+  const [subjectEdits, setSubjectEdits] = useState<DiscoverySubjectEdits>({});
+  const [linkCandidateId, setLinkCandidateId] = useState<string | null>(null);
+  const [relationshipType, setRelationshipType] = useState("phase");
   const candidates = candidatesEntry?.status === "loaded" ? candidatesEntry.data : null;
   const sortedCandidates = useMemo(
     () => sortCandidates(candidates?.candidates ?? [], candidateSort),
@@ -1012,7 +1238,19 @@ function DiscoveryCardShell({
     sortedCandidates.find((candidate) => candidate.projectId === focusedCandidateId) ??
     sortedCandidates[0] ??
     null;
-  const subject = candidates?.subject ?? card.subject;
+  const baseSubject = candidates?.subject ?? card.subject;
+  const subject = useMemo(
+    () => applyDiscoverySubjectEdits(baseSubject, subjectEdits),
+    [baseSubject, subjectEdits]
+  );
+  const discoveryEdits = useMemo(
+    () => discoverySubjectEditsPayload(subjectEdits),
+    [subjectEdits]
+  );
+  const discoveryProjectFields = useMemo(
+    () => projectFieldsFromDiscoverySubject(subject),
+    [subject]
+  );
   const potentialMatchCount = candidates?.candidates.length ?? card.potentialMatchCount;
   const newCandidateProbability =
     candidates?.newCandidateProbability ?? card.newCandidateProbability;
@@ -1030,6 +1268,30 @@ function DiscoveryCardShell({
       return { field, direction: defaultCandidateSortDirection(field) };
     });
   };
+
+  const openCreateNew = useCallback(() => {
+    onOpenCreateNew(card, discoveryEdits, discoveryProjectFields);
+  }, [card, discoveryEdits, discoveryProjectFields, onOpenCreateNew]);
+
+  const matchCandidate = useCallback(
+    (candidate: DiscoveryCandidate) => {
+      onMatchCandidate(card, candidate, subject, discoveryEdits);
+    },
+    [card, discoveryEdits, onMatchCandidate, subject]
+  );
+
+  const createAndLinkCandidate = useCallback(
+    (candidate: DiscoveryCandidate) => {
+      onCreateAndLink(
+        card,
+        candidate,
+        relationshipType,
+        discoveryEdits,
+        discoveryProjectFields
+      );
+    },
+    [card, discoveryEdits, discoveryProjectFields, onCreateAndLink, relationshipType]
+  );
 
   useEffect(() => {
     if (!focusedCandidate) {
@@ -1082,13 +1344,23 @@ function DiscoveryCardShell({
       }
       if (key === "n") {
         event.preventDefault();
-        onOpenCreateNew(card);
+        openCreateNew();
+        return;
+      }
+      if (key === "m" && focusedCandidate) {
+        event.preventDefault();
+        matchCandidate(focusedCandidate);
+        return;
+      }
+      if (key === "l" && focusedCandidate) {
+        event.preventDefault();
+        setLinkCandidateId(focusedCandidate.projectId);
       }
     }
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [card, focusedCandidate, onOpenCreateNew, sortedCandidates]);
+  }, [focusedCandidate, matchCandidate, openCreateNew, sortedCandidates]);
 
   return (
     <article className="rounded-md border border-slate-200 bg-white">
@@ -1136,7 +1408,8 @@ function DiscoveryCardShell({
               type="button"
               variant="outline"
               className="col-span-2 h-8 text-xs"
-              onClick={() => onOpenCreateNew(card)}
+              onClick={openCreateNew}
+              disabled={isPending}
             >
               Create new
             </Button>
@@ -1207,13 +1480,45 @@ function DiscoveryCardShell({
           </thead>
           <tbody>
             <tr className="border-b border-slate-100 align-top last:border-b-0">
-              <SubjectCell value={subject.projectName} />
-              <SubjectCell value={subject.canonicalAddress} />
-              <SubjectCell value={subject.developer} />
-              <SubjectCell value={subject.totalUnits} />
-              <SubjectCell value={subject.productType ?? subject.ageRestriction} />
-              <SubjectCell value={subject.pipelineStatus} />
-              <SubjectCell value={subject.stories} />
+              <SubjectEditCell
+                field="projectName"
+                value={subject.projectName}
+                onChange={(value) => setSubjectEdits((edits) => ({ ...edits, projectName: value }))}
+              />
+              <SubjectEditCell
+                field="canonicalAddress"
+                value={subject.canonicalAddress}
+                onChange={(value) =>
+                  setSubjectEdits((edits) => ({ ...edits, canonicalAddress: value }))
+                }
+              />
+              <SubjectEditCell
+                field="developer"
+                value={subject.developer}
+                onChange={(value) => setSubjectEdits((edits) => ({ ...edits, developer: value }))}
+              />
+              <SubjectEditCell
+                field="totalUnits"
+                value={subject.totalUnits}
+                onChange={(value) => setSubjectEdits((edits) => ({ ...edits, totalUnits: value }))}
+              />
+              <SubjectEditCell
+                field="productType"
+                value={subject.productType}
+                onChange={(value) => setSubjectEdits((edits) => ({ ...edits, productType: value }))}
+              />
+              <SubjectEditCell
+                field="pipelineStatus"
+                value={subject.pipelineStatus}
+                onChange={(value) =>
+                  setSubjectEdits((edits) => ({ ...edits, pipelineStatus: value }))
+                }
+              />
+              <SubjectEditCell
+                field="stories"
+                value={subject.stories}
+                onChange={(value) => setSubjectEdits((edits) => ({ ...edits, stories: value }))}
+              />
               <td className="py-3 pr-3 text-slate-500">Subject</td>
             </tr>
             {sortedCandidates.map((candidate, index) => (
@@ -1221,13 +1526,24 @@ function DiscoveryCardShell({
                 candidate={candidate}
                 isFocused={candidate.projectId === focusedCandidate?.projectId}
                 index={index}
+                isPending={isPending}
+                linkOpen={linkCandidateId === candidate.projectId}
                 key={candidate.projectId}
+                onCreateAndLink={() => createAndLinkCandidate(candidate)}
                 onFocus={() => setFocusedCandidateId(candidate.projectId)}
+                onMatch={() => matchCandidate(candidate)}
+                onToggleLink={() =>
+                  setLinkCandidateId((current) =>
+                    current === candidate.projectId ? null : candidate.projectId
+                  )
+                }
                 previewEntry={
                   candidate.projectId === focusedCandidate?.projectId
                     ? focusedPreviewEntry
                     : undefined
                 }
+                relationshipType={relationshipType}
+                onRelationshipTypeChange={setRelationshipType}
                 subject={subject}
               />
             ))}
@@ -1264,8 +1580,49 @@ function DiscoveryCardShell({
   );
 }
 
-function SubjectCell({ value }: { value: unknown }) {
-  return <td className="break-words py-3 pr-3 text-slate-800">{formatValue(value)}</td>;
+function SubjectEditCell({
+  field,
+  value,
+  onChange
+}: {
+  field: DiscoverySubjectEditField;
+  value: unknown;
+  onChange: (value: string) => void;
+}) {
+  const inputValue = formatInputValue(value);
+  if (field === "pipelineStatus" || field === "productType") {
+    const options = field === "pipelineStatus" ? SUBJECT_PIPELINE_STATUS_OPTIONS : SUBJECT_PRODUCT_TYPE_OPTIONS;
+    return (
+      <td className="py-3 pr-3">
+        <select
+          aria-label={`Subject ${humanize(camelToToken(field))}`}
+          className="h-8 w-full min-w-0 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+          value={inputValue}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          <option value="">-</option>
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      </td>
+    );
+  }
+  const type = field === "totalUnits" || field === "stories" ? "number" : "text";
+  return (
+    <td className="py-3 pr-3">
+      <Input
+        aria-label={`Subject ${humanize(camelToToken(field))}`}
+        className="h-8 min-w-0 px-2 text-xs"
+        min={type === "number" ? 0 : undefined}
+        onChange={(event) => onChange(event.target.value)}
+        type={type}
+        value={inputValue}
+      />
+    </td>
+  );
 }
 
 function CandidateHeaderCell({
@@ -1307,15 +1664,29 @@ function CandidateRow({
   candidate,
   isFocused,
   index,
+  isPending,
+  linkOpen,
+  onCreateAndLink,
   onFocus,
+  onMatch,
+  onRelationshipTypeChange,
+  onToggleLink,
   previewEntry,
+  relationshipType,
   subject
 }: {
   candidate: DiscoveryCandidate;
   isFocused: boolean;
   index: number;
+  isPending: boolean;
+  linkOpen: boolean;
+  onCreateAndLink: () => void;
   onFocus: () => void;
+  onMatch: () => void;
+  onRelationshipTypeChange: (value: string) => void;
+  onToggleLink: () => void;
   previewEntry: MatchPreviewCacheEntry | undefined;
+  relationshipType: string;
   subject: DiscoverySubject;
 }) {
   const overlaps = computeCandidateOverlaps(subject, candidate);
@@ -1351,8 +1722,79 @@ function CandidateRow({
         <NearSubjectChip overlap={overlaps.lat} />
         <CandidateSignalChips candidate={candidate} />
         {isFocused ? <MatchImpactPreview entry={previewEntry} /> : null}
+        {isFocused ? (
+          <CandidateRowActions
+            isPending={isPending}
+            linkOpen={linkOpen}
+            onCreateAndLink={onCreateAndLink}
+            onMatch={onMatch}
+            onRelationshipTypeChange={onRelationshipTypeChange}
+            onToggleLink={onToggleLink}
+            relationshipType={relationshipType}
+          />
+        ) : null}
       </td>
     </tr>
+  );
+}
+
+function CandidateRowActions({
+  isPending,
+  linkOpen,
+  onCreateAndLink,
+  onMatch,
+  onRelationshipTypeChange,
+  onToggleLink,
+  relationshipType
+}: {
+  isPending: boolean;
+  linkOpen: boolean;
+  onCreateAndLink: () => void;
+  onMatch: () => void;
+  onRelationshipTypeChange: (value: string) => void;
+  onToggleLink: () => void;
+  relationshipType: string;
+}) {
+  return (
+    <div className="mt-2 grid gap-1.5">
+      <Button type="button" className="h-7 px-2 text-xs" disabled={isPending} onClick={onMatch}>
+        Match
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        className="h-7 px-2 text-xs"
+        disabled={isPending}
+        onClick={onToggleLink}
+      >
+        <Link2 className="size-3" aria-hidden="true" />
+        Create + link
+      </Button>
+      {linkOpen ? (
+        <div className="grid gap-1 rounded border border-slate-200 bg-white/80 p-1.5">
+          <select
+            aria-label="Relationship type"
+            className="h-7 rounded-md border border-slate-200 bg-white px-1.5 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+            value={relationshipType}
+            onChange={(event) => onRelationshipTypeChange(event.target.value)}
+          >
+            {DISCOVERY_RELATIONSHIP_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <Button
+            type="button"
+            className="h-7 px-2 text-xs"
+            disabled={isPending}
+            onClick={onCreateAndLink}
+          >
+            Confirm link
+          </Button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1562,7 +2004,17 @@ function DiscoveryMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function CreateNewConfirmModal({ card, onClose }: { card: DiscoveryCard; onClose: () => void }) {
+function CreateNewConfirmModal({
+  card,
+  onClose,
+  onConfirm,
+  pending
+}: {
+  card: DiscoveryCard;
+  onClose: () => void;
+  onConfirm: () => void;
+  pending: boolean;
+}) {
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/30 px-4">
       <section
@@ -1581,11 +2033,96 @@ function CreateNewConfirmModal({ card, onClose }: { card: DiscoveryCard; onClose
           <p className="mt-0.5 text-xs text-slate-500">{card.subtitle}</p>
         </div>
         <div className="mt-4 flex justify-end gap-2">
-          <Button type="button" variant="outline" onClick={onClose}>
+          <Button type="button" variant="outline" onClick={onClose} disabled={pending}>
             Cancel
           </Button>
-          <Button type="button" disabled title="Create write action lands in 5E.">
-            Continue
+          <Button type="button" disabled={pending} onClick={onConfirm}>
+            {pending ? "Creating..." : "Continue"}
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function MatchDeltasModal({
+  prompt,
+  onClose,
+  onConfirm,
+  pending
+}: {
+  prompt: Exclude<MatchDeltasPrompt, null>;
+  onClose: () => void;
+  onConfirm: (acceptDeltas: string[]) => void;
+  pending: boolean;
+}) {
+  const [acceptedFields, setAcceptedFields] = useState<Set<string>>(new Set());
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/30 px-4">
+      <section
+        aria-labelledby="match-deltas-title"
+        className="max-h-[90dvh] w-full max-w-4xl overflow-auto rounded-md border border-slate-200 bg-white p-4 shadow-xl"
+        role="dialog"
+      >
+        <h2 id="match-deltas-title" className="text-base font-semibold text-slate-950">
+          Match with field differences
+        </h2>
+        <p className="mt-2 text-sm text-slate-600">
+          Match {prompt.card.title} to{" "}
+          {prompt.candidate.projectName ?? prompt.candidate.canonicalAddress ?? "this project"}.
+          Checked fields update the matched project now; unchecked fields become value-change review
+          items.
+        </p>
+        <div className="mt-4 grid gap-3">
+          {prompt.deltas.map((delta) => {
+            const checked = acceptedFields.has(delta.fieldName);
+            return (
+              <label
+                key={delta.fieldName}
+                className="grid gap-3 rounded-md border border-slate-200 p-3"
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    checked={checked}
+                    className="size-4 accent-teal-700"
+                    onChange={(event) => {
+                      setAcceptedFields((current) => {
+                        const next = new Set(current);
+                        if (event.target.checked) {
+                          next.add(delta.fieldName);
+                        } else {
+                          next.delete(delta.fieldName);
+                        }
+                        return next;
+                      });
+                    }}
+                    type="checkbox"
+                  />
+                  <span className="text-sm font-medium text-slate-950">
+                    Accept {delta.valueChange.fieldLabel}
+                  </span>
+                </div>
+                <ThreeFieldEditor
+                  compact
+                  editable={false}
+                  resultValue={formatInputValue(delta.valueChange.defaultResultValue)}
+                  valueChange={delta.valueChange}
+                />
+              </label>
+            );
+          })}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            disabled={pending}
+            onClick={() => onConfirm(Array.from(acceptedFields))}
+          >
+            {pending ? "Matching..." : "Confirm match"}
           </Button>
         </div>
       </section>
@@ -2359,6 +2896,14 @@ function nextFocusAfterItem(groups: ReviewGroup[], itemId: string) {
     return null;
   }
   return flattened[index + 1] ?? flattened[index - 1] ?? null;
+}
+
+function nextDiscoveryCardKey(cards: DiscoveryCard[], cardKey: string) {
+  const index = cards.findIndex((card) => card.key === cardKey);
+  if (index < 0) {
+    return cards[0]?.key ?? null;
+  }
+  return cards[index + 1]?.key ?? cards[index - 1]?.key ?? null;
 }
 
 function itemMatchesFilters(

@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-14 (Item 5D-2 ready for review; sortable table + match chips + row bands)
+> **Last updated:** 2026-05-17 (Item 5E post-review hardening; 5G MapPopup split)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -342,9 +342,10 @@ Phase 4 — Dedup table (days 10-19)
 1. **5A — Backend retrieval + indexes:** pg_trgm migration, PostGIS index verification, similarity helpers emitting per-signal `{score, contributed, searched, label, detail, weight}`, layered candidate retrieval with a top-level `searched` descriptor for the confident empty state, backend tests covering per-signal contributions and `searched` content.
 2. **5B — Candidate API endpoint:** `GET /review/queue/{item_id}/candidates` returning the per-signal payload + `searched` block + `new_candidate_probability`; separate `GET /review/items/{item_id}/match-preview?candidate_id=...` endpoint for the row-focused impact-preview line; subject payload normalization; response schemas; API tests.
 3. **5C — Discovery tab shell:** tab routing/state, discovery item grouping, empty/loading/error states, basic card shell.
-4. **5D — Candidate table + overlap:** subject-row editor, candidate table with sortable columns, cell-level overlap highlighting, per-row signal chips rendering `match_signals` (green/gray/hidden), row color band by likelihood (paired with the numeric percentage, not replacing it), confident empty state rendering the `searched` block, keyboard navigation into the table (`1`–`9` row select, `m` Match, `n` Create-new with confirm modal, `l` link-dropdown), map popup.
+4. **5D — Candidate table + overlap:** subject-row editor, candidate table with sortable columns, cell-level overlap highlighting, per-row signal chips rendering `match_signals` (green/gray/hidden), row color band by likelihood (paired with the numeric percentage, not replacing it), confident empty state rendering the `searched` block, keyboard navigation into the table (`1`–`9` row select, `m` Match, `n` Create-new with confirm modal, `l` link-dropdown).
 5. **5E — Match/Create actions:** atomic `edits` write path, match-with-deltas confirm step (reusing the generalized ThreeFieldEditor UI model), create/link actions with `relationship_type ∈ {phase, master_plan, counterpart, supersedes}` (no `duplicate`), Create-new confirm modal, audit/change-log entries with "absorbed reference X from source S" framing, focused-row impact-preview line backed by the match-preview endpoint, action tests.
-6. **5F — End-to-end validation:** synthetic and real queue walkthroughs (including a no-candidate card to validate the confident empty state, a multi-signal Layer-1 card to validate chip rendering, and a 1000+ unit project to keep the Item 3 number-formatting regression closed), live-update behavior, performance check (<500ms per card), docs/roadmap completion, promote ROADMAP row to `done`.
+6. **5F — End-to-end validation:** synthetic and real queue walkthroughs (including a no-candidate card to validate the confident empty state, a multi-signal Layer-1 card to validate chip rendering, a permit card to exercise `_fallback_subject_from_payload`, and a 1000+ unit project to keep the Item 3 number-formatting regression closed), live-update behavior, performance check (<500ms per card), docs/roadmap completion.
+7. **5G — MapPopup:** small standalone map slice with MapLibre popup/modal, subject pin, numbered candidate pins matching table row order, and dismiss behavior.
 
 **Sub-tasks:**
 
@@ -422,10 +423,10 @@ Phase 4 — Dedup table (days 10-19)
 - [x] **List view** shows discovery items grouped by review item/reference (one card per `new_candidate` / `possible_match` item).
 - [ ] **DedupCard component:**
   - [x] Header: source name (small), project name (if extracted), project address, `Potential matches: N` and `New candidate probability: X%` indicators
-  - [ ] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`. **5D-1 note:** read-only subject row now uses `/candidates` response subject when loaded; inline editing remains 5D-4/5E.
+  - [x] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`. **5E note:** displayed subject fields now edit locally and serialize into the write-action `edits` payload.
   - [x] Candidate table below (5D-1 raw table; chips/bands/sort landed in 5D-2; overlap landed in 5D-3)
   - [x] **Confident empty state** when no candidates returned: render the API response's `searched` block as a paragraph (e.g., "No candidates found within 1km. Searched by APN, CoStar Property ID, normalized address, name/address trigrams (threshold from `searched.layer_2.trigram_min_score`), and canonical developer match. None passed Layer 1 or Layer 2 thresholds."). Do not render a bare empty table — reviewers second-guess silent failure.
-  - [x] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action. **5D-4 note:** modal shell is in place; the create write remains 5E.
+  - [x] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action. **5E note:** modal now calls the create write action and auto-advances on success.
 - [ ] **CandidateTable component:**
   - [x] Columns from the agreed list (5D-1 raw columns: project name, address, developer, total units, product type/age, status, building height, match likelihood; remaining unit split + lat/lng refinements land with 5D-2/5D-3 table work)
   - [x] Sortable by clicking column headers. Layer precedence remains primary for every sort so Layer 1 hard-signal candidates never get buried below Layer 2/3 rows.
@@ -437,7 +438,7 @@ Phase 4 — Dedup table (days 10-19)
   - [x] **Row color band by match-likelihood**, paired with (not replacing) the numeric percentage. Layer 1 candidates render with a green band; Layer 2 with a green-to-yellow-to-orange gradient by likelihood; Layer 3 with a neutral gray band. The band reads in <200ms; the number is still there for ties and precision.
   - [x] **Per-signal chips inline next to the match-likelihood column.** Render one chip per signal from `match_signals` (geographic, address, name, developer, units, product_type, identifier when present). Green chip when `contributed=true`; gray when searched but not contributed; omitted when the subject lacked the field. Each chip's tooltip shows the underlying `score` and `detail`. This is the "why it matched" surface — reviewer scans reasons in under a second.
   - [x] **Layer 3 "show more" affordance** using `include_layer3=true` (or `layer=3`) when the API returns `layer_3_available=true`.
-  - [ ] Per-row actions: `Match to this`, `Create new + link as ▾` (dropdown shows `phase` / `master_plan` / `counterpart` / `supersedes` — see §8.6 for the rationale on dropping `duplicate` from this dropdown).
+  - [x] Per-row actions: `Match to this`, `Create new + link as ▾` (dropdown shows `phase` / `master_plan` / `counterpart` / `supersedes` — see §8.6 for the rationale on dropping `duplicate` from this dropdown).
   - [x] **Impact preview line** on the focused candidate row, fetched lazily from `GET /review/items/{item_id}/match-preview?candidate_id=...` (see §8.4). Renders as a single line ("This will close 3 open review items and reattach 4 evidence rows to project X.") above the per-row Match button so the reviewer sees the blast radius before committing.
   - [ ] Pre-existing review-item badge `⚠ N open` (hover-popover lists them)
   - [ ] Match-likelihood column at right, sortable
@@ -445,28 +446,31 @@ Phase 4 — Dedup table (days 10-19)
 - [ ] **Keyboard navigation into the candidate table.** Extends the existing `[`/`]` queue navigation (C.k.1).
   - [x] `↑`/`↓` move focus between candidate rows on the active card.
   - [x] `1`–`9` quick-select the corresponding candidate row.
-  - [ ] `m` triggers Match-to-this on the focused row (opens match-with-deltas modal if there are field disagreements with the subject; otherwise commits directly).
+  - [x] `m` triggers Match-to-this on the focused row (opens match-with-deltas modal if there are field disagreements with the subject; otherwise commits directly).
   - [x] `n` triggers the card-header Create-new flow — opens the confirm modal first, doesn't write on the keypress alone (matches the friction step above).
-  - [ ] `l` opens the relationship dropdown on the focused row's Create-new-link action.
-- [ ] **MapPopup component:** opened by a map icon button on the card header. Renders MapLibre map showing subject pin + numbered candidate pins corresponding to table row numbers. Click outside or close button dismisses.
-- [ ] **Match-with-deltas modal:** when reviewer clicks `Match to this` and the subject has any field values that disagree with the matched project's current values, show a confirm step listing the deltas with checkboxes for which to apply. Reuse the generalized ThreeFieldEditor value-change UI model for each delta row.
+  - [x] `l` opens the relationship dropdown on the focused row's Create-new-link action.
+- [ ] **MapPopup component (5G):** opened by a map icon button on the card header. Renders MapLibre map showing subject pin + numbered candidate pins corresponding to table row numbers. Click outside or close button dismisses.
+- [x] **Match-with-deltas modal:** when reviewer clicks `Match to this` and the subject has any field values that disagree with the matched project's current values, show a confirm step listing the deltas with checkboxes for which to apply. Reuse the generalized ThreeFieldEditor value-change UI model for each delta row.
 - [ ] **Live updates after match/create:**
-  - [ ] On successful Create or Create+link, push the new project onto the local candidate cache so subsequent cards see it
-  - [ ] On Match-to-this, mark the matched project in the cache so subsequent cards can sort it higher
+  - [x] On successful Match/Create/Create+link, invalidate Discovery candidate + preview caches and refresh the queue so subsequent cards refetch against the updated project/reference state.
+  - [ ] Optimistically inject or pin newly-created/matched projects in already-loaded subsequent card caches. Current 5E behavior relies on refetch; 5F validation should decide whether that is enough or whether explicit session-local promotion is needed.
 
 ### 8.6 Backend write actions
-- [ ] **Write payload convention:** `edits` always targets the source/reference row (`news_project_references.candidate_*` or the analogous permit subject payload) before the reviewer commits the action. `project_fields` is the create-shape for the new `Project`; for create flows it may include corrected subject values, but it does not replace the source-row correction audit.
-- [ ] **Relationship-type vocabulary for the Discovery flow** is `{phase, master_plan, counterpart, supersedes}`. **`duplicate` is intentionally NOT in this set.** The Discovery flow operates on `article → existing-project` or `article → new-project`; "Create new + link as duplicate" is a semantic contradiction (if the subject is the same underlying project as N, the right action is Match-to-this, not Create). Project-to-project duplicate marking is a separate decision that operates on two already-persisted projects and is deferred to a future `UX.project-merge` workflow (see Deferred follow-ons below and the ROADMAP row).
-- [ ] **`POST /review/items/{item_id}/match`** — body: `{matched_project_id, edits: {...}, accept_deltas: [field_name, ...]}`. Applies subject edits atomically, updates `news_project_references.matched_project_id` (or analogous for permits), closes review item, optionally writes value-change review items for non-accepted deltas (so they queue for normal review). Audit row in `change_log` with explicit "absorbed reference X from source S on date D by user U" framing — both the surviving project's Activity tab and the audit trail need to be able to point at the source reference after the merge.
-- [ ] **`POST /review/items/{item_id}/create-and-link`** — body: `{relationship_type, related_project_id, project_fields, edits: {...}}` where `relationship_type ∈ {phase, master_plan, counterpart, supersedes}`. Applies subject edits atomically, creates Project, creates `project_relationships` row, closes review item. Audit rows.
-- [ ] **`POST /review/items/{item_id}/create`** — body: `{project_fields, edits: {...}}`. Applies subject edits atomically, creates Project (unlinked), closes review item. Audit row.
+- [x] **Write payload convention:** `edits` always targets the source/reference row (`news_project_references.candidate_*` or the analogous permit subject payload) before the reviewer commits the action. `project_fields` is the create-shape for the new `Project`; for create flows it may include corrected subject values, but it does not replace the source-row correction audit.
+- [x] **Relationship-type vocabulary for the Discovery flow** is `{phase, master_plan, counterpart, supersedes}`. **`duplicate` is intentionally NOT in this set.** The Discovery flow operates on `article → existing-project` or `article → new-project`; "Create new + link as duplicate" is a semantic contradiction (if the subject is the same underlying project as N, the right action is Match-to-this, not Create). Project-to-project duplicate marking is a separate decision that operates on two already-persisted projects and is deferred to a future `UX.project-merge` workflow (see Deferred follow-ons below and the ROADMAP row).
+- [x] **`POST /review/items/{item_id}/match`** — body: `{matched_project_id, edits: {...}, accept_deltas: [field_name, ...]}`. Applies subject edits atomically, updates `news_project_references.matched_project_id` (or analogous for permits), closes review item, optionally writes value-change review items for non-accepted deltas (so they queue for normal review). Audit row in `change_log` with explicit "absorbed reference X from source S on date D by user U" framing — both the surviving project's Activity tab and the audit trail need to be able to point at the source reference after the merge.
+- [x] **`POST /review/items/{item_id}/create-and-link`** — body: `{relationship_type, related_project_id, project_fields, edits: {...}}` where `relationship_type ∈ {phase, master_plan, counterpart, supersedes}`. Applies subject edits atomically, creates Project, creates `project_relationships` row, closes review item. Audit rows.
+- [x] **`POST /review/items/{item_id}/create`** — body: `{project_fields, edits: {...}}`. Applies subject edits atomically, creates Project (unlinked), closes review item. Audit row.
+- [x] **Reject unsupported subject-edit keys.** Match/Create write payloads now return 422 for unknown `edits` keys instead of silently dropping them, so client drift cannot no-op without visibility.
+- [x] **No-reference create fallback.** Permit/fallback Discovery creates derive market, jurisdiction, state, city, and county from `review_item.source_run` metadata before failing, avoiding placeholder `unknown`/`Unknown` project fields.
 
 ### 8.7 Tests
 - [x] Backend retrieval: fixtures exercise each Layer; ordering correct; overlap signals correctly computed
 - [x] Backend match-likelihood: each component returns 0-1; missing-field rebalancing works
 - [x] Backend retrieval: `searched` block emitted with the expected probes per layer; per-signal `contributed` flag agrees with score threshold
-- [ ] Backend action endpoints: each writes the correct rows + closes the item; Match-to-this `change_log` row contains "absorbed reference X from source S" framing
-- [ ] Backend action endpoints: `relationship_type` validator rejects `duplicate` for create-and-link
+- [x] Backend action endpoints: each writes the correct rows + closes the item; Match-to-this `change_log` row contains "absorbed reference X from source S" framing
+- [x] Backend action endpoints: `relationship_type` validator rejects `duplicate` for create-and-link
+- [x] Backend action endpoints: unknown subject-edit keys are rejected and no-reference creates use source-run market context
 - [x] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
 - [ ] Frontend: component tests for DedupCard / SubjectRow / CandidateTable / MapPopup
 - [x] Frontend helper tests for Discovery item filtering, one-card-per-review-item grouping, and subject normalization
@@ -474,6 +478,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Frontend helper tests: row color-band tone agrees with match layer / likelihood thresholds
 - [x] Frontend helper tests: cell-level overlap detection covers text substrings, cross-field unit equality, status/product exact matches, story proximity, and coordinate distance
 - [x] Frontend helper tests: candidate keyboard focus helpers and match-preview impact copy
+- [x] Frontend helper tests: match-with-deltas computation and subject-edit serialization for atomic write payloads
 - [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
 - [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
 - [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
@@ -511,8 +516,15 @@ Phase 4 — Dedup table (days 10-19)
 
 **5D-4 lessons learned:**
 - Fetch impact previews on focused rows only, with a short debounce and a `(review_item, candidate)` cache. Hover-driven preview calls would turn normal table scanning into unnecessary API churn.
-- Keep the Create-new friction step parent-owned. The write action is still 5E, but modal ownership now lives beside focused-card state so auto-advance can close stale prompts cleanly when writes land.
+- Keep the Create-new friction step parent-owned. Modal ownership lives beside focused-card state so write success can close stale prompts and auto-advance in one place.
 - Treat Layer 3 as an explicit reviewer expansion, not an empty-state-only fallback. The broader sweep can be useful even when Layer 1/2 produced plausible matches.
+
+**5E lessons learned:**
+- Keep subject edits as client-local state until the reviewer commits Match/Create. The backend write action applies reference edits, project mutation, item closure, and audit rows inside one transaction so partial writes cannot strand edited reference data.
+- Match-with-deltas should default to queuing disagreements for normal value-change review unless the reviewer explicitly checks the field for immediate application. This keeps Match-to-this safe while still allowing fast acceptance of obvious source-side corrections.
+- Cache invalidation is the v1 live-update mechanism. It avoids stale candidate tables after Match/Create without inventing an optimistic project model before the end-to-end walkthrough proves that extra complexity is needed.
+- Reject unknown edit keys at the API boundary. Forgiving payload handling hides client drift; 422s make bad subject-edit serialization visible before any match/create side effect lands.
+- Permit/fallback Discovery cards need source-run context when creating projects. If no `NewsProjectReference` exists, derive market/jurisdiction fields from `review_item.source_run` and fail instead of writing placeholder geography.
 
 **Deferred follow-ons:**
 
@@ -521,6 +533,8 @@ Phase 4 — Dedup table (days 10-19)
 - **Canonical developer lookup index.** `_add_developer_secondary_hard_signals` currently scopes to the market and normalizes non-null developer names in Python. This is acceptable for Los Angeles cycle 1 scale; Phase H or multi-market volume should add a `projects.canonical_developer` column (trigger/backfill populated) with a btree index so developer-secondary hard matches become SQL equality.
 - **Layer 2 weight/threshold calibration.** Calibrate `MATCH_SIGNAL_WEIGHTS` and `TRIGRAM_MIN_SCORE` after cycle 1's first real walkthrough surfaces ranking complaints. Skip pre-calibration guesswork until the Discovery tab is running against organic queue items.
 - **Audit-the-survivor surface on project detail.** Lesson from CRM merge UIs: when Match-to-this lands, the surviving project's Activity tab should render "Absorbed reference X from source S on date D by user U" as a discoverable history entry. Item 5's `change_log` row carries the data; verify the existing Activity feed renders it usefully and add an explicit row template if not.
+- **Discovery match status vocabulary.** First-time researcher Match-to-this currently stores `NewsMatchStatus.MANUAL_RELINK` with `match_reason="discovery_match"` to distinguish human action from automated matching. The enum name implies a prior link existed; consider adding a clearer `RESEARCHER_MATCH` value or using `CONFIRMED` plus `match_reason` after cycle 1 validates downstream assumptions.
+- **Cross-market match validation for Phase H.** Match-to-this accepts any project UUID today. LA-only cycle 1 keeps that safe enough, but multi-market activation should reject candidates whose `market_id` does not match the subject/source market unless an explicit cross-market override exists.
 
 ---
 

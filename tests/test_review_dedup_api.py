@@ -4,18 +4,21 @@ import uuid
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.routers import review as review_router
 from tcg_pipeline.db.models import (
+    ChangeLog,
     Evidence,
+    Jurisdiction,
     Market,
     NewsArticle,
     NewsExtraction,
     NewsExtractionPass,
     NewsFetchStatus,
+    NewsMatchStatus,
     NewsProjectReference,
     NewsReferenceConfidence,
     NewsSource,
@@ -24,9 +27,12 @@ from tcg_pipeline.db.models import (
     Priority,
     ProductType,
     Project,
+    ProjectRelationship,
+    RelationshipType,
     ReviewItem,
     ReviewItemStatus,
     ReviewItemType,
+    SourceRun,
 )
 
 
@@ -87,6 +93,208 @@ def test_match_preview_counts_same_reference_siblings_and_uses_shared_deltas(
         "total_units",
         "stories",
     ]
+
+
+def test_match_review_item_to_project_updates_reference_and_queues_deltas(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_dedup_test_schema(postgres_session)
+    fixture = _news_discovery_fixture(postgres_session)
+    reference = fixture["reference"]
+    project = fixture["project"]
+    sibling = ReviewItem(
+        item_type=ReviewItemType.LOW_CONFIDENCE,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.LOW,
+        payload={"source_record_id": str(reference.id)},
+    )
+    evidence = _evidence(reference, project_id=None)
+    postgres_session.add_all([sibling, evidence])
+    postgres_session.flush()
+
+    response = review_router.match_review_item_to_project(
+        fixture["review_item"].id,
+        payload=review_router.ReviewDedupMatchRequest(
+            matched_project_id=project.id,
+            accept_deltas=["developer"],
+        ),
+        user=_auth_user(),
+        session=postgres_session,
+    )
+
+    assert response.project_id == project.id
+    assert response.reference_id == reference.id
+    assert response.closed_review_items == 2
+    assert response.evidence_rows_reattached == 1
+    assert response.value_change_items_queued == ["total_units", "stories"]
+    assert reference.matched_project_id == project.id
+    assert reference.match_status == NewsMatchStatus.MANUAL_RELINK.value
+    assert evidence.project_id == project.id
+    assert project.developer == "Atlas Development"
+    postgres_session.flush()
+    queued_fields = set(
+        postgres_session.execute(
+            select(ReviewItem.field_name).where(
+                ReviewItem.project_id == project.id,
+                ReviewItem.item_type == ReviewItemType.STATUS_CHANGE,
+                ReviewItem.state == "open",
+            )
+        ).scalars()
+    )
+    assert queued_fields == {"total_units", "stories"}
+    source_reference_log = postgres_session.execute(
+        select(ChangeLog).where(
+            ChangeLog.project_id == project.id,
+            ChangeLog.field == "source_reference",
+        )
+    ).scalar_one()
+    assert "Absorbed reference" in source_reference_log.new_value["summary"]
+
+
+def test_match_review_item_rejects_unknown_edit_fields(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_dedup_test_schema(postgres_session)
+    fixture = _news_discovery_fixture(postgres_session)
+    reference = fixture["reference"]
+    project = fixture["project"]
+
+    with pytest.raises(Exception) as exc_info:
+        review_router.match_review_item_to_project(
+            fixture["review_item"].id,
+            payload=review_router.ReviewDedupMatchRequest(
+                matched_project_id=project.id,
+                edits={"junk_field": "value"},
+            ),
+            user=_auth_user(),
+            session=postgres_session,
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 422
+    assert "unsupported field" in str(getattr(exc_info.value, "detail", ""))
+    assert reference.matched_project_id is None
+
+
+def test_create_project_from_review_item_applies_edits_and_closes_item(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_dedup_test_schema(postgres_session)
+    fixture = _news_discovery_fixture(postgres_session)
+    reference = fixture["reference"]
+    review_item = fixture["review_item"]
+
+    response = review_router.create_project_from_review_item(
+        review_item.id,
+        payload=review_router.ReviewDedupCreateRequest(
+            edits={
+                "project_name": "Fig Tower Revised",
+                "canonical_address": "200 Fig St",
+                "total_units": "180",
+            },
+            project_fields={
+                "project_name": "Fig Tower Revised",
+                "canonical_address": "200 FIG ST LOS ANGELES CA",
+                "city": "Los Angeles",
+                "state": "CA",
+                "county": "Los Angeles",
+                "total_units": 180,
+            },
+        ),
+        user=_auth_user(),
+        session=postgres_session,
+    )
+
+    project = postgres_session.get(Project, response.project_id)
+    assert project is not None
+    assert project.project_name == "Fig Tower Revised"
+    assert project.total_units == 180
+    assert reference.candidate_name == "Fig Tower Revised"
+    assert reference.candidate_unit_total == 180
+    assert reference.matched_project_id == project.id
+    assert reference.match_status == NewsMatchStatus.CONFIRMED.value
+    assert review_item.state == "committed"
+    assert response.closed_review_items == 1
+    assert response.value_change_items_queued == []
+
+
+def test_create_project_from_payload_subject_uses_source_run_market_context(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_dedup_test_schema(postgres_session)
+    market = Market(slug=f"permit-market-{uuid.uuid4().hex[:8]}", name="Los Angeles", state="CA")
+    jurisdiction = Jurisdiction(
+        slug=f"permit-jurisdiction-{uuid.uuid4().hex[:8]}",
+        name="Los Angeles",
+        state="CA",
+        market=market,
+    )
+    source_run = SourceRun(
+        market=market.slug,
+        jurisdiction=jurisdiction,
+        source_name="ladbs_permit",
+        collection_mode="incremental",
+    )
+    review_item = ReviewItem(
+        source_run=source_run,
+        item_type=ReviewItemType.NEW_CANDIDATE,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.HIGH,
+        payload={
+            "mapped_fields": {
+                "project_name": "Permit Tower",
+                "canonical_address": "300 FIG ST LOS ANGELES CA",
+                "developer": "Atlas Development",
+                "total_units": 88,
+                "stories": 7,
+                "pipeline_status": PipelineStatus.APPROVED.value,
+            }
+        },
+    )
+    postgres_session.add_all([market, jurisdiction, source_run, review_item])
+    postgres_session.flush()
+
+    response = review_router.create_project_from_review_item(
+        review_item.id,
+        payload=review_router.ReviewDedupCreateRequest(),
+        user=_auth_user(),
+        session=postgres_session,
+    )
+
+    project = postgres_session.get(Project, response.project_id)
+    assert project is not None
+    assert project.market == market.slug
+    assert project.market_id == market.id
+    assert project.city == "Los Angeles"
+    assert project.state == "CA"
+    assert project.county == "Los Angeles"
+    assert project.jurisdiction_id == jurisdiction.id
+    assert project.project_name == "Permit Tower"
+    assert project.total_units == 88
+    assert project.stories == 7
+
+
+def test_create_and_link_rejects_duplicate_relationship_type(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_dedup_test_schema(postgres_session)
+    fixture = _news_discovery_fixture(postgres_session)
+
+    with pytest.raises(Exception) as exc_info:
+        review_router.create_project_and_link_from_review_item(
+            fixture["review_item"].id,
+            payload=review_router.ReviewDedupCreateAndLinkRequest(
+                relationship_type=RelationshipType.DUPLICATE.value,
+                related_project_id=fixture["project"].id,
+                project_fields={"county": "Los Angeles"},
+            ),
+            user=_auth_user(),
+            session=postgres_session,
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 422
+    assert postgres_session.execute(select(ProjectRelationship)).scalars().all() == []
 
 
 def test_same_reference_open_review_item_count_counts_subject_and_siblings(
@@ -265,13 +473,17 @@ def _ensure_review_dedup_test_schema(
     inspector = inspect(postgres_session.bind)
     required_tables = {
         "evidence",
+        "change_log",
+        "jurisdictions",
         "markets",
         "news_articles",
         "news_extractions",
         "news_project_references",
         "news_sources",
+        "project_relationships",
         "projects",
         "review_items",
+        "source_runs",
     }
     missing = [table_name for table_name in required_tables if not inspector.has_table(table_name)]
     if missing:
