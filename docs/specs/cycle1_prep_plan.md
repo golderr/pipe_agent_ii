@@ -617,3 +617,11 @@ Phase 4 — Dedup table (days 10-19)
 Mark sub-tasks complete by changing `[ ]` to `[x]`. Append per-item lessons learned at the bottom of each item's section. Update the **Last updated** date at the top whenever the plan changes.
 
 When all six items are `done`, link this document from the AGENT.reset row in ROADMAP and we begin cycle 1 prep.
+
+---
+
+## 12. Deferred follow-ons
+
+Plans developed during cycle 1 prep that intentionally land outside this document's scope. Trail runs both directions — each follow-on has its own roadmap rows and operational doc.
+
+- **News extraction expansion (D.EXP.\*)** — three-stage Primary → Verifier → Arbiter pipeline + 15 new candidate fields + closed audit on 14 high-stakes targets. Forward-compatible foundation (`D.EXP.0` / `D.EXP.1` / `D.EXP.2` / `D.EXP.10`) lands in parallel with `AGENT.reset` cycle 1; A/B + downstream wiring runs post-cycle-1. Canonical reference: `docs/specs/news_extraction_expansion_overview.md`. Post-deployment automated review runbook: `docs/operations/reviewer_usefulness_review.md`. Deferred sub-items captured as `D.EXP.late.*` rows in ROADMAP.
