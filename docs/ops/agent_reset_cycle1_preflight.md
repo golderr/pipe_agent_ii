@@ -1,0 +1,168 @@
+# AGENT.reset Cycle 1 Preflight
+
+> **Status:** Preflight packet prepared 2026-05-18. `AGENT.reset` R.1/R.2
+> remains gated until the active news integration alert is resolved and the
+> senior reviewer approves the destructive reset sequence.
+>
+> **Last updated:** 2026-05-18.
+> **Maintained by:** Nate Goldstein + Claude Code.
+
+---
+
+## Scope
+
+This packet captures the read-only kickoff verification before the first
+`AGENT.reset` stabilization cycle. It does not authorize or perform backup,
+truncate, reseed, collector replay, backfill, or D.EXP schema work.
+
+## Verification Run
+
+Local artifact directory:
+
+```text
+data/output/agent_reset/reset-20260518-preflight/
+```
+
+Artifacts are intentionally under `data/output/` and are ignored by git. The
+status report summarizes the durable signals.
+
+### Render Deploy State
+
+- API service `srv-d7sfvt7avr4c73b4uj20`: latest deploy `dep-d85mig4m0tmc739linv0`, status `live`, commit `5de9905a5d976a7d4c1bd2123a39e2f1cf33af48`.
+- Worker service `srv-d7sfvt7avr4c73b4uj2g`: latest deploy `dep-d85mig4m0tmc739linag`, status `live`, commit `5de9905a5d976a7d4c1bd2123a39e2f1cf33af48`.
+- API and worker env gates: `AGENT_ENABLED_FOR_NEWS=true`, `AGENT_ENABLED_FOR_PERMITS=true`, `AGENT_ALLOW_LIVE_LLM=true`, profile overrides unset, `NEWS_USE_LEGACY_SEMANTIC=false`, `NEWS_USE_LEGACY_PASS3=false`.
+
+### Permit Cutover Source Run
+
+Command:
+
+```powershell
+tcg-pipeline permit-agent-smoke-report `
+  --source-run-id 50005ea8-fcbe-486f-b88c-1f69d0ff07e3 `
+  --min-agent-runs 25 `
+  --max-agent-runs 25 `
+  --require-outcomes completed `
+  --max-total-cost-usd 2 `
+  --output data/output/agent_reset/reset-20260518-preflight/permit-agent-cutover-source-run.json
+```
+
+Result:
+
+- Source run: `50005ea8-fcbe-486f-b88c-1f69d0ff07e3`.
+- Source: `los_angeles/ladbs_permits`.
+- Records pulled: 25.
+- Agent runs: 25.
+- Outcomes: `completed=25`.
+- Triggers: `new_candidate=25`.
+- Review item types: `new_candidate=25`.
+- Status-regression agent runs: 0.
+- Status-regression review items: 0.
+- Duplicate status-regression projects: 0.
+- Missing review links: 0.
+- Total cost: `$1.584786`.
+
+### Discovery Candidate Spot Check
+
+Read-only DB spot check covered the five documented 5H permit cards:
+
+- `104ddd4e-ca5b-495a-9ddf-1b5cd91bb539`
+- `2846ecec-fb32-4fa6-9ce0-1a962392cd5c`
+- `897209d5-f172-4f6f-a10d-1f382854de06`
+- `2daffd30-13d1-4591-8613-32d4408ab9b6`
+- `59464849-e104-47b2-af69-ec1ef3e2a4a5`
+
+Result:
+
+- Source run market is `los_angeles`; jurisdiction is null.
+- Source run has 25 review items, all still open.
+- Each checked card is `new_candidate`, status `open`, and reference-less.
+- Each checked card returns 25 candidates with `layer_3_available=true`.
+- Local DB timing across three runs per card: min 138.1 ms, median-of-medians 169.9 ms, max 392.0 ms.
+
+This confirms the documented permit cards still exercise the reference-less
+Discovery path that depends on source-run market context.
+
+### News Observation
+
+The broad `tcg-pipeline news-agent-smoke-report --hours 24 --source-name urbanize_la`
+preflight timed out locally after 184 seconds and left no JSON artifact. The
+orphaned local process was terminated.
+
+Narrow SQL checks were run instead and written to:
+
+```text
+data/output/agent_reset/reset-20260518-preflight/news-agent-24h-sql-preflight.json
+```
+
+Result:
+
+- One Urbanize source run in the last 24 hours.
+- Four Urbanize scrape jobs in the last 24 hours.
+- Zero failed news agent runs in the last 24 hours.
+- One active news alert: `news_integrate_failed`.
+- Recent news bucket spend is low (`agent.news_v1=$0.168396`, `semantic.news_v1=$0.201132`, extraction `$0.166033`, triage `$0.004746` for 2026-05-18).
+
+The full news smoke must still pass before R.1, either by rerunning the standard
+24-hour command from a faster network path or by using an approved narrower
+window such as `--hours 6`. The SQL substitute is sufficient for this preflight
+packet but is not the final cycle-start monitoring baseline.
+
+Dry-run recovery command:
+
+```powershell
+tcg-pipeline news reprocess-stranded `
+  --article-id 753cb948-4b97-4d79-94af-67b1e407f301
+```
+
+Dry-run result:
+
+- One stranded article found: `753cb948-4b97-4d79-94af-67b1e407f301`.
+- Title: `Soaring above the 17-acre One Beverly Hills site`.
+- Source run: `be6a18a9-7a89-4694-b576-1ce0ab12d0cf`.
+- Reference state: `1/1 pending`.
+- Trigger: `possible_multi_candidate`.
+- Last failed job: `e2bcb09f-c375-4898-b05b-78c2093d824f`.
+- Last error: Supabase pooler SSL `bad record mac`.
+- No `--apply` was run during this preflight.
+
+### Data-Quality Observations
+
+The 2026-05-18 Urbanize source run `be6a18a9-7a89-4694-b576-1ce0ab12d0cf`
+has `market='unscoped'`. This is non-blocking for the permit 5H source-run-market
+path because the LADBS permit cutover source run checked above has
+`market='los_angeles'` and the five reference-less permit cards depend on that
+LA slug.
+
+Brief code/log investigation found this is expected for scheduled Urbanize, not
+a newly discovered source-run insertion bug. `docs/sources/news/urbanize_la.md`
+documents that `urbanize_la` is seeded without market or jurisdiction so the
+matcher can decide relevance across live and future markets. The scheduler path
+in `src/tcg_pipeline/workers/news_jobs.py` writes `source.market.slug` when a
+source has one and otherwise writes `"unscoped"`; tests such as
+`tests/test_d6_urbanize_smoke.py` use the same shape. The open question for
+future cycles is not whether this row should be LA-scoped, but whether any
+reference-less Create flow for news-backed cards should ever depend on
+`source_run.market`; today news-backed cards use persisted `NewsProjectReference`
+context, while the 5H bug fix targeted permit/fallback cards.
+
+## Gates Before R.1/R.2
+
+- Resolve or explicitly accept the active `news_integrate_failed` alert before
+  the reset cycle starts.
+- Re-run the 24-hour news smoke or an approved narrower substitute after
+  recovery, so the cycle starts from a known-clean monitoring state.
+- Get senior reviewer approval for the destructive reset sequence.
+- Take the R.1 rollback-capable backup before any truncate or reseed action.
+
+## Next Action
+
+Recommended next action is a senior-reviewed decision on whether to run:
+
+```powershell
+tcg-pipeline news reprocess-stranded `
+  --article-id 753cb948-4b97-4d79-94af-67b1e407f301 `
+  --apply
+```
+
+After the recovery job completes, rerun the news smoke/checks and update this
+packet with the cleared-alert evidence before proceeding to `AGENT.reset` R.1.
