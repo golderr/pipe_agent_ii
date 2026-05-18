@@ -3,8 +3,8 @@
 > **Last updated:** 2026-05-18.
 >
 > **Cycle 1 preflight:** see `docs/ops/agent_reset_cycle1_preflight.md` for the
-> 2026-05-18 kickoff verification packet and the open gate discovered before
-> R.1/R.2.
+> 2026-05-18 kickoff verification packet, recovery closeout, and R.1 backup
+> evidence. R.2 remains senior-gated.
 
 Use this runbook for each `AGENT.reset` stabilization cycle and for the final
 settle cycle. It supplements the `AGENT.reset` row in `ROADMAP.md`; it does not

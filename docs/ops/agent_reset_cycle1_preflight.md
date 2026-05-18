@@ -1,9 +1,9 @@
 # AGENT.reset Cycle 1 Preflight
 
 > **Status:** Preflight packet prepared 2026-05-18. The active news integration
-> alert found during preflight was recovered and cleared. `AGENT.reset` R.1/R.2
-> remains gated on senior reviewer approval for the destructive reset sequence
-> and the R.1 rollback-capable backup.
+> alert found during preflight was recovered and cleared. `AGENT.reset` R.1
+> rollback-capable backup is complete. R.2 remains gated on senior reviewer
+> approval for the destructive reset sequence.
 >
 > **Last updated:** 2026-05-18.
 > **Maintained by:** Nate Goldstein + Claude Code.
@@ -13,8 +13,9 @@
 ## Scope
 
 This packet captures the read-only kickoff verification before the first
-`AGENT.reset` stabilization cycle. It does not authorize or perform backup,
-truncate, reseed, collector replay, backfill, or D.EXP schema work.
+`AGENT.reset` stabilization cycle and the senior-approved R.1 backup evidence.
+It does not authorize or perform truncate, reseed, collector replay, backfill,
+or D.EXP schema work.
 
 ## Verification Run
 
@@ -205,25 +206,91 @@ reference-less Create flow for news-backed cards should ever depend on
 `source_run.market`; today news-backed cards use persisted `NewsProjectReference`
 context, while the 5H bug fix targeted permit/fallback cards.
 
-## Gates Before R.1/R.2
+## Gates Before R.2
 
 - Active `news_integrate_failed` alert: resolved 2026-05-18.
 - Approved narrower post-recovery news smoke: passed 2026-05-18 with no
   validation failures.
-- Get senior reviewer approval for the destructive reset sequence.
-- Take the R.1 rollback-capable backup before any truncate or reseed action.
+- R.1 rollback-capable backup: completed 2026-05-18.
+- Get senior reviewer approval before running R.2 truncate.
 
-## Next Action
+## R.1 Rollback-Capable Backup
 
-Recommended next action is R.1: take the pre-reset rollback-capable backup per
-`docs/ops/migration_runbook.md` / `ROADMAP.md` discipline before any truncate or
-reseed action.
+Senior approved R.1 after the preflight and recovery closeout. R.2 truncate has
+not been executed.
+
+Pre-flight:
+
+- `pg_dump (PostgreSQL) 18.3` from `C:\Program Files\PostgreSQL\18\bin`.
+- `psql ... SELECT 1` against the configured `DATABASE_URL` passed.
+- Target DB: Supabase project `qqnlbfncqwqkvsdufjwa`,
+  host `aws-1-us-east-2.pooler.supabase.com`, database `postgres`.
+- Alembic version at backup time: `202605140040`.
+
+Command:
 
 ```powershell
-pg_dump --format=custom --no-owner --no-privileges `
-  --file data/output/db_snapshots/<cycle-backup-name>.dump `
+$backup = "data/output/db_snapshots/supabase_pre_agent_reset_cycle1_20260518_133653.dump"
+& "C:\Program Files\PostgreSQL\18\bin\pg_dump.exe" `
+  --format=custom `
+  --no-owner `
+  --no-privileges `
+  --file $backup `
   $env:DATABASE_URL
 ```
 
-Record backup path, SHA256, byte size, target DB, and Alembic version before
-proceeding to R.2 truncate.
+Artifact:
+
+- Path:
+  `data/output/db_snapshots/supabase_pre_agent_reset_cycle1_20260518_133653.dump`.
+- SHA256:
+  `74E2F7C99B851C09BC5DCAE9037E62C5AAB293B6F4018EDDCC705F1BD7090FE7`.
+- Size: `4,441,347` bytes.
+- `pg_restore --list`: passed.
+
+Row counts at backup time:
+
+- `projects=1364`
+- `evidence=2209`
+- `source_runs=57`
+- `news_articles=76`
+- `scrape_jobs=55`
+- `review_items=257`
+
+Rollback command:
+
+```powershell
+& "C:\Program Files\PostgreSQL\18\bin\pg_restore.exe" `
+  --clean `
+  --if-exists `
+  --no-owner `
+  --no-privileges `
+  --dbname=$env:DATABASE_URL `
+  data/output/db_snapshots/supabase_pre_agent_reset_cycle1_20260518_133653.dump
+```
+
+## R.2 Table Inventory Check
+
+Read-only schema inventory before proposing R.2 found two FK-dependent data
+tables that would be truncated by `CASCADE` if the ROADMAP list is used:
+`project_source_records` (`2100` rows) and `news_semantic_interpretations`
+(`27` rows). Recommended R.2 command should include them explicitly rather than
+letting cascade hide them.
+
+Other live base tables not named in the ROADMAP data-table list or the explicit
+preserve list:
+
+- `dismissed_records=37`
+- `news_admin_actions=1`
+- `worker_heartbeats=2`
+- `service_credentials=0`
+- `service_credential_validations=0`
+
+Senior reviewer should approve whether those operational/history tables are
+included in R.2 or intentionally preserved before any truncate command runs.
+
+## Next Action
+
+Recommended next action is R.2: truncate the approved data-table list only after
+explicit senior approval. Do not run any truncate or reseed command from this
+packet alone.
