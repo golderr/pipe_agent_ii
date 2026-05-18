@@ -1,6 +1,6 @@
 # AGENT.reset Runbook
 
-> **Last updated:** 2026-05-18.
+> **Last updated:** 2026-05-18 (R.2 table-list planning).
 >
 > **Cycle 1 preflight:** see `docs/ops/agent_reset_cycle1_preflight.md` for the
 > 2026-05-18 kickoff verification packet, recovery closeout, and R.1 backup
@@ -21,6 +21,130 @@ New-Item -ItemType Directory -Force "data/output/agent_reset/$cycle"
 
 Store all JSON reports and operator notes under that directory. The cycle should
 be reviewable from artifacts alone without querying production manually.
+
+## R.2 Truncate Contract
+
+R.2 is the destructive reset boundary. Do not run it until a senior reviewer has
+approved the table categorization, the command text, and the current cycle's
+row-count baseline. Run R.1 first and record a rollback-capable backup.
+
+Use explicit table enumeration without `CASCADE`. If a preserved table still
+references a truncate target, PostgreSQL should fail the transaction; that is
+the intended guardrail against silently wiping an unreviewed table. Keep
+`RESTART IDENTITY` so per-cycle sequences reset. Use one `TRUNCATE TABLE`
+statement listing all targets; do not split it into per-table truncate
+statements, because the single statement is what lets PostgreSQL process
+intra-list foreign key chains without `CASCADE`.
+
+AGENT.reset destroys researcher-entered data tied to projects, including
+`researcher_overrides` and `project_notes`. This is a forced consequence of
+truncating `projects`. For cycle 1, this is acceptable because pre-reset state is
+mostly synthetic/tuning state. For later reset cycles after reviewers have
+invested significant time setting overrides or writing notes, evaluate whether a
+partial-reset strategy or pre-reset export is needed before R.2.
+
+Before execution, run:
+
+```powershell
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" $env:DATABASE_URL -c "SELECT 1"
+```
+
+Then run the approved command in one transaction:
+
+```powershell
+$sql = @'
+BEGIN;
+TRUNCATE TABLE
+  agent_run_review_items,
+  agent_runs,
+  change_log,
+  costar_uploads,
+  dismissed_records,
+  evidence,
+  news_admin_actions,
+  news_article_chunks,
+  news_articles,
+  news_extractions,
+  news_project_references,
+  news_reference_auto_applied,
+  news_semantic_interpretations,
+  project_identifiers,
+  project_notes,
+  project_relationships,
+  project_source_records,
+  projects,
+  researcher_overrides,
+  resolution_log,
+  review_decisions,
+  review_items,
+  scrape_jobs,
+  source_runs,
+  status_history,
+  system_alerts,
+  worker_heartbeats
+RESTART IDENTITY;
+COMMIT;
+'@
+
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" `
+  -v ON_ERROR_STOP=1 `
+  $env:DATABASE_URL `
+  -c $sql
+```
+
+### R.2 Truncate Tables
+
+| Table | Rationale |
+|-------|-----------|
+| `agent_run_review_items` | Per-cycle join rows between agent decisions and review items. |
+| `agent_runs` | Per-cycle agent execution audit tied to ingested articles, permits, and review items. |
+| `change_log` | Project mutation audit generated from pre-reset dummy/tuning state. |
+| `costar_uploads` | Per-cycle upload audit tied to reseed files. |
+| `dismissed_records` | Reviewer/source dismissal state should restart with the clean baseline. |
+| `evidence` | Core collected evidence rows; reset requires a clean evidence graph. |
+| `news_admin_actions` | News admin-event history from pre-reset tuning state. |
+| `news_article_chunks` | Derived embedding chunks tied to reset news articles. |
+| `news_articles` | Collected news articles are replayed/backfilled after reset. |
+| `news_extractions` | LLM extraction outputs tied to reset news articles. |
+| `news_project_references` | Per-article project references tied to reset news articles/projects. |
+| `news_reference_auto_applied` | Per-cycle auto-apply audit tied to news references. |
+| `news_semantic_interpretations` | Pass 2c outputs tied to reset news articles/references. |
+| `project_identifiers` | Project-scoped identifiers are rebuilt from reseed/replay. |
+| `project_notes` | Human notes from dummy/tuning state should not carry into cycle 1. |
+| `project_relationships` | Project-scoped relationships are rebuilt or reauthored after reset. |
+| `project_source_records` | Project-to-source-row links would orphan when projects/source rows reset. |
+| `projects` | Canonical project rows are rebuilt from CoStar/Pipedream and collectors. |
+| `researcher_overrides` | Pre-reset human override state should not constrain the clean replay. |
+| `resolution_log` | Resolution audit rows are derived from the reset evidence graph. |
+| `review_decisions` | Review decisions are per-cycle researcher actions. |
+| `review_items` | Review queue items are regenerated from clean ingest/resolve. |
+| `scrape_jobs` | Worker job history is per-cycle operational state. |
+| `source_runs` | Collector/source-run audit is regenerated during replay. |
+| `status_history` | Project status history is rebuilt from reseed/replay evidence. |
+| `system_alerts` | Operational alerts restart clean so reset noise is not mixed with old alerts. |
+| `worker_heartbeats` | Ephemeral worker liveness rows are regenerated on worker restart. |
+
+### R.2 Preserve Tables
+
+| Table | Rationale |
+|-------|-----------|
+| `alembic_version` | Schema state; never truncate during reset. |
+| `cost_cap_overrides` | Budget/operator config survives reset. |
+| `cost_caps` | Budget config survives reset. |
+| `developer_alias` | Developer canonical registry seed/config survives reset. |
+| `developer_registry` | Developer canonical registry seed/config survives reset. |
+| `jurisdictions` | Market/jurisdiction config required by matchers and collectors. |
+| `llm_cost_usage` | Operational cost history is preserved for spend continuity across reset cycles. |
+| `markets` | Market config required by matchers and collectors. |
+| `news_signal_flag_registry` | News signal taxonomy/config survives reset. |
+| `news_sources` | News collector/source config survives reset. |
+| `service_credential_validations` | Credential validation audit survives reset. |
+| `service_credentials` | Required encrypted service credentials; truncating breaks workers. |
+| `source_registrations` | Source registration config required by collectors. |
+| `spatial_ref_sys` | PostGIS reference metadata. |
+
+Any public table not listed in either table is a senior decision point. Stop and
+categorize it before running R.2.
 
 ## Required Cycle Artifacts
 

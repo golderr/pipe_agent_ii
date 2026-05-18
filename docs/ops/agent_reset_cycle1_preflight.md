@@ -5,7 +5,7 @@
 > rollback-capable backup is complete. R.2 remains gated on senior reviewer
 > approval for the destructive reset sequence.
 >
-> **Last updated:** 2026-05-18.
+> **Last updated:** 2026-05-18 (R.2 table-list planning).
 > **Maintained by:** Nate Goldstein + Claude Code.
 
 ---
@@ -269,25 +269,46 @@ Rollback command:
   data/output/db_snapshots/supabase_pre_agent_reset_cycle1_20260518_133653.dump
 ```
 
-## R.2 Table Inventory Check
+## R.2 Planning Baseline
 
-Read-only schema inventory before proposing R.2 found two FK-dependent data
-tables that would be truncated by `CASCADE` if the ROADMAP list is used:
-`project_source_records` (`2100` rows) and `news_semantic_interpretations`
-(`27` rows). Recommended R.2 command should include them explicitly rather than
-letting cascade hide them.
+Canonical R.2 truncate/preserve categorization lives in
+`docs/ops/agent_reset_runbook.md` §"R.2 Truncate Contract". This cycle's
+read-only inventory confirmed 41 public base tables and zero preserved tables
+with foreign keys to the proposed truncate set.
 
-Other live base tables not named in the ROADMAP data-table list or the explicit
-preserve list:
+Row counts for the proposed R.2 truncate set:
 
-- `dismissed_records=37`
-- `news_admin_actions=1`
-- `worker_heartbeats=2`
-- `service_credentials=0`
-- `service_credential_validations=0`
+| Table | Rows |
+|-------|-----:|
+| `agent_run_review_items` | 70 |
+| `agent_runs` | 86 |
+| `change_log` | 0 |
+| `costar_uploads` | 0 |
+| `dismissed_records` | 37 |
+| `evidence` | 2209 |
+| `news_admin_actions` | 1 |
+| `news_article_chunks` | 2 |
+| `news_articles` | 76 |
+| `news_extractions` | 163 |
+| `news_project_references` | 136 |
+| `news_reference_auto_applied` | 0 |
+| `news_semantic_interpretations` | 27 |
+| `project_identifiers` | 2910 |
+| `project_notes` | 1082 |
+| `project_relationships` | 40 |
+| `project_source_records` | 2100 |
+| `projects` | 1364 |
+| `researcher_overrides` | 24 |
+| `resolution_log` | 1810 |
+| `review_decisions` | 4 |
+| `review_items` | 257 |
+| `scrape_jobs` | 55 |
+| `source_runs` | 57 |
+| `status_history` | 2761 |
+| `system_alerts` | 6 |
+| `worker_heartbeats` | 2 |
 
-Senior reviewer should approve whether those operational/history tables are
-included in R.2 or intentionally preserved before any truncate command runs.
+Preserved operational cost history at planning time: `llm_cost_usage=67`.
 
 ## Next Action
 
