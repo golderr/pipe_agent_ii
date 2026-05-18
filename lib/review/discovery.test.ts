@@ -7,8 +7,11 @@ import {
   applyDiscoverySubjectEdits,
   computeCandidateDeltas,
   computeCandidateOverlaps,
+  discoveryMapPoints,
   discoverySubjectEditsSupported,
   discoverySubjectEditsPayload,
+  googleMapsSatelliteUrl,
+  googleStreetViewUrl,
   isDiscoveryItem,
   mapDedupCandidatesResponse,
   mapMatchPreviewResponse,
@@ -213,6 +216,71 @@ describe("review discovery helpers", () => {
         direction: "asc"
       }).map((candidate) => candidate.projectId)
     ).toEqual(["layer-1-alpha", "layer-1-low", "layer-2-high"]);
+  });
+
+  it("builds map points with subject and live candidate row numbers", () => {
+    const result = mapDedupCandidatesResponse({
+      subject: {
+        project_name: "Fig Tower",
+        canonical_address: "100 Fig St",
+        lat: 34.05,
+        lng: -118.25
+      },
+      candidates: [
+        candidatePayload("candidate-a", {
+          project_name: "Alpha",
+          lat: 34.051,
+          lng: -118.251,
+          match_layer: 1,
+          match_likelihood: 0.8
+        }),
+        candidatePayload("candidate-b", {
+          project_name: "No coordinates",
+          lat: null,
+          lng: null
+        }),
+        candidatePayload("candidate-c", {
+          project_name: "Charlie",
+          lat: 34.052,
+          lng: -118.252,
+          match_layer: 2,
+          match_likelihood: 0.6
+        })
+      ]
+    });
+
+    const points = discoveryMapPoints(result.subject, result.candidates);
+    expect(points.map((point) => `${point.id}:${point.label}`)).toEqual([
+      "subject:S",
+      "candidate-a:1",
+      "candidate-c:3"
+    ]);
+    expect(points[1]).toMatchObject({
+      kind: "candidate",
+      title: "Alpha",
+      subtitle: "100 Fig St",
+      matchLayer: 1,
+      matchLikelihood: 0.8
+    });
+
+    const resortedPoints = discoveryMapPoints(result.subject, [
+      result.candidates[2],
+      result.candidates[0]
+    ]);
+    expect(resortedPoints.map((point) => `${point.id}:${point.label}`)).toEqual([
+      "subject:S",
+      "candidate-c:1",
+      "candidate-a:2"
+    ]);
+  });
+
+  it("builds Google map link-out URLs for Discovery map pins", () => {
+    expect(googleStreetViewUrl(34.05123, -118.25123)).toBe(
+      "https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=34.05123,-118.25123"
+    );
+    expect(googleMapsSatelliteUrl(34.05123, -118.25123)).toBe(
+      "https://www.google.com/maps/@34.05123,-118.25123,18z/data=!3m1!1e3"
+    );
   });
 
   it("moves candidate focus by keyboard number and offset", () => {

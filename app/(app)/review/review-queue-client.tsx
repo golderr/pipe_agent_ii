@@ -12,12 +12,17 @@ import {
   GitCompareArrows,
   Link2,
   ListChecks,
+  Map as MapIcon,
   Newspaper,
   RotateCcw,
   Save,
-  Star
+  Star,
+  X
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, useTransition, type MouseEvent } from "react";
+import type { StyleSpecification } from "maplibre-gl";
+import type { MapRef } from "react-map-gl/maplibre";
+import MapLibreMap, { Marker, NavigationControl } from "react-map-gl/maplibre";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type MouseEvent } from "react";
 import {
   commitReviewDecisionsAction,
   createAndLinkDiscoveryProjectAction,
@@ -73,8 +78,11 @@ import {
   applyDiscoverySubjectEdits,
   computeCandidateDeltas,
   computeCandidateOverlaps,
+  discoveryMapPoints,
   discoverySubjectEditsSupported,
   discoverySubjectEditsPayload,
+  googleMapsSatelliteUrl,
+  googleStreetViewUrl,
   isDiscoveryItem,
   matchPreviewImpactText,
   projectFieldsFromDiscoverySubject,
@@ -83,6 +91,7 @@ import {
   visibleMatchSignals,
   type DiscoveryCandidate,
   type DiscoveryFieldDelta,
+  type DiscoveryMapPoint,
   type DiscoveryOverlap,
   type DiscoveryCandidateSort,
   type DiscoveryCandidateSortField,
@@ -201,6 +210,18 @@ const SOURCE_FILTER_OPTIONS: Array<{ value: SourceFilter; label: string }> = [
 ];
 
 const MATCH_PREVIEW_DEBOUNCE_MS = 150;
+const OPENFREEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/bright";
+const MAP_TILE_URL = process.env.NEXT_PUBLIC_MAP_TILE_URL?.trim();
+const MAP_TILE_ATTRIBUTION =
+  process.env.NEXT_PUBLIC_MAP_TILE_ATTRIBUTION?.trim() ||
+  "OpenFreeMap (C) OpenMapTiles Data from OpenStreetMap";
+const DISCOVERY_MAP_STYLE = MAP_TILE_URL
+  ? rasterMapStyle(MAP_TILE_URL, MAP_TILE_ATTRIBUTION)
+  : OPENFREEMAP_STYLE_URL;
+const ESRI_WORLD_IMAGERY_STYLE = rasterMapStyle(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  "Tiles (C) Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+);
 const DISCOVERY_RELATIONSHIP_OPTIONS = [
   { value: "phase", label: "Phase sibling" },
   { value: "master_plan", label: "Master project" },
@@ -227,6 +248,27 @@ const SUBJECT_PRODUCT_TYPE_OPTIONS = [
   "Other",
   "Unknown"
 ];
+
+function rasterMapStyle(tileUrl: string, attribution: string): StyleSpecification {
+  return {
+    version: 8,
+    sources: {
+      basemap: {
+        type: "raster",
+        tiles: [tileUrl],
+        tileSize: 256,
+        attribution
+      }
+    },
+    layers: [
+      {
+        id: "basemap",
+        type: "raster",
+        source: "basemap"
+      }
+    ]
+  };
+}
 
 export function ReviewQueueClient({
   activeTab,
@@ -1230,6 +1272,7 @@ function DiscoveryCardShell({
   const [subjectEdits, setSubjectEdits] = useState<DiscoverySubjectEdits>({});
   const [linkCandidateId, setLinkCandidateId] = useState<string | null>(null);
   const [relationshipType, setRelationshipType] = useState("phase");
+  const [mapOpen, setMapOpen] = useState(false);
   const candidates = candidatesEntry?.status === "loaded" ? candidatesEntry.data : null;
   const sortedCandidates = useMemo(
     () => sortCandidates(candidates?.candidates ?? [], candidateSort),
@@ -1243,6 +1286,10 @@ function DiscoveryCardShell({
   const subject = useMemo(
     () => applyDiscoverySubjectEdits(baseSubject, subjectEdits),
     [baseSubject, subjectEdits]
+  );
+  const mapPoints = useMemo(
+    () => discoveryMapPoints(subject, sortedCandidates),
+    [sortedCandidates, subject]
   );
   const discoveryEdits = useMemo(
     () => discoverySubjectEditsPayload(subjectEdits),
@@ -1312,6 +1359,10 @@ function DiscoveryCardShell({
   }, [card.item.id, focusedCandidate, matchPreviewCache, onRequestMatchPreview]);
 
   useEffect(() => {
+    if (mapOpen) {
+      return;
+    }
+
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
       if (
@@ -1362,7 +1413,7 @@ function DiscoveryCardShell({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [focusedCandidate, matchCandidate, openCreateNew, sortedCandidates]);
+  }, [focusedCandidate, mapOpen, matchCandidate, openCreateNew, sortedCandidates]);
 
   return (
     <article className="rounded-md border border-slate-200 bg-white">
@@ -1409,7 +1460,18 @@ function DiscoveryCardShell({
             <Button
               type="button"
               variant="outline"
-              className="col-span-2 h-8 text-xs"
+              className="h-8 text-xs"
+              onClick={() => setMapOpen(true)}
+              disabled={mapPoints.length === 0}
+              title={mapPoints.length > 0 ? "Open candidate map" : "No coordinates available"}
+            >
+              <MapIcon className="size-3.5" aria-hidden="true" />
+              Map
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-8 text-xs"
               onClick={openCreateNew}
               disabled={isPending}
             >
@@ -1585,8 +1647,369 @@ function DiscoveryCardShell({
           Detail
         </Link>
       </div>
+      {mapOpen ? (
+        <DiscoveryMapPopup
+          points={mapPoints}
+          subject={subject}
+          candidateCount={sortedCandidates.length}
+          onClose={() => setMapOpen(false)}
+        />
+      ) : null}
     </article>
   );
+}
+
+function DiscoveryMapPopup({
+  points,
+  subject,
+  candidateCount,
+  onClose
+}: {
+  points: DiscoveryMapPoint[];
+  subject: DiscoverySubject;
+  candidateCount: number;
+  onClose: () => void;
+}) {
+  const mapRef = useRef<MapRef | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const listItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [selectedPointId, setSelectedPointId] = useState<string | null>(points[0]?.id ?? null);
+  const [mapMode, setMapMode] = useState<"map" | "satellite">("map");
+  const selectedPoint =
+    points.find((point) => point.id === selectedPointId) ?? points[0] ?? null;
+  const initialViewState = useMemo(() => discoveryMapInitialView(points), [points]);
+  const geocodedCandidateCount = points.filter((point) => point.kind === "candidate").length;
+  const mapStyle = mapMode === "map" ? DISCOVERY_MAP_STYLE : ESRI_WORLD_IMAGERY_STYLE;
+
+  const fitMapToPoints = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || points.length === 0) {
+      return;
+    }
+    if (points.length === 1) {
+      map.easeTo({
+        center: [points[0].lng, points[0].lat],
+        zoom: 14,
+        duration: 0
+      });
+      return;
+    }
+    const bounds = mapBoundsForPoints(points);
+    map.fitBounds(
+      [
+        [bounds.west, bounds.south],
+        [bounds.east, bounds.north]
+      ],
+      { padding: 64, maxZoom: 15, duration: 0 }
+    );
+  }, [points]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(fitMapToPoints, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [fitMapToPoints]);
+
+  useEffect(() => {
+    mapRef.current?.getMap().setStyle(mapStyle);
+  }, [mapStyle]);
+
+  useEffect(() => {
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeButtonRef.current?.focus();
+    return () => {
+      previousFocusRef.current?.focus();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedPoint) {
+      return;
+    }
+    listItemRefs.current[selectedPoint.id]?.scrollIntoView({ block: "nearest" });
+  }, [selectedPoint]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusable = focusableElements(dialogRef.current);
+        if (!focusable.length) {
+          event.preventDefault();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 py-6"
+      onClick={onClose}
+    >
+      <section
+        aria-labelledby="discovery-map-title"
+        aria-modal="true"
+        className="flex max-h-[92dvh] w-full max-w-6xl flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-xl"
+        ref={dialogRef}
+        role="dialog"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div className="min-w-0">
+            <h2 id="discovery-map-title" className="text-base font-semibold text-slate-950">
+              Discovery map
+            </h2>
+            <p className="mt-1 truncate text-sm text-slate-500">
+              {subject.projectName ?? subject.canonicalAddress ?? "Subject"} -{" "}
+              {geocodedCandidateCount.toLocaleString()} of {candidateCount.toLocaleString()}{" "}
+              candidates geocoded
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <div
+              aria-label="Map style"
+              className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5"
+              role="group"
+            >
+              <button
+                type="button"
+                className={discoveryMapModeButtonClass(mapMode === "map")}
+                onClick={() => setMapMode("map")}
+              >
+                Map
+              </button>
+              <button
+                type="button"
+                className={discoveryMapModeButtonClass(mapMode === "satellite")}
+                onClick={() => setMapMode("satellite")}
+              >
+                Satellite
+              </button>
+            </div>
+            <button
+              ref={closeButtonRef}
+              type="button"
+              className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-sm font-medium text-slate-800 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
+              onClick={onClose}
+            >
+              <X className="size-4" aria-hidden="true" />
+              <span className="sr-only">Close map</span>
+            </button>
+          </div>
+        </div>
+        <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1fr)_19rem]">
+          <div className="h-[65dvh] min-h-[360px] bg-slate-100 lg:h-[72dvh]">
+            <MapLibreMap
+              ref={mapRef}
+              initialViewState={initialViewState}
+              mapStyle={mapStyle}
+              onLoad={fitMapToPoints}
+            >
+              <NavigationControl position="top-right" />
+              {points.map((point) => (
+                <Marker
+                  anchor="bottom"
+                  key={`${point.kind}-${point.id}-${point.label}`}
+                  latitude={point.lat}
+                  longitude={point.lng}
+                >
+                  <button
+                    type="button"
+                    className={discoveryMapMarkerClass(point, point.id === selectedPoint?.id)}
+                    title={`${point.label}. ${point.title}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelectedPointId(point.id);
+                    }}
+                  >
+                    {point.label}
+                  </button>
+                </Marker>
+              ))}
+            </MapLibreMap>
+          </div>
+          <aside className="min-h-0 overflow-y-auto border-t border-slate-200 bg-white lg:border-l lg:border-t-0">
+            {selectedPoint ? (
+              <div className="border-b border-slate-200 px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <span className={discoveryMapListBadgeClass(selectedPoint)}>
+                    {selectedPoint.label}
+                  </span>
+                  <p className="min-w-0 truncate text-sm font-semibold text-slate-950">
+                    {selectedPoint.title}
+                  </p>
+                </div>
+                {selectedPoint.subtitle ? (
+                  <p className="mt-2 text-xs text-slate-500">{selectedPoint.subtitle}</p>
+                ) : null}
+                {selectedPoint.kind === "candidate" ? (
+                  <p className="mt-2 text-xs text-slate-600">
+                    Layer {selectedPoint.matchLayer ?? "-"} -{" "}
+                    {selectedPoint.matchLikelihood !== null
+                      ? `${Math.round(selectedPoint.matchLikelihood * 100)}% match`
+                      : "match unavailable"}
+                  </p>
+                ) : null}
+                <DiscoveryMapPointLinks point={selectedPoint} />
+              </div>
+            ) : null}
+            <div className="divide-y divide-slate-100">
+              {points.map((point) => (
+                <div
+                  className={cn(
+                    "flex items-start gap-2 px-4 py-3 hover:bg-slate-50",
+                    point.id === selectedPoint?.id && "bg-teal-50"
+                  )}
+                  key={`${point.kind}-list-${point.id}`}
+                  ref={(node) => {
+                    listItemRefs.current[point.id] = node;
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-start gap-2 text-left"
+                    onClick={() => setSelectedPointId(point.id)}
+                  >
+                    <span className={discoveryMapListBadgeClass(point)}>{point.label}</span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium text-slate-900">
+                        {point.title}
+                      </span>
+                      {point.subtitle ? (
+                        <span className="mt-0.5 block truncate text-xs text-slate-500">
+                          {point.subtitle}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                  <DiscoveryMapPointLinks compact point={point} />
+                </div>
+              ))}
+            </div>
+          </aside>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function discoveryMapInitialView(points: DiscoveryMapPoint[]) {
+  if (!points.length) {
+    return { latitude: 34.0522, longitude: -118.2437, zoom: 10 };
+  }
+  const center = points.reduce(
+    (sum, point) => ({
+      lat: sum.lat + point.lat,
+      lng: sum.lng + point.lng
+    }),
+    { lat: 0, lng: 0 }
+  );
+  return {
+    latitude: center.lat / points.length,
+    longitude: center.lng / points.length,
+    zoom: points.length === 1 ? 14 : 11
+  };
+}
+
+function DiscoveryMapPointLinks({
+  point,
+  compact = false
+}: {
+  point: DiscoveryMapPoint;
+  compact?: boolean;
+}) {
+  return (
+    <div className={compact ? "flex shrink-0 flex-col gap-1" : "mt-3 flex flex-wrap gap-2"}>
+      <a
+        className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-[11px] font-medium text-slate-800 hover:bg-slate-50"
+        href={googleStreetViewUrl(point.lat, point.lng)}
+        rel="noopener noreferrer"
+        target="_blank"
+        title={`Open Street View for ${point.title}`}
+      >
+        <ExternalLink className="size-3" aria-hidden="true" />
+        Street View
+      </a>
+      <a
+        className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-[11px] font-medium text-slate-800 hover:bg-slate-50"
+        href={googleMapsSatelliteUrl(point.lat, point.lng)}
+        rel="noopener noreferrer"
+        target="_blank"
+        title={`Open Google satellite imagery for ${point.title}`}
+      >
+        <ExternalLink className="size-3" aria-hidden="true" />
+        Satellite (Google)
+      </a>
+    </div>
+  );
+}
+
+function mapBoundsForPoints(points: DiscoveryMapPoint[]) {
+  return points.reduce(
+    (bounds, point) => ({
+      west: Math.min(bounds.west, point.lng),
+      south: Math.min(bounds.south, point.lat),
+      east: Math.max(bounds.east, point.lng),
+      north: Math.max(bounds.north, point.lat)
+    }),
+    {
+      west: points[0].lng,
+      south: points[0].lat,
+      east: points[0].lng,
+      north: points[0].lat
+    }
+  );
+}
+
+function discoveryMapModeButtonClass(active: boolean) {
+  return cn(
+    "h-7 rounded px-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700",
+    active ? "bg-white text-slate-950 shadow-sm" : "text-slate-600 hover:bg-white/70"
+  );
+}
+
+function discoveryMapMarkerClass(point: DiscoveryMapPoint, selected: boolean) {
+  return cn(
+    "grid size-8 place-items-center rounded-full border-2 border-white text-xs font-semibold shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700",
+    point.kind === "subject" ? "bg-slate-950 text-white" : "bg-teal-700 text-white",
+    selected && "ring-2 ring-teal-300 ring-offset-2"
+  );
+}
+
+function discoveryMapListBadgeClass(point: DiscoveryMapPoint) {
+  return cn(
+    "grid size-6 shrink-0 place-items-center rounded-full text-xs font-semibold",
+    point.kind === "subject" ? "bg-slate-950 text-white" : "bg-teal-700 text-white"
+  );
+}
+
+function focusableElements(container: HTMLElement | null) {
+  if (!container) {
+    return [];
+  }
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute("disabled") && element.getClientRects().length > 0);
 }
 
 function SubjectEditCell({

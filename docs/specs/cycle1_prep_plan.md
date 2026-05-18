@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-18 (Item 5F post-review test hardening; 5G MapPopup split)
+> **Last updated:** 2026-05-18 (Item 5G satellite toggle + Street View / Google Maps link-outs)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -345,7 +345,7 @@ Phase 4 — Dedup table (days 10-19)
 4. **5D — Candidate table + overlap:** subject-row editor, candidate table with sortable columns, cell-level overlap highlighting, per-row signal chips rendering `match_signals` (green/gray/hidden), row color band by likelihood (paired with the numeric percentage, not replacing it), confident empty state rendering the `searched` block, keyboard navigation into the table (`1`–`9` row select, `m` Match, `n` Create-new with confirm modal, `l` link-dropdown).
 5. **5E — Match/Create actions:** atomic `edits` write path, match-with-deltas confirm step (reusing the generalized ThreeFieldEditor UI model), create/link actions with `relationship_type ∈ {phase, master_plan, counterpart, supersedes}` (no `duplicate`), Create-new confirm modal, audit/change-log entries with "absorbed reference X from source S" framing, focused-row impact-preview line backed by the match-preview endpoint, action tests.
 6. **5F — End-to-end validation:** synthetic and real queue walkthroughs (including a no-candidate card to validate the confident empty state, a multi-signal Layer-1 card to validate chip rendering, a permit card to exercise `_fallback_subject_from_payload`, and a 1000+ unit project to keep the Item 3 number-formatting regression closed), live-update behavior, performance check (<500ms per card), docs/roadmap completion.
-7. **5G — MapPopup:** small standalone map slice with MapLibre popup/modal, subject pin, numbered candidate pins matching table row order, and dismiss behavior.
+7. **5G — MapPopup:** small standalone map slice with MapLibre popup/modal, subject pin, numbered candidate pins matching table row order, dismiss behavior, a **Map/Satellite tile toggle** sourced from Esri World Imagery, and per-pin link-outs to **Google Street View** and **Google Maps satellite-with-history**. All three additions are free, zero-API-key integrations.
 
 **Sub-tasks:**
 
@@ -449,7 +449,10 @@ Phase 4 — Dedup table (days 10-19)
   - [x] `m` triggers Match-to-this on the focused row (opens match-with-deltas modal if there are field disagreements with the subject; otherwise commits directly).
   - [x] `n` triggers the card-header Create-new flow — opens the confirm modal first, doesn't write on the keypress alone (matches the friction step above).
   - [x] `l` opens the relationship dropdown on the focused row's Create-new-link action.
-- [ ] **MapPopup component (5G):** opened by a map icon button on the card header. Renders MapLibre map showing subject pin + numbered candidate pins corresponding to table row numbers. Click outside or close button dismisses.
+- [x] **MapPopup component (5G):** opened by a map icon button on the card header. Renders MapLibre map showing subject pin + numbered candidate pins corresponding to table row numbers. Click outside or close button dismisses. Pin numbering follows the active candidate-table sort and re-renders if the reviewer changes sort while the popup is open.
+  - [x] **Map/Satellite tile toggle.** Default style is the existing MapLibre base; toggle switches to **Esri World Imagery** as a raster overlay (free for non-commercial use, attribution required). All free satellite tile providers (Esri, Google, Bing) serve composited mosaics 6 months to 3+ years old, so this layer is for spatial orientation, not for "is construction happening this week." See the F.7 deferred follow-on for genuine change-detection work.
+  - [x] **Per-pin Google Street View link-out.** Each pin (subject and every candidate) gets a "Street View" button that opens `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=<LAT>,<LNG>` in a new tab (`target="_blank"`, `rel="noopener noreferrer"`). Free, no API key. Google's URL automatically falls back to the nearest coverage if the exact coordinate lacks Street View imagery. Disabled state when the pin lacks lat/lng.
+  - [x] **Per-pin Google Maps satellite-with-history link-out.** Each pin gets a "Satellite (Google)" button that opens `https://www.google.com/maps/@<LAT>,<LNG>,18z/data=!3m1!1e3` in a new tab. Free, no API key. Google's interactive viewer typically serves newer imagery than their tile API does and exposes the historical-imagery slider, which is the most useful "did construction start" tool — comparing two captures rather than looking at one. Disabled state when the pin lacks lat/lng.
 - [x] **Match-with-deltas modal:** when reviewer clicks `Match to this` and the subject has any field values that disagree with the matched project's current values, show a confirm step listing the deltas with checkboxes for which to apply. Reuse the generalized ThreeFieldEditor value-change UI model for each delta row.
 - [ ] **Live updates after match/create:**
   - [x] On successful Match/Create/Create+link, invalidate Discovery candidate + preview caches and refresh the queue so subsequent cards refetch against the updated project/reference state.
@@ -482,6 +485,8 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Frontend helper tests: candidate keyboard focus helpers and match-preview impact copy
 - [x] Frontend helper tests: match-with-deltas computation and subject-edit serialization for atomic write payloads
 - [x] Frontend helper tests: subject editing only enables for news-backed Discovery cards with a persisted reference target
+- [x] Frontend helper tests: MapPopup point builder preserves subject pin and live sorted candidate row numbering while skipping ungeocoded rows
+- [x] Frontend helper tests: MapPopup Google Street View and Google Maps satellite link-out URL builders
 - [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
 - [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
 - [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
@@ -538,6 +543,11 @@ Phase 4 — Dedup table (days 10-19)
 - Local candidate timing against Supabase is round-trip-bound, not query-bound. Real permit-card `EXPLAIN ANALYZE` timings are sub-36ms across the relevant DB queries, but local end-to-end calls are still seconds because each remote query costs ~750-900ms from the workstation. Keep optimizing query count, but use deployed API timing for the actual `<500ms/card` acceptance gate.
 - Refetch-based live update works when Match/Create changes a hard-signal project field (for example Create writes the canonical address, or Match accepts a canonical-address delta). If reviewers expect a matched project to surface as Layer 1 without accepting any hard-signal deltas, persist subject identifiers/addresses as a follow-on rather than relying on attached evidence alone.
 
+**5G lessons learned:**
+- Do not default new production map surfaces to `tile.openstreetmap.org`. Discovery now uses OpenFreeMap's hosted MapLibre style by default, while preserving `NEXT_PUBLIC_MAP_TILE_URL` / `NEXT_PUBLIC_MAP_TILE_ATTRIBUTION` for deployments that supply a custom raster provider.
+- Keep the Esri satellite layer as a reviewer orientation aid and pair it with Google Street View / Google Maps satellite-with-history link-outs for actual inspection. Static satellite tiles are stale mosaics; Google Maps' history UI is more useful when the question is whether construction activity changed.
+- Build map pins from the live sorted candidate array, not a captured order at modal open. The pin labels therefore stay aligned with table row numbers and keyboard row selection after sort changes.
+
 **Deferred follow-ons:**
 
 - **`UX.project-merge` — project-to-project duplicate marking + record combination.** When two already-persisted projects describe the same underlying real-world project, the reviewer needs a way to merge them: pick a survivor, re-attach evidence rows to the survivor, write a `project_relationships` row of type `duplicate`, soft-delete or status-flag the loser, leave an audit trail. Most natural surface is the pipeline tab's project-detail view, not the Discovery tab — Discovery operates on incoming `article → project` decisions, not on `project → project` decisions. Reuse the match-with-deltas component infrastructure shipped in Item 5 (the generalized ThreeFieldEditor value-change UI model handles project-vs-project deltas the same way it handles subject-vs-candidate). Estimated effort: ~1 week given Item 5 infrastructure. See ROADMAP row `UX.project-merge`.
@@ -548,6 +558,8 @@ Phase 4 — Dedup table (days 10-19)
 - **Discovery match status vocabulary.** First-time researcher Match-to-this currently stores `NewsMatchStatus.MANUAL_RELINK` with `match_reason="discovery_match"` to distinguish human action from automated matching. The enum name implies a prior link existed; consider adding a clearer `RESEARCHER_MATCH` value or using `CONFIRMED` plus `match_reason` after cycle 1 validates downstream assumptions.
 - **Cross-market match validation for Phase H.** Match-to-this accepts any project UUID today. LA-only cycle 1 keeps that safe enough, but multi-market activation should reject candidates whose `market_id` does not match the subject/source market unless an explicit cross-market override exists.
 - **Discovery identifier/address write-through.** Match/Create does not yet persist accepted subject APNs, CoStar IDs, or other hard-signal identifiers into `project_identifiers`, and Match only updates canonical project fields when the reviewer accepts the corresponding delta. If cycle 1 shows subsequent cards are not surfacing just-matched projects strongly enough, add explicit identifier/address write-through with audit rows.
+- **Registered satellite tile provider.** 5G uses Esri World Imagery's public raster service for low-volume internal reviewer orientation. If reviewer volume grows or the Discovery map ships externally, switch the satellite layer to a registered ArcGIS Online / Esri developer key or another contracted imagery provider.
+- **Satellite construction-status signal collector (ROADMAP `F.7`).** 5G ships free Esri tiles + Google Street View / Google Maps satellite-with-history link-outs, which get reviewers to "did construction start?" with manual inspection at zero engineering cost. None of those is a "real-time" signal — all free tile providers serve composited mosaics that are 6 months to 3+ years old per location, and Google Maps' historical-imagery slider gives reviewers a manual comparison tool. Background change-detection becomes load-bearing only if (a) reviewer feedback after cycle 1 shows manual satellite inspection is a recurring bottleneck, OR (b) we expand to a market without dense permit/news coverage and need imagery as a primary signal. Implementation choice between Sentinel-2 (free, 5-day revisit, 10m) and Planet Labs PlanetScope (paid, daily, 3m) gets made at scoping time. See ROADMAP row `F.7` for full scope and effort sketch.
 
 ---
 

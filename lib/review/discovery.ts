@@ -73,6 +73,18 @@ export type DiscoveryCandidateSearch = {
   searched: Record<string, unknown>;
 };
 
+export type DiscoveryMapPoint = {
+  id: string;
+  kind: "subject" | "candidate";
+  label: string;
+  title: string;
+  subtitle: string | null;
+  lat: number;
+  lng: number;
+  matchLayer: number | null;
+  matchLikelihood: number | null;
+};
+
 export type DiscoveryMatchPreview = {
   reviewItemsToClose: number;
   evidenceRowsToReattach: number;
@@ -476,6 +488,55 @@ export function visibleMatchSignals(candidate: DiscoveryCandidate) {
         left.localeCompare(right)
       );
     });
+}
+
+export function discoveryMapPoints(
+  subject: DiscoverySubject,
+  candidates: DiscoveryCandidate[]
+): DiscoveryMapPoint[] {
+  const points: DiscoveryMapPoint[] = [];
+  const subjectCoordinates = validCoordinates(subject.lat, subject.lng);
+  if (subjectCoordinates) {
+    points.push({
+      id: "subject",
+      kind: "subject",
+      label: "S",
+      title: subject.projectName ?? subject.canonicalAddress ?? "Subject",
+      subtitle: subject.projectName ? subject.canonicalAddress : null,
+      lat: subjectCoordinates.lat,
+      lng: subjectCoordinates.lng,
+      matchLayer: null,
+      matchLikelihood: null
+    });
+  }
+
+  candidates.forEach((candidate, index) => {
+    const coordinates = validCoordinates(candidate.lat, candidate.lng);
+    if (!coordinates) {
+      return;
+    }
+    points.push({
+      id: candidate.projectId,
+      kind: "candidate",
+      label: String(index + 1),
+      title: candidate.projectName ?? candidate.canonicalAddress ?? `Candidate ${index + 1}`,
+      subtitle: candidate.projectName ? candidate.canonicalAddress : null,
+      lat: coordinates.lat,
+      lng: coordinates.lng,
+      matchLayer: candidate.matchLayer,
+      matchLikelihood: candidate.matchLikelihood
+    });
+  });
+
+  return points;
+}
+
+export function googleStreetViewUrl(lat: number, lng: number) {
+  return `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}`;
+}
+
+export function googleMapsSatelliteUrl(lat: number, lng: number) {
+  return `https://www.google.com/maps/@${lat},${lng},18z/data=!3m1!1e3`;
 }
 
 export function candidateBandTone(candidate: DiscoveryCandidate) {
@@ -963,6 +1024,22 @@ function isNewsSourceText(value: string) {
     normalized.includes("bisnow") ||
     normalized.includes("bizjournals")
   );
+}
+
+function validCoordinates(lat: number | null, lng: number | null) {
+  if (
+    lat === null ||
+    lng === null ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    lat < -90 ||
+    lat > 90 ||
+    lng < -180 ||
+    lng > 180
+  ) {
+    return null;
+  }
+  return { lat, lng };
 }
 
 function firstText(...values: unknown[]) {
