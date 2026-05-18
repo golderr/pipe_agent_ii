@@ -239,29 +239,37 @@ def find_dedup_candidates(
         projects_by_id[project.id] = _ScoredProject(project=project)
         project_layers[project.id] = 1
 
-    for scored in _load_layer2_soft_projects(
+    layer2_scored_projects = _load_layer2_soft_projects(
         session,
         subject,
         exclude_project_ids=set(projects_by_id),
         limit=SOFT_CANDIDATE_POOL_LIMIT,
-    ):
+    )
+    for scored in layer2_scored_projects:
         projects_by_id.setdefault(scored.project.id, scored)
         project_layers.setdefault(scored.project.id, 2)
 
-    layer3_available = _layer3_available(
-        session,
-        subject,
-        exclude_project_ids=set(projects_by_id),
-    )
+    # Saturated Layer 2 strongly implies broader sweep availability and saves a
+    # probe query on the hot path. Rare false positives are acceptable: clicking
+    # "show more" may still return no extra rows after Layer 1/2 exclusions.
+    layer3_available = len(layer2_scored_projects) >= SOFT_CANDIDATE_POOL_LIMIT
     if include_layer3:
-        for project in _load_layer3_projects(
+        layer3_projects = _load_layer3_projects(
             session,
             subject,
             exclude_project_ids=set(projects_by_id),
             limit=LAYER3_RESPONSE_LIMIT,
-        ):
+        )
+        layer3_available = bool(layer3_projects)
+        for project in layer3_projects:
             projects_by_id.setdefault(project.id, _ScoredProject(project=project))
             project_layers.setdefault(project.id, 3)
+    elif not layer3_available:
+        layer3_available = _layer3_available(
+            session,
+            subject,
+            exclude_project_ids=set(projects_by_id),
+        )
 
     review_counts = _open_review_item_counts(session, set(projects_by_id))
     candidates = [
@@ -380,19 +388,19 @@ def _load_layer1_hard_signals(
     subject: DedupSubject,
 ) -> dict[uuid.UUID, list[_HardSignal]]:
     signals: dict[uuid.UUID, list[_HardSignal]] = defaultdict(list)
-    _add_identifier_hard_signals(session, subject, signals)
-    _add_address_hard_signals(session, subject, signals)
+    _add_identifier_or_address_hard_signals(session, subject, signals)
     _add_geographic_hard_signals(session, subject, signals)
     _add_developer_secondary_hard_signals(session, subject, signals)
     return dict(signals)
 
 
-def _add_identifier_hard_signals(
+def _add_identifier_or_address_hard_signals(
     session: Session,
     subject: DedupSubject,
     signals: dict[uuid.UUID, list[_HardSignal]],
 ) -> None:
     identifier_filters: list[Any] = []
+    identifier_values_by_type: dict[IdentifierType, set[str]] = {}
     for identifier_type_name in ("apn", "costar_property_id"):
         values = _identifier_values(subject.identifiers, identifier_type_name)
         if not values:
@@ -400,45 +408,50 @@ def _add_identifier_hard_signals(
         identifier_type = _coerce_identifier_type(identifier_type_name)
         if identifier_type is None:
             continue
+        identifier_values_by_type[identifier_type] = set(values)
         identifier_filters.append(
             (ProjectIdentifier.identifier_type == identifier_type)
             & (ProjectIdentifier.value.in_(values))
         )
-    if not identifier_filters:
+    filters: list[Any] = [*identifier_filters]
+    if subject.canonical_address is not None:
+        filters.append(Project.canonical_address == subject.canonical_address)
+    if not filters:
         return
     statement = (
         select(
-            ProjectIdentifier.project_id,
+            Project.id,
+            Project.canonical_address,
             ProjectIdentifier.identifier_type,
             ProjectIdentifier.value,
         )
-        .join(Project, Project.id == ProjectIdentifier.project_id)
-        .where(or_(*identifier_filters), _active_project_filter())
+        .outerjoin(ProjectIdentifier, ProjectIdentifier.project_id == Project.id)
+        .where(or_(*filters), _active_project_filter())
     )
     statement = _scope_statement(statement, subject)
-    for project_id, identifier_type, value in session.execute(statement).all():
+    seen_address_signals: set[uuid.UUID] = set()
+    seen_identifier_signals: set[tuple[uuid.UUID, IdentifierType, str]] = set()
+    for project_id, canonical_address, identifier_type, value in session.execute(statement).all():
+        if (
+            subject.canonical_address is not None
+            and canonical_address == subject.canonical_address
+            and project_id not in seen_address_signals
+        ):
+            signals[project_id].append(_HardSignal(name="address", detail="exact address"))
+            seen_address_signals.add(project_id)
+        values = identifier_values_by_type.get(identifier_type)
+        if values is None or str(value) not in values:
+            continue
+        identifier_key = (project_id, identifier_type, str(value))
+        if identifier_key in seen_identifier_signals:
+            continue
         signals[project_id].append(
             _HardSignal(
                 name="identifier",
                 detail=f"{identifier_type.value}:{value}",
             )
         )
-
-
-def _add_address_hard_signals(
-    session: Session,
-    subject: DedupSubject,
-    signals: dict[uuid.UUID, list[_HardSignal]],
-) -> None:
-    if subject.canonical_address is None:
-        return
-    statement = select(Project.id).where(
-        Project.canonical_address == subject.canonical_address,
-        _active_project_filter(),
-    )
-    statement = _scope_statement(statement, subject)
-    for project_id in session.execute(statement).scalars().all():
-        signals[project_id].append(_HardSignal(name="address", detail="exact address"))
+        seen_identifier_signals.add(identifier_key)
 
 
 def _add_geographic_hard_signals(

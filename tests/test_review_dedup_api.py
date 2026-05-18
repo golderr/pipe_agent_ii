@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, or_, select, text
 from sqlalchemy.orm import Session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
@@ -12,6 +13,7 @@ from tcg_pipeline.api.routers import review as review_router
 from tcg_pipeline.db.models import (
     ChangeLog,
     Evidence,
+    IdentifierType,
     Jurisdiction,
     Market,
     NewsArticle,
@@ -27,6 +29,7 @@ from tcg_pipeline.db.models import (
     Priority,
     ProductType,
     Project,
+    ProjectIdentifier,
     ProjectRelationship,
     RelationshipType,
     ReviewItem,
@@ -34,6 +37,7 @@ from tcg_pipeline.db.models import (
     ReviewItemType,
     SourceRun,
 )
+from tcg_pipeline.matching import candidates as candidate_matching
 
 
 def test_review_item_candidates_returns_dedup_candidate_payload(
@@ -58,6 +62,98 @@ def test_review_item_candidates_returns_dedup_candidate_payload(
     assert candidate["match_layer"] == 1
     assert candidate["match_signals"]["address"]["contributed"] is True
     assert 0.0 <= response.new_candidate_probability <= 1.0
+
+
+def test_layer1_combined_identifier_address_query_dedupes_signals(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_dedup_test_schema(postgres_session)
+    suffix = uuid.uuid4().hex[:8]
+    market = Market(
+        slug=f"dedup-layer1-{suffix}",
+        name="Dedup Layer 1 Market",
+        state="CA",
+    )
+    postgres_session.add(market)
+    postgres_session.flush()
+
+    subject_address = f"100 COMBINED {suffix.upper()} WAY LOS ANGELES CA 90012"
+    address_only = _project_for_layer1_fixture(market, subject_address)
+    identifier_only = _project_for_layer1_fixture(
+        market,
+        f"200 IDENTIFIER {suffix.upper()} WAY LOS ANGELES CA 90012",
+    )
+    address_and_identifiers = _project_for_layer1_fixture(market, subject_address)
+    unrelated = _project_for_layer1_fixture(
+        market,
+        f"300 UNRELATED {suffix.upper()} WAY LOS ANGELES CA 90012",
+    )
+    postgres_session.add_all(
+        [address_only, identifier_only, address_and_identifiers, unrelated]
+    )
+    postgres_session.flush()
+
+    postgres_session.add_all(
+        [
+            ProjectIdentifier(
+                project_id=identifier_only.id,
+                identifier_type=IdentifierType.APN,
+                value=f"APN-ONLY-{suffix}",
+                source="test",
+            ),
+            ProjectIdentifier(
+                project_id=address_and_identifiers.id,
+                identifier_type=IdentifierType.APN,
+                value=f"APN-BOTH-{suffix}",
+                source="test",
+            ),
+            ProjectIdentifier(
+                project_id=address_and_identifiers.id,
+                identifier_type=IdentifierType.COSTAR_PROPERTY_ID,
+                value=f"COSTAR-BOTH-{suffix}",
+                source="test",
+            ),
+            ProjectIdentifier(
+                project_id=address_and_identifiers.id,
+                identifier_type=IdentifierType.CASE_NUMBER,
+                value=f"IGNORED-{suffix}",
+                source="test",
+            ),
+        ]
+    )
+    postgres_session.flush()
+
+    subject = candidate_matching.DedupSubject(
+        canonical_address=subject_address,
+        market=market.slug,
+        identifiers={
+            "apn": [f"APN-ONLY-{suffix}", f"APN-BOTH-{suffix}"],
+            "costar_property_id": [f"COSTAR-BOTH-{suffix}"],
+        },
+    )
+
+    signals = candidate_matching._load_layer1_hard_signals(  # noqa: SLF001
+        postgres_session,
+        subject,
+    )
+
+    assert [signal.name for signal in signals[address_only.id]] == ["address"]
+    assert [signal.detail for signal in signals[identifier_only.id]] == [
+        f"apn:APN-ONLY-{suffix}"
+    ]
+
+    both_names = Counter(signal.name for signal in signals[address_and_identifiers.id])
+    both_identifier_details = sorted(
+        signal.detail
+        for signal in signals[address_and_identifiers.id]
+        if signal.name == "identifier"
+    )
+    assert both_names == Counter({"address": 1, "identifier": 2})
+    assert both_identifier_details == [
+        f"apn:APN-BOTH-{suffix}",
+        f"costar_property_id:COSTAR-BOTH-{suffix}",
+    ]
+    assert unrelated.id not in signals
 
 
 def test_match_preview_counts_same_reference_siblings_and_uses_shared_deltas(
@@ -255,6 +351,19 @@ def test_create_project_from_payload_subject_uses_source_run_market_context(
     postgres_session.add_all([market, jurisdiction, source_run, review_item])
     postgres_session.flush()
 
+    with pytest.raises(Exception) as exc_info:
+        review_router.create_project_from_review_item(
+            review_item.id,
+            payload=review_router.ReviewDedupCreateRequest(
+                edits={"developer": "Edited Permit Developer"}
+            ),
+            user=_auth_user(),
+            session=postgres_session,
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "backing news reference" in str(getattr(exc_info.value, "detail", ""))
+
     response = review_router.create_project_from_review_item(
         review_item.id,
         payload=review_router.ReviewDedupCreateRequest(),
@@ -294,7 +403,20 @@ def test_create_and_link_rejects_duplicate_relationship_type(
         )
 
     assert getattr(exc_info.value, "status_code", None) == 422
-    assert postgres_session.execute(select(ProjectRelationship)).scalars().all() == []
+    fixture_project_id = fixture["project"].id
+    assert (
+        postgres_session.execute(
+            select(ProjectRelationship).where(
+                or_(
+                    ProjectRelationship.project_id == fixture_project_id,
+                    ProjectRelationship.related_project_id == fixture_project_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+        == []
+    )
 
 
 def test_same_reference_open_review_item_count_counts_subject_and_siblings(
@@ -400,8 +522,8 @@ def _news_discovery_fixture(postgres_session: Session) -> dict[str, object]:
         candidate_identifiers={"apn": [], "costar_property_id": []},
     )
     project = Project(
-        canonical_address="100 FIG ST LOS ANGELES CA",
-        raw_addresses=["100 FIG ST LOS ANGELES CA"],
+        canonical_address="100 FIG STREET",
+        raw_addresses=["100 FIG STREET"],
         market=market.slug,
         market_id=market.id,
         city="Los Angeles",
@@ -439,6 +561,21 @@ def _news_discovery_fixture(postgres_session: Session) -> dict[str, object]:
         "project": project,
         "review_item": review_item,
     }
+
+
+def _project_for_layer1_fixture(market: Market, canonical_address: str) -> Project:
+    return Project(
+        canonical_address=canonical_address,
+        raw_addresses=[canonical_address],
+        market=market.slug,
+        market_id=market.id,
+        city="Los Angeles",
+        state="CA",
+        county="Los Angeles",
+        project_name="Layer 1 Fixture",
+        product_type=ProductType.APARTMENT,
+        pipeline_status=PipelineStatus.PROPOSED,
+    )
 
 
 def _evidence(reference: NewsProjectReference, *, project_id: uuid.UUID | None) -> Evidence:

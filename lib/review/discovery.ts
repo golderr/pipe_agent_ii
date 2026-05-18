@@ -312,6 +312,26 @@ export function isDiscoveryItem(item: ReviewQueueItem) {
   return DISCOVERY_ITEM_TYPES.has(item.itemType);
 }
 
+export function discoverySubjectEditsSupported(
+  item: ReviewQueueItem,
+  sourceName?: string | null
+) {
+  const payload = item.payload;
+  const newsContext = asRecord(payload?.news_context);
+  if (asString(payload?.reference_id) || asString(newsContext?.reference_id)) {
+    return true;
+  }
+  if (!asString(payload?.source_record_id)) {
+    return false;
+  }
+  const sourceValues = [
+    sourceName,
+    asString(payload?.source_name),
+    asString(payload?.source_type)
+  ].filter((value): value is string => Boolean(value));
+  return sourceValues.some(isNewsSourceText);
+}
+
 export function buildDiscoveryCards(items: ReviewQueueItem[]): DiscoveryCard[] {
   return items
     .filter(isDiscoveryItem)
@@ -931,6 +951,18 @@ function newCandidateProbabilityForItem(item: ReviewQueueItem) {
     return Math.max(0, Math.min(1, 1 - item.matchConfidence));
   }
   return item.itemType === "new_candidate" ? 1 : null;
+}
+
+function isNewsSourceText(value: string) {
+  const normalized = value.toLowerCase();
+  return (
+    normalized.includes("news") ||
+    normalized.includes("article") ||
+    normalized.includes("urbanize") ||
+    normalized.includes("yimby") ||
+    normalized.includes("bisnow") ||
+    normalized.includes("bizjournals")
+  );
 }
 
 function firstText(...values: unknown[]) {

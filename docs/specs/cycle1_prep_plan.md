@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-17 (Item 5E post-review hardening; 5G MapPopup split)
+> **Last updated:** 2026-05-18 (Item 5F post-review test hardening; 5G MapPopup split)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -220,7 +220,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] **Source field names confirmed.** CoStar export: `Number Of Stories` (both MF and Commercial workbooks). Pipedream DataStorage: `Elevation` at col 48 (header in row 3). LADBS `pi9x-tg5x` active feed exposes `height` as text / decimal feet, not stories, so LADBS is dropped from the Item 6 source list. See deferred follow-on below.
 - [x] **Write the Alembic migration.** Adds one nullable integer column `candidate_stories` to `news_project_references`. No Project migration needed.
 - [x] **Update db/models.py** for `NewsProjectReference.candidate_stories` only.
-- [ ] **Run migration locally + verify production/staging target only after backup.** Per `docs/ops/migration_runbook.md` discipline: `pg_dump` backup first. The remaining migration is nullable/additive and should land before `AGENT.reset`.
+- [x] **Run migration locally + verify production/staging target only after backup.** Per `docs/ops/migration_runbook.md` discipline: `pg_dump` backup first. Applied `202605130039` and `202605140040` to the configured Supabase DB on 2026-05-17 after custom-format backup `data/output/db_snapshots/supabase_pre_cycle1_prep_20260517_20260517_144608.dump`.
 - [x] **Update extract_v2 schema + prompt** to capture `candidate_stories` from articles. Prompt language should say `building height in stories` so the extraction instruction is unambiguous; store the DB/model field as `candidate_stories`.
 - [x] **Update news integrator** to write `candidate_stories` on reference rows and thread it into evidence as `stories`.
 - [x] **Write the resolver.** New file `resolution/fields/stories.py`. Rule: most recent explicit value wins, with source-priority tiebreak for same-date matches (Pipedream > CoStar > news_article). Treat null as no evidence - null Project value remains null if no evidence has the field.
@@ -231,7 +231,7 @@ Phase 4 — Dedup table (days 10-19)
   - [x] News extraction: prompt/schema accepts `candidate_stories` from a fixture
   - [x] News integrator: reference row and evidence expose `stories`
   - [x] Resolver: most-recent-wins, source-priority tiebreak, null handling
-- [ ] **Apply migration in production.** Backup + apply per migration runbook. Record in Decision Log.
+- [x] **Apply migration in production.** Backup + apply per migration runbook. Recorded in ROADMAP Decision Log on 2026-05-17.
 - [x] **Commit + push.**
 
 **Acceptance:** Migration applied to production, CoStar / Pipedream / news can populate `stories`, resolver writes the correct value, and project-detail Snapshot shows the field.
@@ -423,7 +423,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] **List view** shows discovery items grouped by review item/reference (one card per `new_candidate` / `possible_match` item).
 - [ ] **DedupCard component:**
   - [x] Header: source name (small), project name (if extracted), project address, `Potential matches: N` and `New candidate probability: X%` indicators
-  - [x] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`. **5E note:** displayed subject fields now edit locally and serialize into the write-action `edits` payload.
+  - [x] Subject row: editable cells inline (text, number, dropdown depending on field type). Edits stay client-local until included atomically in Match/Create action payloads as `edits: {...}`. **5E note:** displayed subject fields now edit locally and serialize into the write-action `edits` payload. **5F note:** reference-less permit/fallback cards disable subject editing because there is no persisted source-reference row to receive the correction.
   - [x] Candidate table below (5D-1 raw table; chips/bands/sort landed in 5D-2; overlap landed in 5D-3)
   - [x] **Confident empty state** when no candidates returned: render the API response's `searched` block as a paragraph (e.g., "No candidates found within 1km. Searched by APN, CoStar Property ID, normalized address, name/address trigrams (threshold from `searched.layer_2.trigram_min_score`), and canonical developer match. None passed Layer 1 or Layer 2 thresholds."). Do not render a bare empty table — reviewers second-guess silent failure.
   - [x] **Header action `Create new`** — opens a small confirm modal ("Create new project — no match selected. Continue?") before write. False-new is the highest-cost outcome in this flow, so it gets a friction step; the affordance itself stays visually de-emphasized vs the per-row Match action. **5E note:** modal now calls the create write action and auto-advances on success.
@@ -456,21 +456,23 @@ Phase 4 — Dedup table (days 10-19)
   - [ ] Optimistically inject or pin newly-created/matched projects in already-loaded subsequent card caches. Current 5E behavior relies on refetch; 5F validation should decide whether that is enough or whether explicit session-local promotion is needed.
 
 ### 8.6 Backend write actions
-- [x] **Write payload convention:** `edits` always targets the source/reference row (`news_project_references.candidate_*` or the analogous permit subject payload) before the reviewer commits the action. `project_fields` is the create-shape for the new `Project`; for create flows it may include corrected subject values, but it does not replace the source-row correction audit.
+- [x] **Write payload convention:** `edits` always targets a persisted source/reference row (`news_project_references.candidate_*`) before the reviewer commits the action. Reference-less permit/fallback Discovery cards do not have an edit target, so their subject inputs are disabled in the UI and the API rejects non-empty `edits` with 400. `project_fields` is the create-shape for the new `Project`; for create flows it may include corrected subject values, but it does not replace the source-row correction audit when a source-row correction exists.
 - [x] **Relationship-type vocabulary for the Discovery flow** is `{phase, master_plan, counterpart, supersedes}`. **`duplicate` is intentionally NOT in this set.** The Discovery flow operates on `article → existing-project` or `article → new-project`; "Create new + link as duplicate" is a semantic contradiction (if the subject is the same underlying project as N, the right action is Match-to-this, not Create). Project-to-project duplicate marking is a separate decision that operates on two already-persisted projects and is deferred to a future `UX.project-merge` workflow (see Deferred follow-ons below and the ROADMAP row).
 - [x] **`POST /review/items/{item_id}/match`** — body: `{matched_project_id, edits: {...}, accept_deltas: [field_name, ...]}`. Applies subject edits atomically, updates `news_project_references.matched_project_id` (or analogous for permits), closes review item, optionally writes value-change review items for non-accepted deltas (so they queue for normal review). Audit row in `change_log` with explicit "absorbed reference X from source S on date D by user U" framing — both the surviving project's Activity tab and the audit trail need to be able to point at the source reference after the merge.
 - [x] **`POST /review/items/{item_id}/create-and-link`** — body: `{relationship_type, related_project_id, project_fields, edits: {...}}` where `relationship_type ∈ {phase, master_plan, counterpart, supersedes}`. Applies subject edits atomically, creates Project, creates `project_relationships` row, closes review item. Audit rows.
 - [x] **`POST /review/items/{item_id}/create`** — body: `{project_fields, edits: {...}}`. Applies subject edits atomically, creates Project (unlinked), closes review item. Audit row.
 - [x] **Reject unsupported subject-edit keys.** Match/Create write payloads now return 422 for unknown `edits` keys instead of silently dropping them, so client drift cannot no-op without visibility.
+- [x] **Reject no-target subject edits.** Match/Create write payloads now return 400 when `edits` is non-empty but the Discovery item has no backing `NewsProjectReference`; permit/fallback corrections must flow through `project_fields` on Create.
 - [x] **No-reference create fallback.** Permit/fallback Discovery creates derive market, jurisdiction, state, city, and county from `review_item.source_run` metadata before failing, avoiding placeholder `unknown`/`Unknown` project fields.
 
 ### 8.7 Tests
 - [x] Backend retrieval: fixtures exercise each Layer; ordering correct; overlap signals correctly computed
+- [x] Backend retrieval: combined identifier/address hard-signal query dedupes address signals and preserves per-identifier matches
 - [x] Backend match-likelihood: each component returns 0-1; missing-field rebalancing works
 - [x] Backend retrieval: `searched` block emitted with the expected probes per layer; per-signal `contributed` flag agrees with score threshold
 - [x] Backend action endpoints: each writes the correct rows + closes the item; Match-to-this `change_log` row contains "absorbed reference X from source S" framing
 - [x] Backend action endpoints: `relationship_type` validator rejects `duplicate` for create-and-link
-- [x] Backend action endpoints: unknown subject-edit keys are rejected and no-reference creates use source-run market context
+- [x] Backend action endpoints: unknown subject-edit keys are rejected, no-target subject edits are rejected, and no-reference creates use source-run market context
 - [x] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
 - [ ] Frontend: component tests for DedupCard / SubjectRow / CandidateTable / MapPopup
 - [x] Frontend helper tests for Discovery item filtering, one-card-per-review-item grouping, and subject normalization
@@ -479,12 +481,17 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Frontend helper tests: cell-level overlap detection covers text substrings, cross-field unit equality, status/product exact matches, story proximity, and coordinate distance
 - [x] Frontend helper tests: candidate keyboard focus helpers and match-preview impact copy
 - [x] Frontend helper tests: match-with-deltas computation and subject-edit serialization for atomic write payloads
+- [x] Frontend helper tests: subject editing only enables for news-backed Discovery cards with a persisted reference target
 - [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
 - [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
 - [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
 
 ### 8.8 Smoke validation
-- [ ] Walk through 5 of the 25 active `new_candidate` permit items via the new Discovery tab. Confirm: Layer 1 candidates appear (probably empty for these — they were unmatched for a reason), Layer 2 candidates appear with sensible likelihood, overlap highlighting works on at least one row.
+- [x] API-level focused-card walkthrough of 5 of the 25 active `new_candidate` permit items from source_run `50005ea8-fcbe-486f-b88c-1f69d0ff07e3`. Confirmed `_fallback_subject_from_payload` yields canonical address + APN/permit identifiers, candidate tables return 25 Layer 2 rows with visible address/product-type signals, and Layer 3 is available.
+- [ ] Browser walkthrough of the same 5 permit cards via the new Discovery tab. Confirm disabled subject edits, row rendering, keyboard handling, and overlap highlighting in the actual UI.
+- [x] Synthetic rollback validation for: a no-candidate card/confident empty-state data, a multi-signal Layer 1 card, a 1,400-unit candidate payload, Create-then-next-card live update, and Match-with-accepted-address-delta-then-next-card live update.
+- [x] Performance profile on the configured Supabase DB. DB-side `EXPLAIN ANALYZE` execution for the real permit-card hard-signal, Layer 2, and open-review-count queries was <36ms combined; local end-to-end timing is still 3.3-3.5s/card because this workstation sees ~750-900ms latency per Supabase round trip. 5F reduced query count by skipping non-news reference probes, eager-loading `source_run`, combining identifier/address hard-signal probes, and avoiding the Layer 3 availability query when the Layer 2 pool is full.
+- [ ] Deployed API timing check for the same permit cards. This is the meaningful `<500ms/card` acceptance gate because local remote-DB latency dominates workstation measurements.
 - [ ] Create a Render one-off paste-link smoke that should produce a `new_candidate`, then process it via the new tab.
 - [ ] Verify a Match-to-this + Match-with-deltas flow on a fixture.
 
@@ -526,6 +533,11 @@ Phase 4 — Dedup table (days 10-19)
 - Reject unknown edit keys at the API boundary. Forgiving payload handling hides client drift; 422s make bad subject-edit serialization visible before any match/create side effect lands.
 - Permit/fallback Discovery cards need source-run context when creating projects. If no `NewsProjectReference` exists, derive market/jurisdiction fields from `review_item.source_run` and fail instead of writing placeholder geography.
 
+**5F lessons learned:**
+- Reference-less Discovery cards need honest edit affordances. Permit/fallback cards can build a subject from payload, but there is no persisted source row to receive subject edits, so the UI disables subject editing for non-news cards and the API rejects non-empty `edits` without a backing `NewsProjectReference`.
+- Local candidate timing against Supabase is round-trip-bound, not query-bound. Real permit-card `EXPLAIN ANALYZE` timings are sub-36ms across the relevant DB queries, but local end-to-end calls are still seconds because each remote query costs ~750-900ms from the workstation. Keep optimizing query count, but use deployed API timing for the actual `<500ms/card` acceptance gate.
+- Refetch-based live update works when Match/Create changes a hard-signal project field (for example Create writes the canonical address, or Match accepts a canonical-address delta). If reviewers expect a matched project to surface as Layer 1 without accepting any hard-signal deltas, persist subject identifiers/addresses as a follow-on rather than relying on attached evidence alone.
+
 **Deferred follow-ons:**
 
 - **`UX.project-merge` — project-to-project duplicate marking + record combination.** When two already-persisted projects describe the same underlying real-world project, the reviewer needs a way to merge them: pick a survivor, re-attach evidence rows to the survivor, write a `project_relationships` row of type `duplicate`, soft-delete or status-flag the loser, leave an audit trail. Most natural surface is the pipeline tab's project-detail view, not the Discovery tab — Discovery operates on incoming `article → project` decisions, not on `project → project` decisions. Reuse the match-with-deltas component infrastructure shipped in Item 5 (the generalized ThreeFieldEditor value-change UI model handles project-vs-project deltas the same way it handles subject-vs-candidate). Estimated effort: ~1 week given Item 5 infrastructure. See ROADMAP row `UX.project-merge`.
@@ -535,6 +547,7 @@ Phase 4 — Dedup table (days 10-19)
 - **Audit-the-survivor surface on project detail.** Lesson from CRM merge UIs: when Match-to-this lands, the surviving project's Activity tab should render "Absorbed reference X from source S on date D by user U" as a discoverable history entry. Item 5's `change_log` row carries the data; verify the existing Activity feed renders it usefully and add an explicit row template if not.
 - **Discovery match status vocabulary.** First-time researcher Match-to-this currently stores `NewsMatchStatus.MANUAL_RELINK` with `match_reason="discovery_match"` to distinguish human action from automated matching. The enum name implies a prior link existed; consider adding a clearer `RESEARCHER_MATCH` value or using `CONFIRMED` plus `match_reason` after cycle 1 validates downstream assumptions.
 - **Cross-market match validation for Phase H.** Match-to-this accepts any project UUID today. LA-only cycle 1 keeps that safe enough, but multi-market activation should reject candidates whose `market_id` does not match the subject/source market unless an explicit cross-market override exists.
+- **Discovery identifier/address write-through.** Match/Create does not yet persist accepted subject APNs, CoStar IDs, or other hard-signal identifiers into `project_identifiers`, and Match only updates canonical project fields when the reviewer accepts the corresponding delta. If cycle 1 shows subsequent cards are not surfacing just-matched projects strongly enough, add explicit identifier/address write-through with audit rows.
 
 ---
 

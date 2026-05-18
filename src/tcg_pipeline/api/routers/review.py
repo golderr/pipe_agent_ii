@@ -3,11 +3,11 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, or_, select
-from sqlalchemy.orm import Session, object_session
+from sqlalchemy.orm import Session, joinedload, object_session
 
 from tcg_pipeline.api.auth import AuthenticatedUser
 from tcg_pipeline.api.deps import get_db_session, require_user
@@ -82,6 +82,7 @@ from tcg_pipeline.review.field_metadata import field_metadata_for_review
 from tcg_pipeline.review.human_summary import human_summary_for_payload
 from tcg_pipeline.review.snippets import render_snippet
 from tcg_pipeline.review.value_changes import value_change_payload_for_review_item
+from tcg_pipeline.source_tiers import get_logical_source_type
 
 router = APIRouter(prefix="/review", tags=["review"])
 AUTH_USER = Depends(require_user)
@@ -175,9 +176,9 @@ def get_review_item_candidates(
     item_id: uuid.UUID,
     user: AuthenticatedUser = AUTH_USER,
     session: Session = DB_SESSION,
-    layer: int | None = Query(default=None, ge=1, le=3),
+    layer: Annotated[int | None, Query(ge=1, le=3)] = None,
     include_layer3: bool = False,
-    limit: int = Query(default=25, ge=1, le=100),
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> ReviewDedupCandidatesResponse:
     review_item = _load_review_item_for_discovery(session, item_id)
     subject, _reference = _dedup_subject_for_review_item(session, review_item)
@@ -432,7 +433,11 @@ def _serialize_stage_result(result) -> ReviewDecisionStageResponse:
 
 
 def _load_review_item_for_discovery(session: Session, item_id: uuid.UUID) -> ReviewItem:
-    review_item = session.get(ReviewItem, item_id)
+    review_item = session.execute(
+        select(ReviewItem)
+        .options(joinedload(ReviewItem.source_run))
+        .where(ReviewItem.id == item_id)
+    ).scalar_one_or_none()
     if review_item is None:
         raise HTTPException(status_code=404, detail="Review item not found.")
     item_type = getattr(review_item.item_type, "value", review_item.item_type)
@@ -456,11 +461,28 @@ def _news_reference_for_review_item(
     review_item: ReviewItem,
 ) -> NewsProjectReference | None:
     payload = review_item.payload if isinstance(review_item.payload, dict) else {}
+    if not _review_item_can_have_news_reference(review_item, payload):
+        return None
     for reference_id in _reference_ids_from_payload(payload):
         reference = session.get(NewsProjectReference, reference_id)
         if reference is not None:
             return reference
     return None
+
+
+def _review_item_can_have_news_reference(
+    review_item: ReviewItem,
+    payload: dict[str, Any],
+) -> bool:
+    if payload.get("reference_id") is not None:
+        return True
+    news_context = payload.get("news_context")
+    if isinstance(news_context, dict) and news_context.get("reference_id") is not None:
+        return True
+    source_run = review_item.source_run
+    if source_run is None:
+        return True
+    return get_logical_source_type(source_run.source_name) == "news_article"
 
 
 def _reference_ids_from_payload(payload: dict[str, Any]) -> list[uuid.UUID]:
@@ -608,6 +630,7 @@ def _apply_discovery_match(
     actor = _actor_for_audit(user)
     _validate_reference_edit_fields(edits)
     reference = _news_reference_for_review_item(session, review_item)
+    _reject_reference_edits_without_target(edits, reference)
     if reference is not None:
         _apply_reference_edits(reference, edits, user=user, timestamp=now)
 
@@ -710,6 +733,7 @@ def _create_project_from_discovery_subject(
     now = datetime.now(UTC)
     _validate_reference_edit_fields(edits)
     reference = _news_reference_for_review_item(session, review_item)
+    _reject_reference_edits_without_target(edits, reference)
     if reference is not None:
         _apply_reference_edits(reference, edits, user=user, timestamp=now)
     subject, _reference = _dedup_subject_for_review_item(session, review_item)
@@ -827,6 +851,21 @@ def _validate_reference_edit_fields(edits: dict[str, Any]) -> None:
                 f"{', '.join(unknown_fields)}. Allowed fields: {allowed}."
             ),
         )
+
+
+def _reject_reference_edits_without_target(
+    edits: dict[str, Any],
+    reference: NewsProjectReference | None,
+) -> None:
+    if not edits or reference is not None:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Subject edits require a backing news reference. "
+            "Use project_fields for reference-less discovery items."
+        ),
+    )
 
 
 def _coerce_reference_value(target: str, value: Any) -> Any:

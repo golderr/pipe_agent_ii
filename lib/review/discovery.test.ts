@@ -7,6 +7,7 @@ import {
   applyDiscoverySubjectEdits,
   computeCandidateDeltas,
   computeCandidateOverlaps,
+  discoverySubjectEditsSupported,
   discoverySubjectEditsPayload,
   isDiscoveryItem,
   mapDedupCandidatesResponse,
@@ -25,6 +26,27 @@ describe("review discovery helpers", () => {
     expect(isDiscoveryItem(item({ itemType: "new_candidate" }))).toBe(true);
     expect(isDiscoveryItem(item({ itemType: "possible_match" }))).toBe(true);
     expect(isDiscoveryItem(item({ itemType: "status_change" }))).toBe(false);
+  });
+
+  it("only enables subject edits when a Discovery item has a news reference target", () => {
+    expect(
+      discoverySubjectEditsSupported(
+        item({ payload: { news_context: { reference_id: "reference-1" } } })
+      )
+    ).toBe(true);
+    expect(
+      discoverySubjectEditsSupported(
+        item({ payload: { source_record_id: "reference-1" } }),
+        "urbanize_la"
+      )
+    ).toBe(true);
+    expect(
+      discoverySubjectEditsSupported(
+        item({ payload: { source_record_id: "permit-record-1" } }),
+        "ladbs_permits"
+      )
+    ).toBe(false);
+    expect(discoverySubjectEditsSupported(item({ payload: {} }), "urbanize_la")).toBe(false);
   });
 
   it("normalizes the subject from review-item payload fields", () => {

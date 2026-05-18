@@ -73,6 +73,7 @@ import {
   applyDiscoverySubjectEdits,
   computeCandidateDeltas,
   computeCandidateOverlaps,
+  discoverySubjectEditsSupported,
   discoverySubjectEditsPayload,
   isDiscoveryItem,
   matchPreviewImpactText,
@@ -1251,6 +1252,7 @@ function DiscoveryCardShell({
     () => projectFieldsFromDiscoverySubject(subject),
     [subject]
   );
+  const subjectEditsEnabled = discoverySubjectEditsSupported(card.item, sourceRun?.sourceName);
   const potentialMatchCount = candidates?.candidates.length ?? card.potentialMatchCount;
   const newCandidateProbability =
     candidates?.newCandidateProbability ?? card.newCandidateProbability;
@@ -1481,11 +1483,13 @@ function DiscoveryCardShell({
           <tbody>
             <tr className="border-b border-slate-100 align-top last:border-b-0">
               <SubjectEditCell
+                disabled={!subjectEditsEnabled}
                 field="projectName"
                 value={subject.projectName}
                 onChange={(value) => setSubjectEdits((edits) => ({ ...edits, projectName: value }))}
               />
               <SubjectEditCell
+                disabled={!subjectEditsEnabled}
                 field="canonicalAddress"
                 value={subject.canonicalAddress}
                 onChange={(value) =>
@@ -1493,21 +1497,25 @@ function DiscoveryCardShell({
                 }
               />
               <SubjectEditCell
+                disabled={!subjectEditsEnabled}
                 field="developer"
                 value={subject.developer}
                 onChange={(value) => setSubjectEdits((edits) => ({ ...edits, developer: value }))}
               />
               <SubjectEditCell
+                disabled={!subjectEditsEnabled}
                 field="totalUnits"
                 value={subject.totalUnits}
                 onChange={(value) => setSubjectEdits((edits) => ({ ...edits, totalUnits: value }))}
               />
               <SubjectEditCell
+                disabled={!subjectEditsEnabled}
                 field="productType"
                 value={subject.productType}
                 onChange={(value) => setSubjectEdits((edits) => ({ ...edits, productType: value }))}
               />
               <SubjectEditCell
+                disabled={!subjectEditsEnabled}
                 field="pipelineStatus"
                 value={subject.pipelineStatus}
                 onChange={(value) =>
@@ -1515,6 +1523,7 @@ function DiscoveryCardShell({
                 }
               />
               <SubjectEditCell
+                disabled={!subjectEditsEnabled}
                 field="stories"
                 value={subject.stories}
                 onChange={(value) => setSubjectEdits((edits) => ({ ...edits, stories: value }))}
@@ -1581,22 +1590,27 @@ function DiscoveryCardShell({
 }
 
 function SubjectEditCell({
+  disabled = false,
   field,
   value,
   onChange
 }: {
+  disabled?: boolean;
   field: DiscoverySubjectEditField;
   value: unknown;
   onChange: (value: string) => void;
 }) {
   const inputValue = formatInputValue(value);
+  const title = disabled ? "Subject edits persist only for news-sourced cards." : undefined;
   if (field === "pipelineStatus" || field === "productType") {
     const options = field === "pipelineStatus" ? SUBJECT_PIPELINE_STATUS_OPTIONS : SUBJECT_PRODUCT_TYPE_OPTIONS;
     return (
       <td className="py-3 pr-3">
         <select
           aria-label={`Subject ${humanize(camelToToken(field))}`}
-          className="h-8 w-full min-w-0 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+          className="h-8 w-full min-w-0 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-900 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100 disabled:bg-slate-50 disabled:text-slate-500"
+          disabled={disabled}
+          title={title}
           value={inputValue}
           onChange={(event) => onChange(event.target.value)}
         >
@@ -1615,9 +1629,11 @@ function SubjectEditCell({
     <td className="py-3 pr-3">
       <Input
         aria-label={`Subject ${humanize(camelToToken(field))}`}
-        className="h-8 min-w-0 px-2 text-xs"
+        className="h-8 min-w-0 px-2 text-xs disabled:bg-slate-50 disabled:text-slate-500"
+        disabled={disabled}
         min={type === "number" ? 0 : undefined}
         onChange={(event) => onChange(event.target.value)}
+        title={title}
         type={type}
         value={inputValue}
       />
