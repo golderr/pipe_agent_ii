@@ -75,6 +75,10 @@ Invoke-RestMethod `
   -Headers @{ Authorization = "Bearer $env:RENDER_API_KEY"; Accept = "application/json" }
 ```
 
+If a Render API call appears to fail locally, query the service state before
+retrying. Render may have accepted the suspend/resume change even when the local
+PowerShell client reports an exception.
+
 Then run the approved command in one transaction:
 
 ```powershell
@@ -172,6 +176,30 @@ COMMIT;
 
 Any public table not listed in either table is a senior decision point. Stop and
 categorize it before running R.2.
+
+## R.3 Seed Prerequisites
+
+R.3 blocks until current source export workbooks have been placed manually:
+
+- `data/seed/costar/` must contain current CoStar `.xlsx` export workbook(s).
+- `data/seed/pipedream/` must contain the latest Pipedream `.xlsm` workbook with
+  the documented `DataStorage` tab.
+
+The `.gitkeep` placeholders mean these directories are intentionally not
+version-controlled. Fresh exports must be placed before each reset cycle. Record
+filename, byte size, last-modified timestamp, and SHA256 in the R.3 Decision Log
+before running seed commands.
+
+Use the established order for consistency:
+
+```powershell
+tcg-pipeline seed-costar data/seed/costar --market los_angeles
+tcg-pipeline seed-pipedream data/seed/pipedream --market los_angeles
+```
+
+After R.3, verify seed command stdout and SQL row counts for `projects`,
+`evidence`, and `project_source_records`. Do not proceed to R.4 collectors until
+senior review approves the R.3 results.
 
 ## Required Cycle Artifacts
 
