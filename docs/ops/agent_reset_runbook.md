@@ -162,6 +162,45 @@ Before declaring a cycle clean, verify the Activity UI against the artifacts:
 If Activity is missing rows that the smoke artifact counts, treat the cycle as
 not signed off even if the backend reports passed.
 
+## Recovery Job Processing Without Local Redis
+
+Use this only for a senior-approved one-off recovery when
+`tcg-pipeline news reprocess-stranded --apply` creates a persisted
+`scrape_jobs(kind='news_agent_integrate')` row but cannot enqueue it because the
+local Redis connection is unavailable.
+
+The direct worker entry point is acceptable because `run_news_agent_integrate_job`
+loads the job from the database by job id, reads `scrape_jobs.target_payload` for
+`article_id`, `source_run_id`, and optional `force_project_id`, runs the same
+integration path the RQ worker would run, marks the job completed, increments the
+source-run counters, and clears the `news_integrate_failed` alert. Redis is only
+the dispatch layer; it is not the durable job state.
+
+Procedure:
+
+```powershell
+$env:AGENT_ALLOW_LIVE_LLM = "true"
+@'
+from uuid import UUID
+from tcg_pipeline.workers.news_jobs import run_news_agent_integrate_job
+
+run_news_agent_integrate_job(UUID("<queued-news-agent-integrate-job-id>"))
+'@ | python -
+```
+
+Then verify all of the following before considering the recovery closed:
+
+```powershell
+tcg-pipeline news reprocess-stranded --article-id <article-id>
+```
+
+- The recovery `scrape_jobs` row has `status='completed'` and no `error_text`.
+- The original `news_integrate_failed` alert row has `cleared_at` populated.
+- Active news/semantic alert count is 0, or any remaining alert is explicitly
+  accepted for the cycle.
+- Pending reference count for the recovered article is 0.
+- A post-recovery `news-agent-smoke-report` or approved SQL substitute passes.
+
 ## Sign-Off Notes
 
 Each cycle note should include:

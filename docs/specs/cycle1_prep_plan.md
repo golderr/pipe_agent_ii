@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-18 (Item 5H acceptance validation closeout)
+> **Last updated:** 2026-05-18 (AGENT.reset preflight follow-ons)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -625,3 +625,4 @@ When all six items are `done`, link this document from the AGENT.reset row in RO
 Plans developed during cycle 1 prep that intentionally land outside this document's scope. Trail runs both directions — each follow-on has its own roadmap rows and operational doc.
 
 - **News extraction expansion (D.EXP.\*)** — three-stage Primary → Verifier → Arbiter pipeline + 15 new candidate fields + closed audit on 14 high-stakes targets. Forward-compatible foundation (`D.EXP.0` / `D.EXP.1` / `D.EXP.2` / `D.EXP.10`) lands in parallel with `AGENT.reset` cycle 1; A/B + downstream wiring runs post-cycle-1. Canonical reference: `docs/specs/news_extraction_expansion_overview.md`. Post-deployment automated review runbook: `docs/operations/reviewer_usefulness_review.md`. Deferred sub-items captured as `D.EXP.late.*` rows in ROADMAP.
+- **News-backed reference-less Discovery create path.** Cycle 1 preflight confirmed scheduled Urbanize source runs intentionally use `market='unscoped'` because `urbanize_la` is seeded without market/jurisdiction and matcher relevance decides the target market. This is non-blocking for 5H because permit/fallback Discovery cards use `source_run.market='los_angeles'`, while normal news-backed Discovery cards have persisted `NewsProjectReference` context. If a future workflow creates a news-backed reference-less Discovery card, define the market fallback explicitly before it can depend on `source_run.market`; market-unscoped scheduled sources should not silently create `unscoped` projects.
