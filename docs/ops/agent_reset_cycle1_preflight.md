@@ -1,8 +1,9 @@
 # AGENT.reset Cycle 1 Preflight
 
-> **Status:** Preflight packet prepared 2026-05-18. `AGENT.reset` R.1/R.2
-> remains gated until the active news integration alert is resolved and the
-> senior reviewer approves the destructive reset sequence.
+> **Status:** Preflight packet prepared 2026-05-18. The active news integration
+> alert found during preflight was recovered and cleared. `AGENT.reset` R.1/R.2
+> remains gated on senior reviewer approval for the destructive reset sequence
+> and the R.1 rollback-capable backup.
 >
 > **Last updated:** 2026-05-18.
 > **Maintained by:** Nate Goldstein + Claude Code.
@@ -125,6 +126,65 @@ Dry-run result:
 - Last error: Supabase pooler SSL `bad record mac`.
 - No `--apply` was run during this preflight.
 
+### Recovery Update
+
+Senior approved recovering the stranded article before R.1 so the reset cycle
+does not start with a pre-existing `news_integrate_failed` alert.
+
+Command:
+
+```powershell
+tcg-pipeline news reprocess-stranded `
+  --article-id 753cb948-4b97-4d79-94af-67b1e407f301 `
+  --apply
+```
+
+Local apply created recovery job `2f7ca648-13ae-4fb5-85c0-f908db0bb654` but
+could not enqueue it because local Redis was unavailable. The recovery job was
+then processed directly through the same worker entry point
+`run_news_agent_integrate_job` with `AGENT_ALLOW_LIVE_LLM=true`.
+
+Recovery result:
+
+- Job `2f7ca648-13ae-4fb5-85c0-f908db0bb654` completed at
+  `2026-05-18T20:14:24Z`.
+- The original `news_integrate_failed` alert row was cleared at
+  `2026-05-18T20:14:24Z`.
+- Follow-up `tcg-pipeline news reprocess-stranded --article-id
+  753cb948-4b97-4d79-94af-67b1e407f301` dry-run found 0 stranded articles.
+- SQL check found `active_news_alert_count=0`, recovery job status `completed`,
+  and `stranded_pending_reference_count=0`.
+
+Post-recovery baseline:
+
+```powershell
+tcg-pipeline news-agent-smoke-report `
+  --hours 6 `
+  --source-name urbanize_la `
+  --min-source-runs 1 `
+  --max-total-cost-usd 25 `
+  --output data/output/agent_reset/reset-20260518-preflight/news-agent-6h-post-recovery.json
+```
+
+Result:
+
+- Source runs: 1.
+- Agent runs: 3.
+- Outcomes: `completed=2`, `escalated=1`.
+- Triggers: `new_candidate=2`, `pass1_pass2_conflict=1`,
+  `possible_multi_candidate=1`.
+- Review item types: `new_candidate=2`, `possible_match=1`.
+- Status-regression counts: all 0.
+- Missing review links: 0.
+- Semantic parse statuses: `ok=3`.
+- News bucket total cost: `$0.833135` against `$125` hard cap.
+- Validation failures: none.
+
+The smoke report still lists the historical `news_integrate_failed` alert
+because it was raised inside the 6-hour reporting window, but that alert row has
+`cleared_at=2026-05-18T20:14:24Z`; the active-alert SQL check is the source of
+truth that no active news alert remains.
+
 ### Data-Quality Observations
 
 The 2026-05-18 Urbanize source run `be6a18a9-7a89-4694-b576-1ce0ab12d0cf`
@@ -147,22 +207,23 @@ context, while the 5H bug fix targeted permit/fallback cards.
 
 ## Gates Before R.1/R.2
 
-- Resolve or explicitly accept the active `news_integrate_failed` alert before
-  the reset cycle starts.
-- Re-run the 24-hour news smoke or an approved narrower substitute after
-  recovery, so the cycle starts from a known-clean monitoring state.
+- Active `news_integrate_failed` alert: resolved 2026-05-18.
+- Approved narrower post-recovery news smoke: passed 2026-05-18 with no
+  validation failures.
 - Get senior reviewer approval for the destructive reset sequence.
 - Take the R.1 rollback-capable backup before any truncate or reseed action.
 
 ## Next Action
 
-Recommended next action is a senior-reviewed decision on whether to run:
+Recommended next action is R.1: take the pre-reset rollback-capable backup per
+`docs/ops/migration_runbook.md` / `ROADMAP.md` discipline before any truncate or
+reseed action.
 
 ```powershell
-tcg-pipeline news reprocess-stranded `
-  --article-id 753cb948-4b97-4d79-94af-67b1e407f301 `
-  --apply
+pg_dump --format=custom --no-owner --no-privileges `
+  --file data/output/db_snapshots/<cycle-backup-name>.dump `
+  $env:DATABASE_URL
 ```
 
-After the recovery job completes, rerun the news smoke/checks and update this
-packet with the cleared-alert evidence before proceeding to `AGENT.reset` R.1.
+Record backup path, SHA256, byte size, target DB, and Alembic version before
+proceeding to R.2 truncate.
