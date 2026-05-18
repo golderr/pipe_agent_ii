@@ -5,7 +5,7 @@
 > rollback-capable backup is complete. R.2 remains gated on senior reviewer
 > approval for the destructive reset sequence.
 >
-> **Last updated:** 2026-05-18 (R.2 table-list planning).
+> **Last updated:** 2026-05-18 (R.2 executed).
 > **Maintained by:** Nate Goldstein + Claude Code.
 
 ---
@@ -310,8 +310,64 @@ Row counts for the proposed R.2 truncate set:
 
 Preserved operational cost history at planning time: `llm_cost_usage=67`.
 
+## R.2 Execution
+
+R.2 executed 2026-05-18 after runbook hardening commit `c1740cb`.
+
+Worker quiesce:
+
+- Render worker: `tcg-pipeline-worker` / `srv-d7sfvt7avr4c73b4uj2g`.
+- State before suspend: `suspended=not_suspended`, `numInstances=1`.
+- Render service `updatedAt` after suspend: `2026-05-18T21:23:56Z`.
+- Idempotent curl suspend retry: HTTP `200` at `2026-05-18T21:24:19Z`.
+- State after R.2: `suspended=suspended`, `numInstances=1`.
+- Worker remains suspended pending R.3 approval and reseed verification.
+
+Immediate pre-execution checks:
+
+- `psql ... SELECT 1`: passed.
+- Alembic before R.2: `202605140040`.
+
+Executed command shape:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '30s';
+TRUNCATE TABLE <27 explicit R.2 tables> RESTART IDENTITY;
+COMMIT;
+```
+
+Command output:
+
+```text
+BEGIN
+SET
+TRUNCATE TABLE
+COMMIT
+```
+
+No lock-timeout firing or warnings were observed.
+
+Post-execution verification:
+
+- All 27 R.2 truncate tables returned `0` rows.
+- Preserved table counts matched the pre-R.2 baseline exactly:
+  `alembic_version=1`, `cost_cap_overrides=0`, `cost_caps=3`,
+  `developer_alias=82`, `developer_registry=487`, `jurisdictions=2`,
+  `llm_cost_usage=67`, `markets=2`, `news_signal_flag_registry=25`,
+  `news_sources=3`, `service_credential_validations=0`,
+  `service_credentials=0`, `source_registrations=7`, `spatial_ref_sys=8500`.
+- Alembic after R.2: `202605140040`.
+- R.3 reseed has not been executed.
+
+Artifacts:
+
+```text
+data/output/agent_reset/reset-20260518-r2/
+```
+
 ## Next Action
 
-Recommended next action is R.2: truncate the approved data-table list only after
-explicit senior approval. Do not run any truncate or reseed command from this
-packet alone.
+Recommended next action is R.3: reseed from approved source exports only after
+explicit senior approval. Do not resume the worker or run R.3 from this packet
+alone.
