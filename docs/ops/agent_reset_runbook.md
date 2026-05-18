@@ -1,6 +1,6 @@
 # AGENT.reset Runbook
 
-> **Last updated:** 2026-05-18 (R.2 table-list planning).
+> **Last updated:** 2026-05-18 (R.2 execution hardening).
 >
 > **Cycle 1 preflight:** see `docs/ops/agent_reset_cycle1_preflight.md` for the
 > 2026-05-18 kickoff verification packet, recovery closeout, and R.1 backup
@@ -49,11 +49,38 @@ Before execution, run:
 & "C:\Program Files\PostgreSQL\18\bin\psql.exe" $env:DATABASE_URL -c "SELECT 1"
 ```
 
+Quiesce the Render worker before R.2 so scheduled news jobs, queued collector
+work, and worker heartbeats do not race the truncate or the R.3 reseed:
+
+1. Suspend `tcg-pipeline-worker` (`srv-d7sfvt7avr4c73b4uj2g`) via Render API or
+   dashboard.
+2. Wait at least 30 seconds for in-flight work to drain.
+3. Re-run the `SELECT 1` connectivity check immediately before the truncate.
+4. Execute R.2.
+5. Run post-execution verification queries.
+6. Keep the worker suspended through the senior R.3 approval gate and R.3 reseed
+   verification, then resume it.
+
+Render API:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://api.render.com/v1/services/srv-d7sfvt7avr4c73b4uj2g/suspend" `
+  -Headers @{ Authorization = "Bearer $env:RENDER_API_KEY"; Accept = "application/json" }
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://api.render.com/v1/services/srv-d7sfvt7avr4c73b4uj2g/resume" `
+  -Headers @{ Authorization = "Bearer $env:RENDER_API_KEY"; Accept = "application/json" }
+```
+
 Then run the approved command in one transaction:
 
 ```powershell
 $sql = @'
 BEGIN;
+SET LOCAL lock_timeout = '30s';
 TRUNCATE TABLE
   agent_run_review_items,
   agent_runs,
