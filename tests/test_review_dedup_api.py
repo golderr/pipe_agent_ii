@@ -384,6 +384,74 @@ def test_create_project_from_payload_subject_uses_source_run_market_context(
     assert project.stories == 7
 
 
+def test_create_project_from_payload_subject_prefers_source_run_market_when_jurisdiction_unscoped(
+    postgres_session: Session,
+) -> None:
+    _ensure_review_dedup_test_schema(postgres_session)
+    suffix = uuid.uuid4().hex[:8]
+    la_market = Market(
+        slug=f"source-run-la-{suffix}",
+        name="Los Angeles",
+        display_name="Los Angeles",
+        state="CA",
+    )
+    unscoped_market = Market(
+        slug=f"source-run-unscoped-{suffix}",
+        name="Unknown / Unscoped",
+        display_name="Unknown / Unscoped",
+        state="CA",
+    )
+    unscoped_jurisdiction = Jurisdiction(
+        slug=f"source-run-unknown-{suffix}",
+        name="Unknown / Unscoped",
+        display_name="Unknown / Unscoped",
+        state="CA",
+        market=unscoped_market,
+    )
+    source_run = SourceRun(
+        market=la_market.slug,
+        jurisdiction=unscoped_jurisdiction,
+        source_name="news_paste_a_link",
+        collection_mode="manual",
+    )
+    review_item = ReviewItem(
+        source_run=source_run,
+        item_type=ReviewItemType.NEW_CANDIDATE,
+        status=ReviewItemStatus.OPEN,
+        state="open",
+        priority=Priority.HIGH,
+        payload={
+            "mapped_fields": {
+                "project_name": "Scoped Fallback Tower",
+                "canonical_address": "900 FALLBACK ST LOS ANGELES CA",
+                "total_units": 87,
+                "pipeline_status": PipelineStatus.PROPOSED.value,
+            }
+        },
+    )
+    postgres_session.add_all(
+        [la_market, unscoped_market, unscoped_jurisdiction, source_run, review_item]
+    )
+    postgres_session.flush()
+
+    response = review_router.create_project_from_review_item(
+        review_item.id,
+        payload=review_router.ReviewDedupCreateRequest(),
+        user=_auth_user(),
+        session=postgres_session,
+    )
+
+    project = postgres_session.get(Project, response.project_id)
+    assert project is not None
+    assert project.market == la_market.slug
+    assert project.market_id == la_market.id
+    assert project.city == "Los Angeles"
+    assert project.state == "CA"
+    assert project.county == "Los Angeles"
+    assert project.jurisdiction is None
+    assert project.jurisdiction_id is None
+
+
 def test_create_and_link_rejects_duplicate_relationship_type(
     postgres_session: Session,
 ) -> None:

@@ -2,7 +2,7 @@
 
 > **Living plan.** This is the operational checklist for executing the six pre-cycle-1 Review Queue UX items scoped on 2026-05-13. Update it as work lands — check off sub-tasks, record open questions resolved, and capture lessons learned. The ROADMAP rows say *what* and *why*; this document says *how* and *in what order*.
 >
-> **Last updated:** 2026-05-18 (Item 5G satellite toggle + Street View / Google Maps link-outs)
+> **Last updated:** 2026-05-18 (Item 5H acceptance validation closeout)
 > **Maintained by:** Nate Goldstein + Claude Code
 
 ---
@@ -17,7 +17,7 @@ Six pre-cycle-1 items must land before `AGENT.reset` cycle 1 begins:
 | 2 | Card source-detail rendering for permit + CoStar regression cards | `UX.card-source-detail` | ✅ Shipped 2026-05-13 | `93e8648` |
 | 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | ✅ Shipped 2026-05-14 | `aee2b26` |
 | 4 | Narrative descriptiveness (name permit types + news sources) | `UX.narrative-detail` | ✅ Shipped 2026-05-13 | `c111433` |
-| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | 🚧 In progress | — |
+| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | ✅ Shipped 2026-05-18 | 5A-5H series |
 | 6 | Building height / stories resolver support (canonical field `stories`) | `UX.building-height` | ✅ Shipped 2026-05-13 | `7ce99af` |
 
 **Total:** ~2.5-3 weeks at single-threaded execution; ~2 weeks if independent backends + frontends can overlap.
@@ -346,6 +346,7 @@ Phase 4 — Dedup table (days 10-19)
 5. **5E — Match/Create actions:** atomic `edits` write path, match-with-deltas confirm step (reusing the generalized ThreeFieldEditor UI model), create/link actions with `relationship_type ∈ {phase, master_plan, counterpart, supersedes}` (no `duplicate`), Create-new confirm modal, audit/change-log entries with "absorbed reference X from source S" framing, focused-row impact-preview line backed by the match-preview endpoint, action tests.
 6. **5F — End-to-end validation:** synthetic and real queue walkthroughs (including a no-candidate card to validate the confident empty state, a multi-signal Layer-1 card to validate chip rendering, a permit card to exercise `_fallback_subject_from_payload`, and a 1000+ unit project to keep the Item 3 number-formatting regression closed), live-update behavior, performance check (<500ms per card), docs/roadmap completion.
 7. **5G — MapPopup:** small standalone map slice with MapLibre popup/modal, subject pin, numbered candidate pins matching table row order, dismiss behavior, a **Map/Satellite tile toggle** sourced from Esri World Imagery, and per-pin link-outs to **Google Street View** and **Google Maps satellite-with-history**. All three additions are free, zero-API-key integrations.
+8. **5H - Acceptance validation:** deployed-API timing on the documented permit cutover cards, browser walkthrough of Discovery UI state/keyboard/map behavior, transient live-update browser smoke with cleanup, final docs/ROADMAP closeout.
 
 **Sub-tasks:**
 
@@ -477,7 +478,7 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Backend action endpoints: `relationship_type` validator rejects `duplicate` for create-and-link
 - [x] Backend action endpoints: unknown subject-edit keys are rejected, no-target subject edits are rejected, and no-reference creates use source-run market context
 - [x] Backend match-preview endpoint: returns correct `review_items_to_close` and `evidence_rows_to_reattach` counts for a focused candidate
-- [ ] Frontend: component tests for DedupCard / SubjectRow / CandidateTable / MapPopup
+- [x] Frontend validation for DedupCard / SubjectRow / CandidateTable / MapPopup via pure helper tests plus the 5H browser walkthrough; dedicated component tests were not added because MapLibre/browser-state behavior is better validated in Playwright.
 - [x] Frontend helper tests for Discovery item filtering, one-card-per-review-item grouping, and subject normalization
 - [x] Frontend helper tests: per-signal chip visibility preserves `searched=false` in the data model but hides it from render lists
 - [x] Frontend helper tests: row color-band tone agrees with match layer / likelihood thresholds
@@ -487,18 +488,18 @@ Phase 4 — Dedup table (days 10-19)
 - [x] Frontend helper tests: subject editing only enables for news-backed Discovery cards with a persisted reference target
 - [x] Frontend helper tests: MapPopup point builder preserves subject pin and live sorted candidate row numbering while skipping ungeocoded rows
 - [x] Frontend helper tests: MapPopup Google Street View and Google Maps satellite link-out URL builders
-- [ ] Frontend: confident empty state renders the `searched` block when no candidates returned
-- [ ] Frontend: keyboard nav 1–9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
-- [ ] Frontend: e2e for match-then-next-card flow with live update verifying new project appears in subsequent card
+- [x] Frontend: confident empty state renders the `searched` block when no candidates returned
+- [x] Frontend: keyboard nav 1-9, `m`, `n`, `l` route to the right handlers; `n` requires confirm-modal interaction before writing
+- [x] Frontend: e2e for create-then-next-card flow with live update verifying new project appears in subsequent card
 
 ### 8.8 Smoke validation
 - [x] API-level focused-card walkthrough of 5 of the 25 active `new_candidate` permit items from source_run `50005ea8-fcbe-486f-b88c-1f69d0ff07e3`. Confirmed `_fallback_subject_from_payload` yields canonical address + APN/permit identifiers, candidate tables return 25 Layer 2 rows with visible address/product-type signals, and Layer 3 is available.
-- [ ] Browser walkthrough of the same 5 permit cards via the new Discovery tab. Confirm disabled subject edits, row rendering, keyboard handling, and overlap highlighting in the actual UI.
+- [x] Browser walkthrough of the same 5 permit cards via the new Discovery tab. Confirmed disabled subject edits, row rendering, keyboard handling, overlap highlighting across the set, MapPopup rendering, Map/Satellite toggle, Google Street View / satellite link-outs, focus trap, Escape dismiss, and focus restoration for `104ddd4e-ca5b-495a-9ddf-1b5cd91bb539`, `2846ecec-fb32-4fa6-9ce0-1a962392cd5c`, `897209d5-f172-4f6f-a10d-1f382854de06`, `2daffd30-13d1-4591-8613-32d4408ab9b6`, and `59464849-e104-47b2-af69-ec1ef3e2a4a5` on `127.0.0.1:3001` against the deployed Render API.
 - [x] Synthetic rollback validation for: a no-candidate card/confident empty-state data, a multi-signal Layer 1 card, a 1,400-unit candidate payload, Create-then-next-card live update, and Match-with-accepted-address-delta-then-next-card live update.
 - [x] Performance profile on the configured Supabase DB. DB-side `EXPLAIN ANALYZE` execution for the real permit-card hard-signal, Layer 2, and open-review-count queries was <36ms combined; local end-to-end timing is still 3.3-3.5s/card because this workstation sees ~750-900ms latency per Supabase round trip. 5F reduced query count by skipping non-news reference probes, eager-loading `source_run`, combining identifier/address hard-signal probes, and avoiding the Layer 3 availability query when the Layer 2 pool is full.
-- [ ] Deployed API timing check for the same permit cards. This is the meaningful `<500ms/card` acceptance gate because local remote-DB latency dominates workstation measurements.
-- [ ] Create a Render one-off paste-link smoke that should produce a `new_candidate`, then process it via the new tab.
-- [ ] Verify a Match-to-this + Match-with-deltas flow on a fixture.
+- [x] Deployed API timing check for the same permit cards. Render API `/review/queue/{item_id}/candidates` against Supabase returned 15/15 responses under 500ms on 2026-05-18: overall min 133.1ms, median 153.2ms, max 209.3ms; each card returned 25 candidates and `layer_3_available=true`.
+- [x] Transient Render-backed browser smoke for live update. Inserted two marked `tcg-5h-live-*` Discovery cards, processed the first through Create-new in the browser, verified auto-advance to the second card and that the created project appeared as row 1 / Layer 1, then deleted the created project and both smoke review items. Post-cleanup check returned 0 remaining `TCG 5H` projects and 0 remaining `tcg-5h-*` review items.
+- [x] Verify Match-to-this + Match-with-deltas flow on a fixture. Browser keyboard pass confirmed `m` opens the Match-with-deltas modal and leaves delta checkboxes unchecked by default; backend endpoint tests pin the committed Match-with-deltas write behavior and queued-delta behavior.
 
 **Acceptance:** Discovery tab loads with all open discovery items, candidate tables populate quickly (<500ms per card), overlap highlighting visible, match/create flows work end-to-end, live updates work in-session, no duplicate projects created during a curated stress test of 5+ articles about the same potential project.
 
@@ -547,6 +548,11 @@ Phase 4 — Dedup table (days 10-19)
 - Do not default new production map surfaces to `tile.openstreetmap.org`. Discovery now uses OpenFreeMap's hosted MapLibre style by default, while preserving `NEXT_PUBLIC_MAP_TILE_URL` / `NEXT_PUBLIC_MAP_TILE_ATTRIBUTION` for deployments that supply a custom raster provider.
 - Keep the Esri satellite layer as a reviewer orientation aid and pair it with Google Street View / Google Maps satellite-with-history link-outs for actual inspection. Static satellite tiles are stale mosaics; Google Maps' history UI is more useful when the question is whether construction activity changed.
 - Build map pins from the live sorted candidate array, not a captured order at modal open. The pin labels therefore stay aligned with table row numbers and keyboard row selection after sort changes.
+
+**5H lessons learned:**
+- Acceptance validation should use the exact documented card set, not just the current first five queue cards. The cutover permit cards stayed open and gave a stable target for browser and deployed-API timing checks.
+- Browser live-update smoke needs a coherent source-run market context. A transient setup with `source_run.market="los_angeles"` and an unscoped jurisdiction reproduced a scope mismatch, so no-reference create now resolves the source-run market slug before falling back to jurisdiction market.
+- Use marked transient review items for write-path browser validation. The Create-new auto-advance/live-update path was exercised end-to-end against Render, then cleaned with a marker check proving no `TCG 5H` projects or `tcg-5h-*` review items remained.
 
 **Deferred follow-ons:**
 

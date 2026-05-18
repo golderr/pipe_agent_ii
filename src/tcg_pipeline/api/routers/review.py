@@ -32,6 +32,7 @@ from tcg_pipeline.db.models import (
     ChangeLog,
     ChangeType,
     Evidence,
+    Market,
     NewsMatchStatus,
     NewsProjectReference,
     PipelineStatus,
@@ -743,29 +744,42 @@ def _create_project_from_discovery_subject(
         raise ValueError("Cannot create a project without canonical_address.")
     source_obj = getattr(getattr(reference, "article", None), "source", None) if reference else None
     source_run = review_item.source_run
+    source_run_market_slug = _first_text(getattr(source_run, "market", None))
+    source_run_market = _market_for_slug(session, source_run_market_slug)
     jurisdiction = getattr(source_obj, "jurisdiction", None) or getattr(
         source_run, "jurisdiction", None
     )
-    market = getattr(source_obj, "market", None) or getattr(jurisdiction, "market", None)
+    market = (
+        getattr(source_obj, "market", None)
+        or source_run_market
+        or getattr(jurisdiction, "market", None)
+    )
+    jurisdiction_for_project = jurisdiction
+    if (
+        jurisdiction_for_project is not None
+        and market is not None
+        and getattr(jurisdiction_for_project, "market_id", None) != getattr(market, "id", None)
+    ):
+        jurisdiction_for_project = None
     actor = _actor_for_audit(user)
     lat = _coerce_float(fields.get("lat"), subject.lat)
     lng = _coerce_float(fields.get("lng"), subject.lng)
     market_slug = _first_text(
         fields.get("market"),
         getattr(market, "slug", None),
-        getattr(source_run, "market", None),
+        source_run_market_slug,
     )
     city = _first_text(
         fields.get("city"),
         getattr(reference, "candidate_city", None),
-        getattr(jurisdiction, "display_name", None),
-        getattr(jurisdiction, "name", None),
+        getattr(jurisdiction_for_project, "display_name", None),
+        getattr(jurisdiction_for_project, "name", None),
         getattr(market, "display_name", None),
         getattr(market, "name", None),
     )
     state = _first_text(
         fields.get("state"),
-        getattr(jurisdiction, "state", None),
+        getattr(jurisdiction_for_project, "state", None),
         getattr(market, "state", None),
     )
     county = _first_text(
@@ -786,13 +800,14 @@ def _create_project_from_discovery_subject(
         lng=lng,
         location=build_location(lat, lng) if lat is not None and lng is not None else None,
         market=market_slug,
-        market_id=getattr(market, "id", None) or getattr(jurisdiction, "market_id", None),
+        market_id=getattr(market, "id", None)
+        or getattr(jurisdiction_for_project, "market_id", None),
         city=city,
         state=state,
         county=county,
         zip=_first_text(fields.get("zip")),
-        jurisdiction=getattr(jurisdiction, "name", None),
-        jurisdiction_id=getattr(jurisdiction, "id", None),
+        jurisdiction=getattr(jurisdiction_for_project, "name", None),
+        jurisdiction_id=getattr(jurisdiction_for_project, "id", None),
         project_name=_first_text(fields.get("project_name"), subject.project_name),
         developer=_first_text(fields.get("developer"), subject.developer),
         total_units=_coerce_int(fields.get("total_units"), subject.total_units),
@@ -818,6 +833,12 @@ def _create_project_from_discovery_subject(
     session.add(project)
     session.flush()
     return project
+
+
+def _market_for_slug(session: Session, slug: str | None) -> Market | None:
+    if slug is None:
+        return None
+    return session.execute(select(Market).where(Market.slug == slug)).scalar_one_or_none()
 
 
 def _apply_reference_edits(
