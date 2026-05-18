@@ -17,7 +17,7 @@ Six pre-cycle-1 items must land before `AGENT.reset` cycle 1 begins:
 | 2 | Card source-detail rendering for permit + CoStar regression cards | `UX.card-source-detail` | ✅ Shipped 2026-05-13 | `93e8648` |
 | 3 | 3-field Current/Evidence/Result model + Confirm/Defer/Detail + auto-advance | `UX.3-field-review` | ✅ Shipped 2026-05-14 | `aee2b26` |
 | 4 | Narrative descriptiveness (name permit types + news sources) | `UX.narrative-detail` | ✅ Shipped 2026-05-13 | `c111433` |
-| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | ✅ Shipped 2026-05-18 | 5A-5H series |
+| 5 | Duplicate-prevention table for new candidates + possible matches | `UX.dedup-table` | ✅ Shipped 2026-05-18 | `5dbc670..59c293d` |
 | 6 | Building height / stories resolver support (canonical field `stories`) | `UX.building-height` | ✅ Shipped 2026-05-13 | `7ce99af` |
 
 **Total:** ~2.5-3 weeks at single-threaded execution; ~2 weeks if independent backends + frontends can overlap.
