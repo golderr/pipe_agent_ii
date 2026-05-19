@@ -5,12 +5,22 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
-from tcg_pipeline.cli import app
-from tcg_pipeline.db.models import Evidence, IdentifierType, ProjectIdentifier, ProjectRelationship
+from tcg_pipeline.cli import app, resolve_all
+from tcg_pipeline.db.models import (
+    ChangeLog,
+    Evidence,
+    IdentifierType,
+    Project,
+    ProjectIdentifier,
+    ProjectRelationship,
+    ProjectSourceRecord,
+    ResolutionLog,
+    StatusHistory,
+)
 from tcg_pipeline.db.seed import (
     ingest_pipedream_workbooks,
     persist_pipedream_import_results,
@@ -154,6 +164,161 @@ def test_seed_pipedream_command_persists_when_not_dry_run(
     assert persisted_identifier == "994.00001"
 
 
+def test_seed_pipedream_with_defer_resolve_skips_resolution_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_defer_resolve.xlsx",
+        [
+            {
+                "ProjectID": "994.10001",
+                "Address": "9914 E Deferred Ln",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "Under Construction",
+                "CurrStatusDate": "2026-04-01",
+                "TotUnits": 120,
+            }
+        ],
+    )
+
+    @contextmanager
+    def fake_session_factory() -> Session:
+        yield postgres_session
+
+    monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+
+    result = runner.invoke(
+        app,
+        ["seed-pipedream", str(workbook_path), "--market", "los_angeles", "--defer-resolve"],
+    )
+
+    assert result.exit_code == 0
+    assert "Deferred inline resolve: True" in result.stdout
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value == "994.10001",
+        )
+    ).scalar_one()
+    project = postgres_session.get(Project, project_id)
+
+    assert project is not None
+    assert project.last_evidence_date is None
+    assert _count_rows(postgres_session, Evidence) == 1
+    assert _count_rows(postgres_session, ProjectSourceRecord) == 1
+    assert _count_rows(postgres_session, StatusHistory) == 1
+    assert _count_rows(postgres_session, ResolutionLog) == 0
+    assert _count_rows(postgres_session, ChangeLog) == 0
+
+
+def test_seed_pipedream_without_flag_resolves_inline(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_inline_resolve.xlsx",
+        [
+            {
+                "ProjectID": "994.10002",
+                "Address": "9915 E Inline Ln",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "Under Construction",
+                "CurrStatusDate": "2026-04-01",
+                "TotUnits": 121,
+            }
+        ],
+    )
+
+    @contextmanager
+    def fake_session_factory() -> Session:
+        yield postgres_session
+
+    monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+
+    result = runner.invoke(
+        app,
+        ["seed-pipedream", str(workbook_path), "--market", "los_angeles"],
+    )
+
+    assert result.exit_code == 0
+    assert "Deferred inline resolve: False" in result.stdout
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value == "994.10002",
+        )
+    ).scalar_one()
+    project = postgres_session.get(Project, project_id)
+
+    assert project is not None
+    assert project.last_evidence_date is not None
+    assert _count_rows(postgres_session, ResolutionLog) > 0
+
+
+def test_resolve_all_apply_completes_deferred_pipedream_seed_state(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    workbook_path = _build_pipedream_workbook(
+        tmp_path / "pipedream_deferred_resolve_all.xlsx",
+        [
+            {
+                "ProjectID": "994.10003",
+                "Address": "9916 E Resolve All Ln",
+                "State": "CA",
+                "County": "Los Angeles",
+                "City": "Los Angeles",
+                "CurrStatus": "Under Construction",
+                "CurrStatusDate": "2026-04-01",
+                "TotUnits": 122,
+            }
+        ],
+    )
+
+    @contextmanager
+    def fake_session_factory() -> Session:
+        yield postgres_session
+
+    monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+
+    seed_result = runner.invoke(
+        app,
+        ["seed-pipedream", str(workbook_path), "--market", "los_angeles", "--defer-resolve"],
+    )
+    assert seed_result.exit_code == 0
+
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.TCG_PIPEDREAM_ID,
+            ProjectIdentifier.value == "994.10003",
+        )
+    ).scalar_one()
+    project = postgres_session.get(Project, project_id)
+    assert project is not None
+    assert project.last_evidence_date is None
+    assert _count_rows(postgres_session, ResolutionLog) == 0
+    assert _count_rows(postgres_session, StatusHistory) == 1
+
+    resolve_all(market="los_angeles", apply=True, clear_log=True, limit=1, batch_size=1)
+    postgres_session.expire_all()
+    project = postgres_session.get(Project, project_id)
+
+    assert project is not None
+    assert project.last_evidence_date is not None
+    assert project.confidence_reason is not None
+    assert project.likelihood is not None
+    assert _count_rows(postgres_session, ResolutionLog) > 0
+    assert _count_rows(postgres_session, StatusHistory) == 1
+
+
 def test_persist_import_results_is_idempotent_for_existing_project_ids(
     postgres_session: Session,
     tmp_path: Path,
@@ -281,6 +446,10 @@ def test_persist_import_results_writes_pipedream_snapshot_evidence(
         "value": "Apartment",
         "confidence": None,
     }
+
+
+def _count_rows(session: Session, model: type[object]) -> int:
+    return session.execute(select(func.count()).select_from(model)).scalar_one()
 
 
 def _build_pipedream_workbook(path: Path, rows: list[dict[str, object]]) -> Path:

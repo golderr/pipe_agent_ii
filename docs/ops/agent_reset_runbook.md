@@ -193,12 +193,21 @@ before running seed commands.
 Use the established order for consistency:
 
 ```powershell
-tcg-pipeline seed-costar data/seed/costar --market los_angeles
-tcg-pipeline seed-pipedream data/seed/pipedream --market los_angeles
+tcg-pipeline seed-costar data/seed/costar --market los_angeles --defer-resolve
+tcg-pipeline seed-pipedream data/seed/pipedream --market los_angeles --defer-resolve
 ```
 
+Use `--defer-resolve` for reset-cycle bulk seeds. The first cycle 1 R.3
+attempt on 2026-05-18 imported 1,001 CoStar rows successfully but failed during
+inline per-row `resolve_project(...)` with
+`IdleInTransactionSessionTimeout`; the bulk seed transaction exceeded the
+session-level `idle_in_transaction_session_timeout = '15min'`. Deferring
+resolution keeps R.3 focused on writing projects, source records, and evidence;
+R.5 then runs `resolve-all --apply` in bounded batches.
+
 After R.3, verify seed command stdout and SQL row counts for `projects`,
-`evidence`, and `project_source_records`. Do not proceed to R.4 collectors until
+`evidence`, and `project_source_records`. Confirm `last_evidence_date` is
+expected to remain unresolved until R.5. Do not proceed to R.4 collectors until
 senior review approves the R.3 results.
 
 ## Required Cycle Artifacts

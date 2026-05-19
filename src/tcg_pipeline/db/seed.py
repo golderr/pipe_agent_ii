@@ -150,13 +150,17 @@ def ingest_costar_workbooks(
 def persist_pipedream_import_result(
     session: Session,
     import_result: PipedreamImportResult,
+    *,
+    defer_resolve: bool = False,
 ) -> PipedreamPersistResult:
-    return persist_pipedream_import_results(session, [import_result])
+    return persist_pipedream_import_results(session, [import_result], defer_resolve=defer_resolve)
 
 
 def persist_pipedream_import_results(
     session: Session,
     import_results: Sequence[PipedreamImportResult],
+    *,
+    defer_resolve: bool = False,
 ) -> PipedreamPersistResult:
     project_records = [
         project_record
@@ -228,7 +232,7 @@ def persist_pipedream_import_results(
             ingest_method="seed_import",
             notes="Captured from pipedream seed import.",
         )
-        if evidence_result.changed:
+        if evidence_result.changed and not defer_resolve:
             session.flush()
             resolve_project(
                 project_record.project.id,
@@ -243,13 +247,17 @@ def persist_pipedream_import_results(
 def persist_costar_import_result(
     session: Session,
     import_result: CoStarImportResult,
+    *,
+    defer_resolve: bool = False,
 ) -> CoStarPersistResult:
-    return persist_costar_import_results(session, [import_result])
+    return persist_costar_import_results(session, [import_result], defer_resolve=defer_resolve)
 
 
 def persist_costar_import_results(
     session: Session,
     import_results: Sequence[CoStarImportResult],
+    *,
+    defer_resolve: bool = False,
 ) -> CoStarPersistResult:
     project_records = [
         project_record
@@ -360,7 +368,7 @@ def persist_costar_import_results(
             ingest_method="seed_import",
             notes="Captured from costar seed import.",
         )
-        if evidence_result.changed:
+        if evidence_result.changed and not defer_resolve:
             session.flush()
             resolution_result = resolve_project(
                 target_project_id,
@@ -399,6 +407,7 @@ def seed_pipedream_workbooks(
     market: str,
     source_name: str = PIPEDREAM_SOURCE_NAME,
     allowed_cities: Iterable[str] | None = None,
+    defer_resolve: bool = False,
 ) -> tuple[list[PipedreamImportResult], PipedreamPersistResult]:
     import_results = ingest_pipedream_workbooks(
         workbook_paths,
@@ -406,7 +415,11 @@ def seed_pipedream_workbooks(
         source_name=source_name,
         allowed_cities=allowed_cities,
     )
-    persist_result = persist_pipedream_import_results(session, import_results)
+    persist_result = persist_pipedream_import_results(
+        session,
+        import_results,
+        defer_resolve=defer_resolve,
+    )
     return import_results, persist_result
 
 
@@ -417,6 +430,7 @@ def seed_costar_workbooks(
     market: str,
     source_name: str = COSTAR_SOURCE_NAME,
     allowed_cities: Iterable[str] | None = None,
+    defer_resolve: bool = False,
 ) -> tuple[CoStarImportResult, CoStarPersistResult]:
     import_result = ingest_costar_workbooks(
         workbook_paths,
@@ -424,7 +438,11 @@ def seed_costar_workbooks(
         source_name=source_name,
         allowed_cities=allowed_cities,
     )
-    persist_result = persist_costar_import_result(session, import_result)
+    persist_result = persist_costar_import_result(
+        session,
+        import_result,
+        defer_resolve=defer_resolve,
+    )
     return import_result, persist_result
 
 

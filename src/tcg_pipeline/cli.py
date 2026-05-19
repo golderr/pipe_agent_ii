@@ -630,6 +630,11 @@ def seed_pipedream(
         False,
         help="Preview import results without writing to the database.",
     ),
+    defer_resolve: bool = typer.Option(
+        False,
+        "--defer-resolve",
+        help="Write seed rows and evidence without inline resolution; run resolve-all afterward.",
+    ),
 ) -> None:
     """Ingest one or more Pipedream workbooks and optionally persist them."""
     import_results = ingest_pipedream_workbooks(
@@ -646,9 +651,14 @@ def seed_pipedream(
     session_factory = get_session_factory()
     with session_factory() as session:
         _echo_developer_registry_bootstrap_warning_if_needed(session)
-        persist_result = persist_pipedream_import_results(session, import_results)
+        persist_result = persist_pipedream_import_results(
+            session,
+            import_results,
+            defer_resolve=defer_resolve,
+        )
         session.commit()
 
+    typer.echo(f"Deferred inline resolve: {defer_resolve}")
     typer.echo(f"Persisted projects: {persist_result.inserted_projects}")
     typer.echo(f"Persisted dismissed records: {persist_result.inserted_dismissed_records}")
     typer.echo(f"Skipped existing projects: {persist_result.skipped_existing_project_count}")
@@ -774,6 +784,11 @@ def seed_costar(
         False,
         help="Preview import results without writing to the database.",
     ),
+    defer_resolve: bool = typer.Option(
+        False,
+        "--defer-resolve",
+        help="Write seed rows and evidence without inline resolution; run resolve-all afterward.",
+    ),
 ) -> None:
     """Ingest one or more CoStar workbooks and optionally persist them."""
     resolved_workbook_paths = _expand_workbook_inputs(workbook_paths, suffix=".xlsx")
@@ -794,9 +809,14 @@ def seed_costar(
     session_factory = get_session_factory()
     with session_factory() as session:
         _echo_developer_registry_bootstrap_warning_if_needed(session)
-        persist_result = persist_costar_import_result(session, import_result)
+        persist_result = persist_costar_import_result(
+            session,
+            import_result,
+            defer_resolve=defer_resolve,
+        )
         session.commit()
 
+    typer.echo(f"Deferred inline resolve: {defer_resolve}")
     typer.echo(f"Persisted new projects: {persist_result.inserted_projects}")
     typer.echo(f"Matched existing projects: {persist_result.matched_existing_projects}")
     typer.echo(f"Matched by CoStar property id: {persist_result.matched_by_costar_property_id}")

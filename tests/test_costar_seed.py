@@ -6,13 +6,14 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import inspect, select
+from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
-from tcg_pipeline.cli import app
+from tcg_pipeline.cli import app, resolve_all
 from tcg_pipeline.db.evidence import write_evidence
 from tcg_pipeline.db.models import (
+    ChangeLog,
     Evidence,
     IdentifierType,
     PipelineStatus,
@@ -20,8 +21,10 @@ from tcg_pipeline.db.models import (
     Project,
     ProjectIdentifier,
     ProjectSourceRecord,
+    ResolutionLog,
     ReviewItem,
     ReviewItemType,
+    StatusHistory,
 )
 from tcg_pipeline.db.seed import (
     ingest_costar_workbooks,
@@ -304,7 +307,7 @@ def test_persist_costar_import_result_creates_low_priority_regression_review(
     assert review_item.payload["system_recommendation"]["action"] == (
         "keep_current_recommended"
     )
-    assert "CoStar's" in review_item.payload["human_summary"]
+    assert "CoStar upload from" in review_item.payload["human_summary"]
     assert "lists this project as Approved" in review_item.payload["human_summary"]
     assert (
         "LADBS inspection evidence from May 1, 2026 supports Under Construction"
@@ -482,6 +485,191 @@ def test_seed_costar_command_reports_merge_counts(
     assert "Inserted source records: 1" in result.stdout
 
 
+def test_seed_costar_with_defer_resolve_skips_resolution_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    costar_path = _build_costar_workbook(
+        tmp_path / "costar_defer_resolve.xlsx",
+        headers=[
+            "PropertyID",
+            "Property Address",
+            "City",
+            "State",
+            "Zip",
+            "County Name",
+            "Constr Status",
+            "Number Of Units",
+        ],
+        rows=[
+            {
+                "PropertyID": "CST-DEFER-1",
+                "Property Address": "8702 W Deferred Way",
+                "City": "Los Angeles",
+                "State": "CA",
+                "Zip": "90018",
+                "County Name": "Los Angeles",
+                "Constr Status": "Under Construction",
+                "Number Of Units": 88,
+            }
+        ],
+    )
+
+    @contextmanager
+    def fake_session_factory() -> Session:
+        yield postgres_session
+
+    monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+
+    result = runner.invoke(
+        app,
+        ["seed-costar", str(costar_path), "--market", "los_angeles", "--defer-resolve"],
+    )
+
+    assert result.exit_code == 0
+    assert "Deferred inline resolve: True" in result.stdout
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.COSTAR_PROPERTY_ID,
+            ProjectIdentifier.value == "CST-DEFER-1",
+        )
+    ).scalar_one()
+    project = postgres_session.get(Project, project_id)
+
+    assert project is not None
+    assert project.last_evidence_date is None
+    assert _count_rows(postgres_session, Evidence) == 1
+    assert _count_rows(postgres_session, ProjectSourceRecord) == 1
+    assert _count_rows(postgres_session, StatusHistory) == 1
+    assert _count_rows(postgres_session, ResolutionLog) == 0
+    assert _count_rows(postgres_session, ChangeLog) == 0
+
+
+def test_seed_costar_without_flag_resolves_inline(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    costar_path = _build_costar_workbook(
+        tmp_path / "costar_inline_resolve.xlsx",
+        headers=[
+            "PropertyID",
+            "Property Address",
+            "City",
+            "State",
+            "Zip",
+            "County Name",
+            "Constr Status",
+            "Number Of Units",
+        ],
+        rows=[
+            {
+                "PropertyID": "CST-INLINE-1",
+                "Property Address": "8703 W Inline Way",
+                "City": "Los Angeles",
+                "State": "CA",
+                "Zip": "90018",
+                "County Name": "Los Angeles",
+                "Constr Status": "Under Construction",
+                "Number Of Units": 90,
+            }
+        ],
+    )
+
+    @contextmanager
+    def fake_session_factory() -> Session:
+        yield postgres_session
+
+    monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+
+    result = runner.invoke(
+        app,
+        ["seed-costar", str(costar_path), "--market", "los_angeles"],
+    )
+
+    assert result.exit_code == 0
+    assert "Deferred inline resolve: False" in result.stdout
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.COSTAR_PROPERTY_ID,
+            ProjectIdentifier.value == "CST-INLINE-1",
+        )
+    ).scalar_one()
+    project = postgres_session.get(Project, project_id)
+
+    assert project is not None
+    assert project.last_evidence_date is not None
+    assert _count_rows(postgres_session, ResolutionLog) > 0
+
+
+def test_resolve_all_apply_completes_deferred_costar_seed_state(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_session: Session,
+    tmp_path: Path,
+) -> None:
+    costar_path = _build_costar_workbook(
+        tmp_path / "costar_deferred_resolve_all.xlsx",
+        headers=[
+            "PropertyID",
+            "Property Address",
+            "City",
+            "State",
+            "Zip",
+            "County Name",
+            "Constr Status",
+            "Number Of Units",
+        ],
+        rows=[
+            {
+                "PropertyID": "CST-RESOLVE-ALL-1",
+                "Property Address": "8704 W Resolve All Way",
+                "City": "Los Angeles",
+                "State": "CA",
+                "Zip": "90018",
+                "County Name": "Los Angeles",
+                "Constr Status": "Under Construction",
+                "Number Of Units": 92,
+            }
+        ],
+    )
+
+    @contextmanager
+    def fake_session_factory() -> Session:
+        yield postgres_session
+
+    monkeypatch.setattr("tcg_pipeline.cli.get_session_factory", lambda: fake_session_factory)
+
+    seed_result = runner.invoke(
+        app,
+        ["seed-costar", str(costar_path), "--market", "los_angeles", "--defer-resolve"],
+    )
+    assert seed_result.exit_code == 0
+
+    project_id = postgres_session.execute(
+        select(ProjectIdentifier.project_id).where(
+            ProjectIdentifier.identifier_type == IdentifierType.COSTAR_PROPERTY_ID,
+            ProjectIdentifier.value == "CST-RESOLVE-ALL-1",
+        )
+    ).scalar_one()
+    project = postgres_session.get(Project, project_id)
+    assert project is not None
+    assert project.last_evidence_date is None
+    assert _count_rows(postgres_session, ResolutionLog) == 0
+    assert _count_rows(postgres_session, StatusHistory) == 1
+
+    resolve_all(market="los_angeles", apply=True, clear_log=True, limit=1, batch_size=1)
+    postgres_session.expire_all()
+    project = postgres_session.get(Project, project_id)
+
+    assert project is not None
+    assert project.last_evidence_date is not None
+    assert project.confidence_reason is not None
+    assert project.likelihood is not None
+    assert _count_rows(postgres_session, ResolutionLog) > 0
+    assert _count_rows(postgres_session, StatusHistory) == 1
+
+
 def test_persist_costar_import_result_writes_costar_evidence(
     postgres_session: Session,
     tmp_path: Path,
@@ -542,6 +730,10 @@ def test_persist_costar_import_result_writes_costar_evidence(
         "value": "Costar Dev",
         "confidence": None,
     }
+
+
+def _count_rows(session: Session, model: type[object]) -> int:
+    return session.execute(select(func.count()).select_from(model)).scalar_one()
 
 
 def _build_pipedream_workbook(path: Path, rows: list[dict[str, object]]) -> Path:
